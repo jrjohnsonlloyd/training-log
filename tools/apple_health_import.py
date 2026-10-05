@@ -188,15 +188,15 @@ def merge_sessions(entries, gap_min):
             act, _ = seg_info(w); parts.append('%s %d min' % (words(act), w['durationMin']))
         note = 'Apple Health: ' + ' + '.join(parts) + (' · %d kcal' % kcal if kcal else '')
         m = dict(first); m.update({'durationMin': span, 'type': kind, 'exercises': [e for w in g for e in w['exercises']],
-                                  'avgHr': avg, 'maxHr': mx, 'notes': note, 'kcal': kcal, 'activity': 'Merged', 'segments': len(g)})
+                                  'avgHr': avg, 'maxHr': mx, 'notes': note, 'kcal': kcal, 'activity': 'Merged', 'segments': len(g),
+                                  'segs': sorted({classify(seg_info(w)[0])[1] or words(seg_info(w)[0]) for w in g})})
         out.append(m)
     return out
 
 def apply_filters(entries, min_minutes, walk_min, skip):
     kept = []
     for w in entries:
-        acts = {seg_info(e)[0] for e in [w]} if w.get('activity') != 'Merged' else {a for a in (ex['name'] for ex in w['exercises'])}
-        names = {ex['name'] for ex in w['exercises']} or {words(seg_info(w)[0])}
+        names = set(w.get('segs') or []) or {ex['name'] for ex in w['exercises']} or {classify(seg_info(w)[0])[1] or words(seg_info(w)[0])}
         if skip and names and names <= set(skip): continue
         if w['durationMin'] < min_minutes: continue
         if names and names <= {'Walk'} and w['durationMin'] < walk_min: continue
@@ -247,6 +247,10 @@ def main():
     print('Reading', args.export, '...')
     if args.export.lower().endswith('.json'):
         prev = json.load(open(args.export)); apple = [w for w in prev.get('workouts', prev) if str(w.get('id', '')).startswith('ah-')]
+        for w in apple:
+            if not w.get('exercises'):
+                name = classify(seg_info(w)[0])[1]
+                if name: w['exercises'] = [{'name': name, 'kind': 'cardio', 'minutes': w['durationMin'], 'distance': 0}]
         if since_ts: apple = [w for w in apple if w['startedAt'] / 1000 >= since_ts]
         hr = []
     else:
