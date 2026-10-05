@@ -28,6 +28,8 @@ Nothing leaves the phone. Workouts are stored in the browser's storage for this 
 
 4. Get `training-log-import.json` onto the phone and use Settings → **Restore from file**.
 
+The watch tends to split one gym visit into several short workouts (strength, then core, then functional) and auto-detects walks. By default the script stitches workouts that start within 20 minutes of the previous one ending into one session (`--merge-gap`), drops anything under 10 minutes (`--min-minutes`), and drops walk-only sessions under 30 minutes (`--walk-min`; use `--walk-min 9999` to leave walks out entirely). `--skip Walk 'Core training'` leaves named activities out. You can also re-run the script on a previous `training-log-import.json` to change these without re-reading the export.
+
 What it does: workouts you logged in the app that overlap an Apple workout get their average and max heart rate filled in (and a start time, if the entry was logged by hand). Apple workouts you never logged become their own entries: runs, walks, rides and the like as cardio with distance and time, strength sessions as a timed session with no sets (Apple doesn't record sets), yoga and stretching as mobility. Ids are stable, so running it again never duplicates anything. `--since` keeps the file small; `--units` should match the app's settings.
 
 ## How it's built

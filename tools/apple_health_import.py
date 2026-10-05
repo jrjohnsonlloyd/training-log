@@ -42,11 +42,13 @@ def words(camel):
 def activity_name(raw):
     return raw.replace('HKWorkoutActivityType', '')
 
+STRENGTH_NAMES = {'TraditionalStrengthTraining': 'Strength training', 'FunctionalStrengthTraining': 'Functional strength', 'CoreTraining': 'Core training'}
+
 def classify(act):
     if act in CARDIO: return 'Cardio', CARDIO[act]
-    if act in STRENGTH: return 'Strength', None
+    if act in STRENGTH: return 'Strength', STRENGTH_NAMES[act]
     if act in MOBILITY: return 'Mobility', words(act)
-    if act in OTHER: return 'Other', None
+    if act in OTHER: return 'Other', words(act)
     return 'Sport', words(act)
 
 def parse_date(s):  # "2026-10-03 07:12:45 -0400"
@@ -145,8 +147,61 @@ def to_app(w, wunit, dunit):
         'date': w['start'].strftime('%Y-%m-%d'), 'startedAt': start_ms, 'durationMin': dur, 'type': kind,
         'exercises': exercises, 'avgHr': round(w['avg']) if w['avg'] else None, 'maxHr': round(w['max']) if w['max'] else None,
         'rpe': None, 'notes': note, 'weightUnit': wunit, 'distUnit': dunit, 'prs': [], 'createdAt': start_ms,
-        'source': 'apple-health',
+        'source': 'apple-health', 'activity': w['activity'], 'kcal': round(w['kcal']) if w['kcal'] else None,
     }
+
+def seg_info(w):
+    """Activity name and kcal of an app-shaped Apple entry (fields, or parsed from the note)."""
+    act = w.get('activity'); kcal = w.get('kcal')
+    m = re.match(r'Apple Health: ([^·]+?)(?: · (\d+) kcal)?(?: · |$)', w.get('notes', ''))
+    if not act and m: act = m.group(1).strip().replace(' ', '')
+    if kcal is None and m and m.group(2): kcal = int(m.group(2))
+    return act or 'Other', kcal
+
+def merge_sessions(entries, gap_min):
+    """Apple splits one gym visit into several watch workouts; stitch consecutive ones
+    (same day, started within gap_min of the previous one ending) into a single session."""
+    entries = sorted(entries, key=lambda w: w['startedAt'])
+    groups = []
+    for w in entries:
+        g = groups[-1] if groups else None
+        if g and w['date'] == g[-1]['date'] and w['startedAt'] - (g[-1]['startedAt'] + g[-1]['durationMin'] * 60000) <= gap_min * 60000:
+            g.append(w)
+        else:
+            groups.append([w])
+    out = []
+    for g in groups:
+        if len(g) == 1: out.append(g[0]); continue
+        first, last = g[0], g[-1]
+        span = max(1, round((last['startedAt'] + last['durationMin'] * 60000 - first['startedAt']) / 60000))
+        mins = {}
+        for w in g: mins[w['type']] = mins.get(w['type'], 0) + w['durationMin']
+        total = sum(mins.values())
+        kind = max(mins, key=mins.get)
+        if mins.get('Strength', 0) >= max(10, 0.3 * total): kind = 'Strength'
+        hrw = [(w['avgHr'], w['durationMin']) for w in g if w.get('avgHr')]
+        avg = round(sum(a * d for a, d in hrw) / sum(d for _, d in hrw)) if hrw else None
+        mx = max([w['maxHr'] for w in g if w.get('maxHr')] or [None])
+        kcal = sum(seg_info(w)[1] or 0 for w in g) or None
+        parts = []
+        for w in g:
+            act, _ = seg_info(w); parts.append('%s %d min' % (words(act), w['durationMin']))
+        note = 'Apple Health: ' + ' + '.join(parts) + (' · %d kcal' % kcal if kcal else '')
+        m = dict(first); m.update({'durationMin': span, 'type': kind, 'exercises': [e for w in g for e in w['exercises']],
+                                  'avgHr': avg, 'maxHr': mx, 'notes': note, 'kcal': kcal, 'activity': 'Merged', 'segments': len(g)})
+        out.append(m)
+    return out
+
+def apply_filters(entries, min_minutes, walk_min, skip):
+    kept = []
+    for w in entries:
+        acts = {seg_info(e)[0] for e in [w]} if w.get('activity') != 'Merged' else {a for a in (ex['name'] for ex in w['exercises'])}
+        names = {ex['name'] for ex in w['exercises']} or {words(seg_info(w)[0])}
+        if skip and names and names <= set(skip): continue
+        if w['durationMin'] < min_minutes: continue
+        if names and names <= {'Walk'} and w['durationMin'] < walk_min: continue
+        kept.append(w)
+    return kept
 
 def merge(existing, apple):
     """Fill heart rate on logged workouts that overlap an Apple workout; return (updates, new)."""
@@ -180,17 +235,31 @@ def main():
     p.add_argument('--backup', help='a backup JSON from the app, to fill heart rate into logged workouts')
     p.add_argument('--since', help='ignore workouts before this date (YYYY-MM-DD)')
     p.add_argument('--units', nargs=2, metavar=('WEIGHT', 'DISTANCE'), default=['lb', 'mi'], help='lb|kg and mi|km, as set in the app')
+    p.add_argument('--merge-gap', type=int, default=20, metavar='MIN', help='stitch workouts that start within MIN minutes of the previous one ending into one session (0 = off, default 20)')
+    p.add_argument('--min-minutes', type=int, default=10, metavar='MIN', help='drop sessions shorter than MIN minutes (default 10)')
+    p.add_argument('--walk-min', type=int, default=30, metavar='MIN', help='drop walk-only sessions shorter than MIN minutes (default 30; use 9999 to drop all walks)')
+    p.add_argument('--skip', nargs='*', default=[], metavar='NAME', help="exercise names to leave out entirely, e.g. --skip Walk 'Core training'")
     p.add_argument('-o', '--out', default='training-log-import.json')
     args = p.parse_args()
     wunit = 'kg' if args.units[0] == 'kg' else 'lb'; dunit = 'km' if args.units[1] == 'km' else 'mi'
     since_ts = dt.datetime.strptime(args.since, '%Y-%m-%d').replace(tzinfo=dt.timezone.utc).timestamp() - 86400 if args.since else 0
 
     print('Reading', args.export, '...')
-    workouts, hr = scan(open_export(args.export), since_ts)
-    fill_hr_from_samples(workouts, hr)
-    apple = [to_app(w, wunit, dunit) for w in workouts]
+    if args.export.lower().endswith('.json'):
+        prev = json.load(open(args.export)); apple = [w for w in prev.get('workouts', prev) if str(w.get('id', '')).startswith('ah-')]
+        if since_ts: apple = [w for w in apple if w['startedAt'] / 1000 >= since_ts]
+        hr = []
+    else:
+        workouts, hr = scan(open_export(args.export), since_ts)
+        fill_hr_from_samples(workouts, hr)
+        apple = [to_app(w, wunit, dunit) for w in workouts]
     apple.sort(key=lambda w: w['startedAt'])
     print('Found %d workouts (%d heart-rate samples read)' % (len(apple), len(hr)))
+    raw_n = len(apple)
+    if args.merge_gap > 0: apple = merge_sessions(apple, args.merge_gap)
+    merged_n = len(apple)
+    apple = apply_filters(apple, args.min_minutes, args.walk_min, args.skip)
+    print('After stitching split sessions (%d) and dropping short ones (%d): %d sessions' % (raw_n - merged_n, merged_n - len(apple), len(apple)))
     if apple: print('  from %s to %s' % (apple[0]['date'], apple[-1]['date']))
     counts = {}
     for w in apple: counts[w['type']] = counts.get(w['type'], 0) + 1
