@@ -358,13 +358,22 @@ async function restoreFromFile(file){
   try { data = JSON.parse(await file.text()); } catch (e) { setStatus('That file is not a Training Log backup.', 'warn'); return; }
   const list = Array.isArray(data) ? data : (data && Array.isArray(data.workouts) ? data.workouts : null);
   if (!list) { setStatus('That file is not a Training Log backup.', 'warn'); return; }
-  const have = new Set(state.workouts.map(w => w.id)); let added = 0;
-  list.forEach(w => { if (w && w.id && w.date && !have.has(w.id)) { state.workouts.push(w); have.add(w.id); added++; } });
+  const byId = new Map(state.workouts.map(w => [w.id, w])); let added = 0, updated = 0;
+  list.forEach(w => {
+    if (!w || !w.id || !w.date) return;
+    const ex = byId.get(w.id);
+    if (!ex) { state.workouts.push(w); byId.set(w.id, w); added++; return; }
+    let ch = false;
+    ['avgHr', 'maxHr', 'rpe', 'startedAt', 'durationMin'].forEach(k => { if (!ex[k] && w[k]) { ex[k] = w[k]; ch = true; } });
+    if (!ex.notes && w.notes) { ex.notes = w.notes; ch = true; }
+    if (ch) updated++;
+  });
   sortWorkouts();
   try { lsPut('workouts', state.workouts); if (data.settings && !lsGet('settings', null)) { state.settings = Object.assign({}, DEFAULT_SETTINGS, data.settings); lsPut('settings', state.settings); } }
   catch (e) { setStatus('Could not restore: ' + e.message, 'warn'); return; }
   lastKey = ''; render(); renderBackupInfo();
-  setStatus(added ? 'Restored ' + added + (added === 1 ? ' workout.' : ' workouts.') : 'Nothing new in that backup; every workout in it is already here.', 'ok');
+  const parts = []; if (added) parts.push('added ' + added + (added === 1 ? ' workout' : ' workouts')); if (updated) parts.push('filled in details on ' + updated);
+  setStatus(parts.length ? 'Restored: ' + parts.join(', ') + '.' : 'Nothing new in that file; everything in it is already here.', 'ok');
 }
 function sortWorkouts(){ state.workouts.sort((a, b) => String(b.date).localeCompare(String(a.date)) || (b.startedAt || 0) - (a.startedAt || 0)); }
 let activeWriting = false, activeDirty = false;
@@ -743,7 +752,7 @@ view.addEventListener('click', async ev => {
     state.active = { startedAt: Date.now(), type: last.type || 'Strength', exercises: (last.exercises || []).map(e => newExercise(e.name, e.kind)) };
     render(); persistActive(); setStatus('Loaded ' + state.active.exercises.length + ' exercises from ' + shortDate(last.date) + ' with last time\'s numbers. Tick each set as you go.', 'ok');
   }
-  else if (act === 'manual') { state.active = { manual: true, startedAt: Date.now(), date: todayStr(), durationMin: 45, type: 'Strength', exercises: [] }; render(); persistActive(); }
+  else if (act === 'manual') { state.active = { manual: true, startedAt: null, date: todayStr(), durationMin: 45, type: 'Strength', exercises: [] }; render(); persistActive(); }
   else if (act === 'edit') {
     if (state.active) { setStatus('Finish or discard the current session before editing a past workout.', 'warn'); return; }
     const w = state.workouts.find(x => x.id === b.dataset.id); if (!w) return;
