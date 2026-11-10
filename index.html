@@ -249,6 +249,16 @@ details.hist summary::-webkit-details-marker{display:none}
       <button class="btn small" id="restoreBtn">Restore from file</button>
       <input type="file" id="restoreFile" accept="application/json,.json" hidden>
     </div>
+    <h3 style="margin-top:18px">Cloud sync</h3>
+    <p class="hr-note" id="syncInfo"></p>
+    <div class="row">
+      <label class="f">GitHub repository<input type="text" id="syncRepo" placeholder="owner/name" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
+      <label class="f">Access token<input type="password" id="syncToken" placeholder="github_pat_..." autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
+    </div>
+    <div class="chip-row">
+      <button class="btn small" id="syncSave">Save and sync now</button>
+      <button class="btn small" id="syncOff">Turn off</button>
+    </div>
   </div>
 
   <div class="status" id="status" role="status" aria-live="polite"></div>
@@ -325,9 +335,9 @@ const store = {
     try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}
     render();
   },
-  async saveWorkout(w){ const i = state.workouts.findIndex(x => x.id === w.id); if (i >= 0) state.workouts[i] = w; else state.workouts.push(w); sortWorkouts(); lsPut('workouts', state.workouts); render(); },
-  async deleteWorkout(id){ state.workouts = state.workouts.filter(x => x.id !== id); lsPut('workouts', state.workouts); render(); },
-  async saveSettings(s){ state.settings = s; lsPut('settings', s); render(); },
+  async saveWorkout(w){ const i = state.workouts.findIndex(x => x.id === w.id); if (i >= 0) state.workouts[i] = w; else state.workouts.push(w); sortWorkouts(); lsPut('workouts', state.workouts); queueSync(); render(); },
+  async deleteWorkout(id){ state.workouts = state.workouts.filter(x => x.id !== id); lsPut('workouts', state.workouts); queueSync(); render(); },
+  async saveSettings(s){ state.settings = s; lsPut('settings', s); queueSync(); render(); },
   async saveActive(a){ lsPut('active', a); }
 };
 function backupName(){ return 'training-log-backup-' + todayStr() + '.json'; }
@@ -371,9 +381,57 @@ async function restoreFromFile(file){
   sortWorkouts();
   try { lsPut('workouts', state.workouts); if (data.settings && !lsGet('settings', null)) { state.settings = Object.assign({}, DEFAULT_SETTINGS, data.settings); lsPut('settings', state.settings); } }
   catch (e) { setStatus('Could not restore: ' + e.message, 'warn'); return; }
-  lastKey = ''; render(); renderBackupInfo();
+  lastKey = ''; render(); renderBackupInfo(); queueSync();
   const parts = []; if (added) parts.push('added ' + added + (added === 1 ? ' workout' : ' workouts')); if (updated) parts.push('filled in details on ' + updated);
   setStatus(parts.length ? 'Restored: ' + parts.join(', ') + '.' : 'Nothing new in that file; everything in it is already here.', 'ok');
+}
+/* ---------- cloud sync: pushes the same backup file to a private GitHub repository after every change (one way, phone -> GitHub) ---------- */
+const SYNC_FILE = 'training-log.json', SYNC_DEFAULT_REPO = 'jrjohnsonlloyd/training-data';
+let syncTimer = null, syncBusy = false, syncAgain = false;
+function syncCfg(){ const c = lsGet('sync', null); return c && c.repo && c.token ? c : null; }
+function b64utf8(s){ const bytes = new TextEncoder().encode(s); let bin = ''; for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)); return btoa(bin); }
+function lastSyncText(){ const t = lsGet('lastSync', null); return t ? new Date(t).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : 'never'; }
+function renderSyncInfo(){
+  const el = $('#syncInfo'); if (!el) return; const cfg = syncCfg(), err = lsGet('syncErr', null);
+  el.textContent = cfg
+    ? 'On · ' + cfg.repo + ' · last synced: ' + lastSyncText() + (err ? ' · last attempt failed: ' + err : (lsGet('syncDirty', false) ? ' · changes waiting to sync' : '')) + '.'
+    : 'Off. Turn it on to copy every saved workout to a private GitHub repository, so it can be read away from the phone. The token stays on this phone and is never part of the backup file.';
+}
+function queueSync(delay){ if (!syncCfg()) return; lsSet('syncDirty', true); clearTimeout(syncTimer); syncTimer = setTimeout(() => { syncNow(false); }, delay == null ? 1500 : delay); }
+function ghFile(cfg, method, body){
+  return fetch('https://api.github.com/repos/' + cfg.repo + '/contents/' + SYNC_FILE + (method === 'GET' ? '?t=' + Date.now() : ''), {
+    method: method, cache: 'no-store',
+    headers: { 'Authorization': 'Bearer ' + cfg.token, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
+    body: body ? JSON.stringify(body) : undefined });
+}
+async function remoteSha(cfg){
+  const r = await ghFile(cfg, 'GET'); if (r.status === 404) return null;
+  if (!r.ok) throw new Error(r.status === 401 ? 'the token was rejected' : 'GitHub answered ' + r.status);
+  const j = await r.json(); return j && j.sha || null;
+}
+async function syncNow(manual){
+  const cfg = syncCfg();
+  if (!cfg) { if (manual) setStatus('Add the repository and the access token first.', 'warn'); return false; }
+  if (syncBusy) { syncAgain = true; return false; }
+  if (navigator.onLine === false) { if (manual) setStatus('Offline. It will sync when the phone is back online.', 'warn'); return false; }
+  syncBusy = true; clearTimeout(syncTimer);
+  try {
+    let sha = lsGet('syncSha', null);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (!sha) sha = await remoteSha(cfg);
+      const body = { message: 'Sync from phone ' + new Date().toISOString(), content: b64utf8(backupJson()) }; if (sha) body.sha = sha;
+      const r = await ghFile(cfg, 'PUT', body);
+      if (r.ok) {
+        const j = await r.json(); lsSet('syncSha', j && j.content && j.content.sha || null); lsSet('lastSync', Date.now()); lsSet('syncDirty', null); lsSet('syncErr', null);
+        renderSyncInfo(); if (manual) setStatus('Synced ' + state.workouts.length + (state.workouts.length === 1 ? ' workout' : ' workouts') + ' to ' + cfg.repo + '.', 'ok'); return true;
+      }
+      if ((r.status === 409 || r.status === 422) && attempt === 0) { sha = null; lsSet('syncSha', null); continue; }
+      throw new Error(r.status === 401 ? 'the token was rejected' : (r.status === 404 || r.status === 403) ? 'the repository was not found or the token cannot write to it' : 'GitHub answered ' + r.status);
+    }
+    return false;
+  } catch (e) {
+    const msg = e && e.message || String(e); lsSet('syncErr', msg); renderSyncInfo(); if (manual) setStatus('Sync failed: ' + msg + '.', 'warn'); return false;
+  } finally { syncBusy = false; if (syncAgain) { syncAgain = false; queueSync(2000); } }
 }
 function sortWorkouts(){ state.workouts.sort((a, b) => String(b.date).localeCompare(String(a.date)) || (b.startedAt || 0) - (a.startedAt || 0)); }
 let activeWriting = false, activeDirty = false;
@@ -480,7 +538,9 @@ function renderToday(){
   } else {
     html += '<section><div class="empty">No workouts yet. Your first session will show up here, and the Progress tab fills in after a few.</div></section>';
   }
-  html += '<section><p class="hr-note">Saved on this phone only. Last backup: ' + lastBackupText() + '. <button class="btn small" data-action="open-settings">Back up now</button></p></section>';
+  html += syncCfg()
+    ? '<section><p class="hr-note">Saved on this phone and synced to GitHub. Last synced: ' + lastSyncText() + (lsGet('syncErr', null) ? ' (the last attempt failed)' : '') + '. <button class="btn small" data-action="open-settings">Sync settings</button></p></section>'
+    : '<section><p class="hr-note">Saved on this phone only. Last backup: ' + lastBackupText() + '. <button class="btn small" data-action="open-settings">Back up now</button></p></section>';
   view.innerHTML = html;
 }
 
@@ -838,13 +898,24 @@ async function finishWorkout(){
 
 /* ---------- tabs & settings ---------- */
 $('#tabs').addEventListener('click', ev => { const b = ev.target.closest('button[data-tab]'); if (!b) return; state.tab = b.dataset.tab; lsSet('tab', state.tab); render(); window.scrollTo({ top: 0 }); });
-function openSettings(open){ const p = $('#settingsPanel'); p.hidden = !open; $('#settingsBtn').setAttribute('aria-expanded', String(open)); if (open) { $('#setTarget').value = state.settings.weeklyTarget; $('#setRest').value = state.settings.restSec || 90; $('#setWeight').value = state.settings.weightUnit; $('#setDist').value = state.settings.distUnit; const th = $('#setTheme'); if (th) th.value = state.settings.theme || 'system'; renderBackupInfo(); } }
+function openSettings(open){ const p = $('#settingsPanel'); p.hidden = !open; $('#settingsBtn').setAttribute('aria-expanded', String(open)); if (open) { $('#setTarget').value = state.settings.weeklyTarget; $('#setRest').value = state.settings.restSec || 90; $('#setWeight').value = state.settings.weightUnit; $('#setDist').value = state.settings.distUnit; const th = $('#setTheme'); if (th) th.value = state.settings.theme || 'system'; renderBackupInfo(); const sc = lsGet('sync', null); $('#syncRepo').value = sc && sc.repo || SYNC_DEFAULT_REPO; $('#syncToken').value = ''; $('#syncToken').placeholder = sc && sc.token ? 'saved on this phone (leave blank to keep)' : 'github_pat_...'; renderSyncInfo(); } }
 $('#settingsBtn').addEventListener('click', () => openSettings($('#settingsPanel').hidden));
 $('#shareBackup').addEventListener('click', shareBackup);
 $('#downloadBackup').addEventListener('click', downloadBackup);
 $('#copyBackup').addEventListener('click', copyBackup);
 $('#restoreBtn').addEventListener('click', () => $('#restoreFile').click());
 $('#restoreFile').addEventListener('change', ev => { const f = ev.target.files && ev.target.files[0]; if (f) restoreFromFile(f); ev.target.value = ''; });
+$('#syncSave').addEventListener('click', async () => {
+  const old = lsGet('sync', null), repo = $('#syncRepo').value.trim().replace(/^https?:\/\/github\.com\//i, '').replace(/\.git$/i, '').replace(/\/+$/, ''), token = $('#syncToken').value.trim() || (old && old.token) || '';
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) { setStatus('Write the repository as owner/name, for example ' + SYNC_DEFAULT_REPO + '.', 'warn'); return; }
+  if (!token) { setStatus('Paste the GitHub access token for that repository.', 'warn'); return; }
+  if (!old || old.repo !== repo) lsSet('syncSha', null);
+  lsSet('sync', { repo: repo, token: token }); lsSet('syncDirty', true); $('#syncToken').value = ''; $('#syncToken').placeholder = 'saved on this phone (leave blank to keep)'; renderSyncInfo();
+  setStatus('Syncing...'); await syncNow(true);
+});
+$('#syncOff').addEventListener('click', () => { clearTimeout(syncTimer); ['sync', 'syncSha', 'syncDirty', 'syncErr'].forEach(k => lsSet(k, null)); $('#syncToken').value = ''; $('#syncToken').placeholder = 'github_pat_...'; renderSyncInfo(); setStatus('Cloud sync is off. The token was removed from this phone.', 'ok'); });
+window.addEventListener('online', () => { if (lsGet('syncDirty', false)) queueSync(1000); });
+document.addEventListener('visibilitychange', () => { if (!lsGet('syncDirty', false)) return; if (document.visibilityState === 'hidden') syncNow(false); else queueSync(1000); });
 if ('serviceWorker' in navigator) { window.addEventListener('load', () => { navigator.serviceWorker.register('./sw.js').catch(() => {}); }); }
 $('#closeSettings').addEventListener('click', () => openSettings(false));
 $('#saveSettings').addEventListener('click', async () => {
@@ -859,7 +930,7 @@ const hash = (location.hash || '').slice(1); const savedTab = lsGet('tab', 'toda
 state.tab = ['today', 'progress', 'history'].includes(hash) ? hash : (['today', 'progress', 'history'].includes(savedTab) ? savedTab : 'today');
 state.progEx = lsGet('progEx', null); state.progMetric = ['e1rm', 'top', 'vol'].includes(lsGet('progMetric', 'e1rm')) ? lsGet('progMetric', 'e1rm') : 'e1rm';
 render();
-store.init();
+store.init().then(() => { if (lsGet('syncDirty', false)) queueSync(2500); });
 })();
 </script>
 </body>

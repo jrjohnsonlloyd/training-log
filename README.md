@@ -12,7 +12,17 @@ An installable workout tracker for iPhone. Log a session live with a timer, add 
 
 ## Your data
 
-Nothing leaves the phone. Workouts are stored in the browser's storage for this app. Use Settings (gear icon) → **Share backup** to save a JSON file to Google Drive or Files, and **Restore from file** to bring it back on a new phone. Back up now and then; deleting the app deletes its data.
+By default nothing leaves the phone. Workouts are stored in the browser's storage for this app. Use Settings (gear icon) → **Share backup** to save a JSON file to Google Drive or Files, and **Restore from file** to bring it back on a new phone. Back up now and then; deleting the app deletes its data.
+
+## Cloud sync (optional)
+
+Settings → **Cloud sync** copies the same backup file to a private GitHub repository every time a workout or setting is saved, so the data can be read away from the phone. It is one way: the phone is the source of truth and the file `training-log.json` in the repository is overwritten with each sync. If the phone is offline, the sync waits and runs when it is back online or the app is next opened.
+
+1. Create a private repository to hold the data (for example `training-data`).
+2. On GitHub: Settings → Developer settings → Personal access tokens → **Fine-grained tokens** → Generate new token. Repository access: **Only select repositories** → the data repository. Permissions → Repository permissions → **Contents: Read and write**. Nothing else.
+3. In the app: Settings → Cloud sync → enter the repository as `owner/name`, paste the token, tap **Save and sync now**.
+
+The token is stored only in this app's storage on the phone. It is never included in the backup file or in what is synced. **Turn off** removes it from the phone.
 
 ## Apple Health import
 
