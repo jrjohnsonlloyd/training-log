@@ -95,6 +95,18 @@ label.f{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--fg
 .ring-bg{fill:none;stroke:var(--grid);stroke-width:8}
 .ring-fg{fill:none;stroke:var(--accent);stroke-width:8;stroke-linecap:round}
 .ring-fg.hit{stroke:var(--good)}
+.ring-fg.over{stroke:var(--critical)}
+.food-item{display:flex;gap:10px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--grid)}
+.food-item:last-child{border-bottom:0}
+.food-item .n{flex:1;min-width:0}
+.food-item .n b{display:block;overflow-wrap:anywhere}
+.food-item .s{font-size:13px;color:var(--fg-2);overflow-wrap:anywhere}
+.food-item .k{font-family:var(--display);font-weight:800;font-size:20px;white-space:nowrap;text-align:right}
+.food-item .k small{display:block;font-family:var(--body);font-weight:600;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.food-item .chip-row{margin-top:6px}
+.frow{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:10px;align-items:end}
+.daynav{display:flex;gap:8px;align-items:center}
+.daynav b{flex:1;text-align:center}
 .ring-t{font-family:var(--display);font-weight:800;font-size:22px;fill:var(--fg)}
 .ring-s{font-size:9px;font-weight:700;letter-spacing:.1em;fill:var(--muted);text-transform:uppercase}
 .tiles{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
@@ -235,6 +247,8 @@ details.hist summary::-webkit-details-marker{display:none}
       <label class="f">Weight unit<select id="setWeight"><option value="lb">Pounds (lb)</option><option value="kg">Kilograms (kg)</option></select></label>
       <label class="f">Distance unit<select id="setDist"><option value="mi">Miles</option><option value="km">Kilometers</option></select></label>
       <label class="f">Appearance<select id="setTheme"><option value="system">Match the phone</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
+      <label class="f">Daily calorie target (kcal)<input type="number" id="setKcal" min="0" max="10000" step="50" inputmode="numeric" placeholder="none"></label>
+      <label class="f">Daily protein target (g, optional)<input type="number" id="setProtein" min="0" max="500" step="5" inputmode="numeric" placeholder="none"></label>
     </div>
     <div class="btn-row">
       <button class="btn primary" id="saveSettings">Save settings</button>
@@ -264,6 +278,8 @@ details.hist summary::-webkit-details-marker{display:none}
   <div class="status" id="status" role="status" aria-live="polite"></div>
   <main id="view"></main>
   <datalist id="exnames"></datalist>
+  <datalist id="foodnames"></datalist>
+  <input type="file" id="foodPhoto" accept="image/*" hidden>
 </div>
 
 <div class="restbar" id="restbar" hidden>
@@ -279,6 +295,7 @@ details.hist summary::-webkit-details-marker{display:none}
 <nav class="tabbar" role="tablist" id="tabs">
   <div class="tabbar-in">
     <button role="tab" data-tab="today" aria-selected="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2 4 14h7l-1 8 9-12h-7z"></path></svg>Today</button>
+    <button role="tab" data-tab="food" aria-selected="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 3v8M4.5 3v5a2.5 2.5 0 0 0 5 0V3M7 11v10"></path><path d="M17 3c-1.7 1.5-2.5 3.8-2.5 6.5V13H17v8"></path></svg>Food</button>
     <button role="tab" data-tab="progress" aria-selected="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 20h18"></path><path d="M5 16l5-6 4 4 6-8"></path></svg>Progress</button>
     <button role="tab" data-tab="history" aria-selected="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"></path></svg>History</button>
   </div>
@@ -287,14 +304,16 @@ details.hist summary::-webkit-details-marker{display:none}
 <script>
 (function(){
 'use strict';
-const DEFAULT_SETTINGS = { weeklyTarget: 4, weightUnit: 'lb', distUnit: 'mi', restSec: 90, theme: 'system' };
+const DEFAULT_SETTINGS = { weeklyTarget: 4, weightUnit: 'lb', distUnit: 'mi', restSec: 90, theme: 'system', kcalTarget: 1900, proteinTarget: 0 };
+const TABS = ['today', 'food', 'progress', 'history'];
 const TYPES = ['Strength', 'Cardio', 'Mobility', 'Sport', 'Other'];
 const STARTER_NAMES = ['Squat','Bench press','Deadlift','Overhead press','Barbell row','Pull-up','Lat pulldown','Leg press','Romanian deadlift','Dumbbell curl','Dip','Run','Cycle','Row (erg)','Walk'];
 const CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5L20 7"></path></svg>';
 const state = {
   workouts: [], settings: Object.assign({}, DEFAULT_SETTINGS), active: null, rest: null,
   tab: 'today', loaded: false, backend: 'none', canWrite: true,
-  progEx: null, progMetric: 'e1rm', confirmDelete: null, confirmDiscard: false
+  progEx: null, progMetric: 'e1rm', confirmDelete: null, confirmDiscard: false,
+  food: { entries: [], saved: [] }, foodLib: [], foodDate: null, foodForm: null, foodResults: null, foodConfirmDel: null, foodBusy: false, foodRev: 0
 };
 const $ = s => document.querySelector(s);
 const view = $('#view');
@@ -331,6 +350,7 @@ const store = {
     state.workouts = lsGet('workouts', []); sortWorkouts();
     state.settings = Object.assign({}, DEFAULT_SETTINGS, lsGet('settings', {}));
     state.active = lsGet('active', null);
+    const fd = lsGet('food', null); state.food = { entries: fd && Array.isArray(fd.entries) ? fd.entries : [], saved: fd && Array.isArray(fd.saved) ? fd.saved : [] };
     state.loaded = true;
     try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}
     render();
@@ -341,7 +361,7 @@ const store = {
   async saveActive(a){ lsPut('active', a); }
 };
 function backupName(){ return 'training-log-backup-' + todayStr() + '.json'; }
-function backupJson(){ return JSON.stringify({ app: 'training-log', version: 1, exportedAt: new Date().toISOString(), settings: state.settings, workouts: state.workouts }, null, 1); }
+function backupJson(){ return JSON.stringify({ app: 'training-log', version: 1, exportedAt: new Date().toISOString(), settings: state.settings, workouts: state.workouts, food: state.food }, null, 1); }
 function lastBackupText(){ const t = lsGet('lastBackup', null); return t ? new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'never'; }
 function markBackedUp(){ lsSet('lastBackup', Date.now()); renderBackupInfo(); lastKey = ''; render(); }
 function renderBackupInfo(){ const el = $('#backupInfo'); if (el) el.textContent = state.workouts.length + (state.workouts.length === 1 ? ' workout' : ' workouts') + ' stored on this device · last backup: ' + lastBackupText() + '. Save the file to Google Drive to keep a copy off the phone.'; }
@@ -379,10 +399,16 @@ async function restoreFromFile(file){
     if (ch) updated++;
   });
   sortWorkouts();
-  try { lsPut('workouts', state.workouts); if (data.settings && !lsGet('settings', null)) { state.settings = Object.assign({}, DEFAULT_SETTINGS, data.settings); lsPut('settings', state.settings); } }
+  let foodAdded = 0;
+  if (data && data.food && typeof data.food === 'object') {
+    const ids = new Set(state.food.entries.map(e => e.id)), names = new Set(state.food.saved.map(s => norm(s.name)));
+    (Array.isArray(data.food.entries) ? data.food.entries : []).forEach(e => { if (e && e.id && e.date && !ids.has(e.id)) { state.food.entries.push(e); ids.add(e.id); foodAdded++; } });
+    (Array.isArray(data.food.saved) ? data.food.saved : []).forEach(s => { if (s && s.name && !names.has(norm(s.name))) { state.food.saved.push(s); names.add(norm(s.name)); } });
+  }
+  try { lsPut('food', state.food); lsPut('workouts', state.workouts); if (data.settings && !lsGet('settings', null)) { state.settings = Object.assign({}, DEFAULT_SETTINGS, data.settings); lsPut('settings', state.settings); } }
   catch (e) { setStatus('Could not restore: ' + e.message, 'warn'); return; }
-  lastKey = ''; render(); renderBackupInfo(); queueSync();
-  const parts = []; if (added) parts.push('added ' + added + (added === 1 ? ' workout' : ' workouts')); if (updated) parts.push('filled in details on ' + updated);
+  state.foodRev++; lastKey = ''; render(); renderBackupInfo(); queueSync();
+  const parts = []; if (added) parts.push('added ' + added + (added === 1 ? ' workout' : ' workouts')); if (foodAdded) parts.push('added ' + foodAdded + (foodAdded === 1 ? ' food entry' : ' food entries')); if (updated) parts.push('filled in details on ' + updated);
   setStatus(parts.length ? 'Restored: ' + parts.join(', ') + '.' : 'Nothing new in that file; everything in it is already here.', 'ok');
 }
 /* ---------- cloud sync: pushes the same backup file to a private GitHub repository after every change (one way, phone -> GitHub) ---------- */
@@ -398,12 +424,13 @@ function renderSyncInfo(){
     : 'Off. Turn it on to copy every saved workout to a private GitHub repository, so it can be read away from the phone. The token stays on this phone and is never part of the backup file.';
 }
 function queueSync(delay){ if (!syncCfg()) return; lsSet('syncDirty', true); clearTimeout(syncTimer); syncTimer = setTimeout(() => { syncNow(false); }, delay == null ? 1500 : delay); }
-function ghFile(cfg, method, body){
-  return fetch('https://api.github.com/repos/' + cfg.repo + '/contents/' + SYNC_FILE + (method === 'GET' ? '?t=' + Date.now() : ''), {
+function ghReq(cfg, method, path, body, raw){
+  return fetch('https://api.github.com/repos/' + cfg.repo + '/contents/' + path + (method === 'GET' ? '?t=' + Date.now() : ''), {
     method: method, cache: 'no-store',
-    headers: { 'Authorization': 'Bearer ' + cfg.token, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
+    headers: { 'Authorization': 'Bearer ' + cfg.token, 'Accept': raw ? 'application/vnd.github.raw+json' : 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
     body: body ? JSON.stringify(body) : undefined });
 }
+function ghFile(cfg, method, body){ return ghReq(cfg, method, SYNC_FILE, body, false); }
 async function remoteSha(cfg){
   const r = await ghFile(cfg, 'GET'); if (r.status === 404) return null;
   if (!r.ok) throw new Error(r.status === 401 ? 'the token was rejected' : 'GitHub answered ' + r.status);
@@ -496,7 +523,7 @@ function exSummary(e, w){
 
 /* ---------- rendering ---------- */
 let lastKey = '';
-function viewKey(){ return JSON.stringify([state.tab, state.loaded, state.backend, state.canWrite, state.settings, state.active, state.workouts.length, state.workouts[0] && state.workouts[0].id, state.progEx, state.progMetric, state.confirmDelete, state.confirmDiscard, lsGet('lastBackup', null)]); }
+function viewKey(){ return JSON.stringify([state.tab, state.loaded, state.backend, state.canWrite, state.settings, state.active, state.workouts.length, state.workouts[0] && state.workouts[0].id, state.progEx, state.progMetric, state.confirmDelete, state.confirmDiscard, lsGet('lastBackup', null), state.foodRev, state.foodDate]); }
 function applyTheme(){ if (window.claude) return; const t = state.settings.theme; if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t); else document.documentElement.removeAttribute('data-theme'); }
 function render(){
   $('#todayLabel').textContent = new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
@@ -507,7 +534,7 @@ function render(){
   if (key === lastKey && view.childElementCount) return;
   lastKey = key;
   stopTimer();
-  if (state.tab === 'today') renderToday(); else if (state.tab === 'progress') renderProgress(); else renderHistory();
+  if (state.tab === 'today') renderToday(); else if (state.tab === 'food') renderFood(); else if (state.tab === 'progress') renderProgress(); else renderHistory();
 }
 function ring(n, target){
   const r = 34, c = 2 * Math.PI * r, p = Math.min(1, n / target);
@@ -538,6 +565,8 @@ function renderToday(){
   } else {
     html += '<section><div class="empty">No workouts yet. Your first session will show up here, and the Progress tab fills in after a few.</div></section>';
   }
+  { const ft = foodTotals(foodDay(today)), kt = Number(state.settings.kcalTarget) || 0;
+    html += '<section><h2>Food today</h2><div class="card"><p style="margin:0 0 10px"><b>' + fmtNum(ft.kcal) + ' kcal</b>' + (kt ? ' of ' + fmtNum(kt) + ' · ' + (kt - ft.kcal >= 0 ? fmtNum(kt - ft.kcal) + ' left' : fmtNum(ft.kcal - kt) + ' over') : '') + (ft.pending ? ' · ' + ft.pending + ' waiting for an estimate' : '') + '</p><button class="btn small" data-action="food-open">Open food log</button></div></section>'; }
   html += syncCfg()
     ? '<section><p class="hr-note">Saved on this phone and synced to GitHub. Last synced: ' + lastSyncText() + (lsGet('syncErr', null) ? ' (the last attempt failed)' : '') + '. <button class="btn small" data-action="open-settings">Sync settings</button></p></section>'
     : '<section><p class="hr-note">Saved on this phone only. Last backup: ' + lastBackupText() + '. <button class="btn small" data-action="open-settings">Back up now</button></p></section>';
@@ -720,6 +749,251 @@ function renderHistory(){
   view.innerHTML = html + '</section>';
 }
 
+/* ---------- food log ---------- */
+const MEALS = ['Breakfast', 'Lunch', 'Dinner', 'Snack'];
+const num1 = v => Math.round((Number(v) || 0) * 10) / 10;
+function mealNow(){ const n = new Date(), h = n.getHours() + n.getMinutes() / 60; return h < 10.5 ? 'Breakfast' : h < 15 ? 'Lunch' : h < 21 ? 'Dinner' : 'Snack'; }
+function blankFoodForm(meal){ return { name: '', qty: 1, kcal: '', protein: '', carbs: '', fat: '', serving: '', meal: MEALS.includes(meal) ? meal : mealNow(), editId: null, source: 'manual' }; }
+function foodDay(d){ return state.food.entries.filter(e => e.date === d).sort((a, b) => (a.at || 0) - (b.at || 0)); }
+function foodTotals(list){ const t = { kcal: 0, protein: 0, carbs: 0, fat: 0, pending: 0, n: 0 }; list.forEach(e => { if (e.status === 'pending') { t.pending++; return; } t.n++; t.kcal += Number(e.kcal) || 0; t.protein += Number(e.protein) || 0; t.carbs += Number(e.carbs) || 0; t.fat += Number(e.fat) || 0; }); return t; }
+function saveFood(){ lsPut('food', state.food); queueSync(); }
+function bumpFood(){ state.foodRev++; render(); }
+function foodDayLabel(d){ return d === todayStr() ? 'Today' : d === dateStr(addDays(new Date(), -1)) ? 'Yesterday' : parseDate(d).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }); }
+function libKey(i){ return norm(i.name) + '|' + norm(i.cat || ''); }
+function mergeLib(base, extra){ const m = new Map(); base.concat(extra).forEach(i => { if (i && i.name && i.kcal != null) m.set(libKey(i), i); }); return Array.from(m.values()); }
+function fillFoodNames(){ const dl = $('#foodnames'); if (!dl) return; const seen = new Set(), out = []; state.food.saved.concat(state.foodLib).forEach(i => { const k = norm(i.name); if (k && !seen.has(k)) { seen.add(k); out.push('<option value="' + esc(i.name) + '"></option>'); } }); dl.innerHTML = out.join(''); }
+async function loadFoodLib(){
+  let items = [];
+  try { const r = await fetch('./food-library.json'); if (r.ok) { const j = await r.json(); if (j && Array.isArray(j.items)) items = j.items; } } catch (e) {}
+  const ex = lsGet('foodLibExtra', null);
+  state.foodLib = mergeLib(items, ex && Array.isArray(ex.items) ? ex.items : []); fillFoodNames();
+  const cfg = syncCfg();
+  if (!cfg || navigator.onLine === false || Date.now() - (lsGet('foodLibExtraAt', 0) || 0) < 12 * 3600 * 1000) return;
+  try {
+    const r = await ghReq(cfg, 'GET', 'food-library.json', null, true); lsSet('foodLibExtraAt', Date.now());
+    if (r.ok) { const j = await r.json(); if (j && Array.isArray(j.items)) { lsSet('foodLibExtra', { items: j.items }); state.foodLib = mergeLib(items, j.items); fillFoodNames(); } }
+  } catch (e) {}
+}
+function foodSearch(q){
+  const terms = norm(q).split(/\s+/).filter(Boolean); if (!terms.length) return [];
+  const pool = state.food.saved.map(s => Object.assign({}, s, { fav: true, cat: 'Favourite' })).concat(state.foodLib), scored = [];
+  pool.forEach(it => {
+    const name = norm(it.name), hay = name + ' ' + norm((it.aka || []).join(' ')) + ' ' + norm(it.cat || ''); let score = 0;
+    for (let k = 0; k < terms.length; k++) { const i = hay.indexOf(terms[k]); if (i < 0) return; score += name.indexOf(terms[k]) === 0 ? 3 : name.indexOf(terms[k]) > 0 ? 2 : 1; }
+    scored.push({ it: it, score: score + (it.fav ? 2 : 0) + (name === norm(q) ? 5 : 0) });
+  });
+  return scored.sort((a, b) => b.score - a.score || String(a.it.name).length - String(b.it.name).length).slice(0, 10).map(x => x.it);
+}
+function offItem(p){
+  const n = p && p.nutriments || {}; if (!p || !p.product_name) return null;
+  const serv = Number(n['energy-kcal_serving']) >= 20 && p.serving_size && n['energy-kcal_100g'] != null, sfx = serv ? '_serving' : '_100g', k = n['energy-kcal' + sfx];
+  if (k == null || isNaN(Number(k))) return null;
+  return { name: (p.brands ? String(p.brands).split(',')[0].trim() + ' ' : '') + p.product_name, cat: 'Packaged', serving: serv ? String(p.serving_size) : '100 g', kcal: Math.round(Number(k)), protein: num1(n['proteins' + sfx]), carbs: num1(n['carbohydrates' + sfx]), fat: num1(n['fat' + sfx]), basis: 'database' };
+}
+async function offSearch(q){
+  const fields = 'code,product_name,brands,serving_size,nutriments', digits = q.replace(/\s+/g, ''), ctrl = new AbortController(), to = setTimeout(() => ctrl.abort(), 25000);
+  try {
+    if (/^\d{8,14}$/.test(digits)) { const r = await fetch('https://world.openfoodfacts.org/api/v2/product/' + digits + '.json?fields=' + fields, { signal: ctrl.signal }); const j = await r.json(); const it = j && j.product ? offItem(j.product) : null; return it ? [it] : []; }
+    const r = await fetch('https://world.openfoodfacts.org/cgi/search.pl?search_terms=' + encodeURIComponent(q) + '&search_simple=1&action=process&json=1&page_size=12&fields=' + fields, { signal: ctrl.signal });
+    if (!r.ok) throw new Error('the food database answered ' + r.status);
+    const j = await r.json(); return (j && Array.isArray(j.products) ? j.products : []).map(offItem).filter(Boolean).slice(0, 8);
+  } finally { clearTimeout(to); }
+}
+function readFoodForm(){ const f = state.foodForm; view.querySelectorAll('[data-ff]').forEach(el => { f[el.dataset.ff] = el.value; }); return f; }
+function entryFromForm(f){
+  const qty = Number(f.qty) > 0 ? Number(f.qty) : 1;
+  return { name: String(f.name || '').trim(), qty: qty, serving: f.serving || '', kcal: Math.round((Number(f.kcal) || 0) * qty), protein: num1((Number(f.protein) || 0) * qty), carbs: num1((Number(f.carbs) || 0) * qty), fat: num1((Number(f.fat) || 0) * qty), meal: MEALS.includes(f.meal) ? f.meal : mealNow(), source: f.source || 'manual' };
+}
+function addFoodEntry(o){ const e = Object.assign({ id: uid(), date: state.foodDate, at: Date.now() }, o); state.food.entries.push(e); return e; }
+function formFromItem(it, f){ return Object.assign(blankFoodForm(f.meal), { name: it.name, kcal: it.kcal, protein: it.protein || '', carbs: it.carbs || '', fat: it.fat || '', serving: it.serving || '', source: it.fav ? 'favourite' : it.cat === 'Packaged' ? 'packaged' : 'library', editId: f.editId || null }); }
+function foodRing(eaten, target){
+  const r = 34, c = 2 * Math.PI * r, p = Math.min(1, eaten / target), left = Math.round(target - eaten);
+  return '<svg class="ring" viewBox="0 0 80 80" width="88" height="88" role="img" aria-label="' + Math.round(eaten) + ' of ' + target + ' calories"><circle cx="40" cy="40" r="' + r + '" class="ring-bg"></circle><circle cx="40" cy="40" r="' + r + '" class="ring-fg' + (left < 0 ? ' over' : '') + '" stroke-dasharray="' + (c * p).toFixed(1) + ' ' + c.toFixed(1) + '" transform="rotate(-90 40 40)"></circle><text x="40" y="43" text-anchor="middle" class="ring-t">' + fmtNum(Math.abs(left)) + '</text><text x="40" y="56" text-anchor="middle" class="ring-s">' + (left < 0 ? 'kcal over' : 'kcal left') + '</text></svg>';
+}
+function foodItemHtml(e){
+  const pending = e.status === 'pending', qty = Number(e.qty) || 1;
+  let sub = pending ? (e.photo ? 'Photo sent' : 'Description sent') + ' · waiting for Claude’s estimate' + (e.est && e.est.notes ? ' · ' + esc(e.est.notes) : '')
+    : (qty !== 1 || e.serving ? esc((qty !== 1 ? fmtNum(qty, 2) + ' × ' : '') + (e.serving || 'serving')) + ' · ' : '') + 'P ' + fmtNum(e.protein, 1) + ' · C ' + fmtNum(e.carbs, 1) + ' · F ' + fmtNum(e.fat, 1) + ' g';
+  if (!pending && e.est) sub += '<br><span class="pill">Claude estimate' + (e.est.confidence ? ' · ' + esc(e.est.confidence) + ' confidence' : '') + '</span>' + (e.est.notes ? ' ' + esc(e.est.notes) : '');
+  const actions = state.foodConfirmDel === e.id
+    ? '<div class="confirm">Delete this entry? <button class="btn small danger" data-action="food-del-yes" data-id="' + esc(e.id) + '">Delete</button><button class="btn small" data-action="food-del-no">Keep</button></div>'
+    : '<div class="chip-row"><button class="btn small" data-action="food-edit" data-id="' + esc(e.id) + '">Edit</button>' + (pending ? '' : '<button class="btn small" data-action="food-fav" data-id="' + esc(e.id) + '">Favourite</button>') + '<button class="btn small ghost danger" data-action="food-del" data-id="' + esc(e.id) + '">Delete</button></div>';
+  return '<div class="food-item"><div class="n"><b>' + esc(e.name || 'Food') + '</b><div class="s">' + sub + '</div>' + actions + '</div><div class="k">' + (pending ? '<span class="pill hot">Pending</span>' : fmtNum(e.kcal) + '<small>kcal</small>') + '</div></div>';
+}
+function renderFood(){
+  if (!state.loaded) { view.innerHTML = '<section><p class="lede">Loading your log…</p></section>'; return; }
+  const d = state.foodDate, today = todayStr(), list = foodDay(d), t = foodTotals(list), f = state.foodForm;
+  const target = Number(state.settings.kcalTarget) || 0, pt = Number(state.settings.proteinTarget) || 0, label = foodDayLabel(d);
+  let html = '<section class="card hero"><div class="txt"><h2>' + fmtNum(t.kcal) + ' kcal ' + (d === today ? 'so far' : 'eaten') + '</h2><p class="lede" style="margin:0">' +
+    (target ? 'Target ' + fmtNum(target) + ' kcal. ' : '') + 'Protein ' + fmtNum(t.protein) + (pt ? ' of ' + fmtNum(pt) : '') + ' g · Carbs ' + fmtNum(t.carbs) + ' g · Fat ' + fmtNum(t.fat) + ' g' +
+    (t.pending ? '. ' + t.pending + (t.pending === 1 ? ' entry is' : ' entries are') + ' waiting for an estimate and not counted yet' : '') + '</p></div>' + (target ? foodRing(t.kcal, target) : '') + '</section>';
+  html += '<section><div class="daynav"><button class="btn small" data-action="food-prev">‹ Earlier</button><b>' + esc(label) + '</b>' +
+    (d !== today ? '<button class="btn small" data-action="food-today">Today</button>' : '') + '<button class="btn small" data-action="food-next"' + (d >= today ? ' disabled' : '') + '>Later ›</button></div></section>';
+  if (state.canWrite) {
+    html += '<section><h2>' + (f.editId ? 'Edit entry' : 'Add food') + '</h2><div class="card">' +
+      '<label class="f">Food or description<input type="text" id="ff-name" data-ff="name" list="foodnames" autocomplete="off" placeholder="chicken adobo, Jollibee Chickenjoy, or a barcode number" value="' + esc(f.name) + '"></label>' +
+      '<div class="frow"><label class="f">Servings<input type="number" id="ff-qty" data-ff="qty" min="0" step="0.25" inputmode="decimal" value="' + esc(f.qty) + '"></label>' +
+      '<label class="f">Kcal per serving<input type="number" id="ff-kcal" data-ff="kcal" min="0" step="1" inputmode="numeric" value="' + esc(f.kcal) + '"></label>' +
+      '<label class="f">Meal<select data-ff="meal">' + MEALS.map(m => '<option' + (m === f.meal ? ' selected' : '') + '>' + m + '</option>').join('') + '</select></label></div>' +
+      '<div class="frow"><label class="f">Protein (g)<input type="number" data-ff="protein" min="0" step="0.1" inputmode="decimal" value="' + esc(f.protein) + '"></label>' +
+      '<label class="f">Carbs (g)<input type="number" data-ff="carbs" min="0" step="0.1" inputmode="decimal" value="' + esc(f.carbs) + '"></label>' +
+      '<label class="f">Fat (g)<input type="number" data-ff="fat" min="0" step="0.1" inputmode="decimal" value="' + esc(f.fat) + '"></label></div>' +
+      (f.serving ? '<p class="hr-note" style="margin:10px 0 0">One serving: ' + esc(f.serving) + '. Change Servings if you had more or less.</p>' : '') +
+      '<div class="btn-row"><button class="btn primary" data-action="food-add">' + (f.editId ? 'Save changes' : 'Add to log') + '</button><button class="btn" data-action="food-find"' + (state.foodBusy ? ' disabled' : '') + '>Find food</button>' + (f.editId ? '<button class="btn" data-action="food-cancel">Cancel</button>' : '') + '</div>' +
+      (f.editId ? '' : '<div class="btn-row"><button class="btn" data-action="food-photo">Photo for Claude</button><button class="btn" data-action="food-ask">Ask Claude to estimate</button></div>' +
+        '<p class="hr-note" style="margin:10px 0 0">Not sure of the numbers? Send a photo or just the description. Claude checks about every 12 hours and fills in an estimate you can correct. Needs Cloud sync on.</p>') +
+      '</div></section>';
+    const res = state.foodResults;
+    if (res) {
+      html += '<section><h2>Matches for “' + esc(res.q) + '”</h2><div class="card">' +
+        (res.items.length ? res.items.map((it, i) => '<div class="food-item"><div class="n"><b>' + esc(it.name) + '</b><div class="s">' + (it.cat ? '<span class="pill">' + esc(it.cat) + '</span> ' : '') + esc(it.serving || '1 serving') + ' · P ' + fmtNum(it.protein, 1) + ' · C ' + fmtNum(it.carbs, 1) + ' · F ' + fmtNum(it.fat, 1) + ' g' + (it.basis === 'estimate' ? ' · approximate' : '') + '</div>' +
+          '<div class="chip-row"><button class="btn small" data-action="food-use" data-i="' + i + '">Use</button><button class="btn small" data-action="food-addnow" data-i="' + i + '">Add 1 serving</button></div></div><div class="k">' + fmtNum(it.kcal) + '<small>kcal</small></div></div>').join('') : '') +
+        (res.msg ? '<p class="hr-note" style="margin:8px 0 0">' + esc(res.msg) + '</p>' : '') +
+        '<div class="chip-row" style="margin-top:10px">' + (res.online ? '' : '<button class="btn small" data-action="food-online"' + (state.foodBusy ? ' disabled' : '') + '>Search packaged foods online</button>') + '<button class="btn small ghost" data-action="food-clear">Close</button></div></div></section>';
+    }
+    const favs = state.food.saved.slice().sort((a, b) => (b.uses || 0) - (a.uses || 0) || (b.lastUsed || 0) - (a.lastUsed || 0));
+    if (favs.length && !f.editId) {
+      html += '<section><h2>Favourites</h2><div class="chip-row">' + favs.slice(0, 12).map(s => '<button class="btn small" data-action="food-quick" data-id="' + esc(s.id) + '">' + esc(s.name) + ' · ' + fmtNum(s.kcal) + '</button>').join('') + '</div>' +
+        '<details style="margin-top:10px"><summary class="hr-note">Manage favourites</summary>' + favs.map(s => '<div class="food-item"><div class="n"><b>' + esc(s.name) + '</b><div class="s">' + esc(s.serving || '1 serving') + ' · ' + fmtNum(s.kcal) + ' kcal</div></div><div><button class="btn small ghost danger" data-action="food-unfav" data-id="' + esc(s.id) + '">Remove</button></div></div>').join('') + '</details></section>';
+    }
+  }
+  html += '<section><h2>' + esc(label === 'Today' ? 'Today’s log' : label) + '</h2>';
+  if (!list.length) html += '<div class="empty">Nothing logged for this day yet.</div>';
+  else {
+    html += '<div class="card">';
+    MEALS.concat(['Other']).forEach(m => {
+      const rows = list.filter(e => m === 'Other' ? !MEALS.includes(e.meal) : e.meal === m); if (!rows.length) return;
+      html += '<div class="month" style="margin-top:6px">' + m + ' · ' + fmtNum(foodTotals(rows).kcal) + ' kcal</div>' + rows.map(foodItemHtml).join('');
+    });
+    html += '</div>';
+    if (t.pending && syncCfg()) html += '<p class="hr-note" style="margin-top:10px">Estimates are picked up automatically when the app opens. <button class="btn small" data-action="food-check">Check now</button></p>';
+  }
+  html += '</section>';
+  let rows = '', sum = 0, days = 0;
+  for (let i = 0; i < 7; i++) {
+    const ds = dateStr(addDays(new Date(), -i)), tt = foodTotals(foodDay(ds)); if (tt.n) { sum += tt.kcal; days++; }
+    rows += '<tr><td>' + esc(foodDayLabel(ds)) + '</td><td class="num">' + (tt.n ? fmtNum(tt.kcal) : '–') + '</td><td class="num">' + (tt.n && target ? (tt.kcal - target > 0 ? '+' : '') + fmtNum(tt.kcal - target) : '–') + '</td><td class="num">' + (tt.n ? fmtNum(tt.protein) + ' g' : '–') + '</td></tr>';
+  }
+  html += '<section><h2>Last 7 days</h2><div class="card"><table><thead><tr><th>Day</th><th class="num">kcal</th><th class="num">vs target</th><th class="num">Protein</th></tr></thead><tbody>' + rows + '</tbody></table>' +
+    '<p class="hr-note" style="margin:10px 0 0">' + (days ? 'Average on logged days: ' + fmtNum(sum / days) + ' kcal over ' + days + (days === 1 ? ' day' : ' days') + '.' : 'No food logged in the last 7 days.') + ' Library values and estimates are approximate.</p></div></section>';
+  view.innerHTML = html;
+}
+async function foodOnline(q){
+  const local = state.foodResults && state.foodResults.q === q ? state.foodResults.items.filter(i => i.cat !== 'Packaged') : [];
+  state.foodBusy = true; state.foodResults = { q: q, items: local, online: true, msg: 'Searching packaged foods… this can take up to 20 seconds. Typing the barcode number from the pack is faster.' }; bumpFood();
+  let msg = '', off = [];
+  try { off = await offSearch(q); if (!off.length) msg = local.length ? 'No packaged-food match online.' : 'No match in the library or the packaged-food database. Type the numbers yourself, or ask Claude to estimate.'; }
+  catch (e) { msg = 'The packaged-food database did not answer (it is often slow). Try again, type the barcode number from the pack, enter the numbers yourself, or ask Claude to estimate.'; }
+  state.foodBusy = false;
+  if (state.foodResults && state.foodResults.q === q) { state.foodResults = { q: q, items: local.concat(off), online: true, msg: msg }; bumpFood(); }
+}
+async function checkEstimates(manual){
+  const cfg = syncCfg(), pending = state.food.entries.filter(e => e.status === 'pending');
+  if (!cfg) { if (manual) setStatus('Turn on Cloud sync in Settings first.', 'warn'); return; }
+  if (!pending.length || navigator.onLine === false) { if (manual) setStatus(pending.length ? 'Offline. Try again when the phone is back online.' : 'Nothing is waiting for an estimate.', pending.length ? 'warn' : 'ok'); return; }
+  try {
+    const r = await ghReq(cfg, 'GET', 'food-estimates.json', null, true); lsSet('estCheckedAt', Date.now());
+    if (r.status === 404) { if (manual) setStatus('No estimates yet. Claude checks about every 12 hours.', 'ok'); return; }
+    if (!r.ok) throw new Error(r.status === 401 ? 'the token was rejected' : 'GitHub answered ' + r.status);
+    const j = await r.json(), map = j && j.estimates && typeof j.estimates === 'object' ? j.estimates : {}; let done = 0, noted = 0;
+    pending.forEach(e => {
+      const x = map[e.id]; if (!x) return;
+      if (x.kcal == null || isNaN(Number(x.kcal))) { if (x.notes && !(e.est && e.est.notes === x.notes)) { e.est = { notes: String(x.notes) }; noted++; } return; }
+      e.name = x.name ? String(x.name) : e.name; e.kcal = Math.round(Number(x.kcal)); e.protein = num1(x.protein); e.carbs = num1(x.carbs); e.fat = num1(x.fat); e.qty = 1; e.serving = x.serving ? String(x.serving) : '';
+      e.status = 'estimated'; e.est = { confidence: x.confidence ? String(x.confidence) : '', notes: x.notes ? String(x.notes) : '', at: x.estimatedAt || '' }; done++;
+    });
+    if (done || noted) { saveFood(); bumpFood(); }
+    if (done) setStatus('Claude filled in ' + done + (done === 1 ? ' estimate' : ' estimates') + '. Check them and edit anything that looks off.', 'ok');
+    else if (manual) setStatus('Nothing new yet. Claude checks about every 12 hours.', 'ok');
+  } catch (e) { if (manual) setStatus('Could not check for estimates: ' + (e && e.message || e) + '.', 'warn'); }
+}
+function loadImg(file){ return new Promise((res, rej) => { const url = URL.createObjectURL(file), img = new Image(); img.onload = () => { URL.revokeObjectURL(url); res(img); }; img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('this phone could not read that picture')); }; img.src = url; }); }
+async function photoB64(file){
+  const img = await loadImg(file), w = img.naturalWidth || img.width, h = img.naturalHeight || img.height; if (!w || !h) throw new Error('this phone could not read that picture');
+  const s = Math.min(1, 1280 / Math.max(w, h)), c = document.createElement('canvas'); c.width = Math.max(1, Math.round(w * s)); c.height = Math.max(1, Math.round(h * s));
+  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+  const url = c.toDataURL('image/jpeg', 0.82), b64 = url.slice(url.indexOf(',') + 1); if (!b64 || url.indexOf('data:image/jpeg') !== 0) throw new Error('the picture could not be prepared');
+  return b64;
+}
+async function foodAction(act, b){
+  const f = readFoodForm(), id = b.dataset.id;
+  if (act === 'food-open') { state.tab = 'food'; lsSet('tab', 'food'); render(); window.scrollTo({ top: 0 }); return; }
+  if (act === 'food-prev' || act === 'food-next' || act === 'food-today') {
+    const today = todayStr(), nd = act === 'food-today' ? today : dateStr(addDays(parseDate(state.foodDate), act === 'food-prev' ? -1 : 1));
+    if (nd > today) return; state.foodDate = nd; state.foodResults = null; state.foodConfirmDel = null; if (f.editId) state.foodForm = blankFoodForm(f.meal); bumpFood(); return;
+  }
+  if (act === 'food-add') {
+    if (!String(f.name || '').trim()) { setStatus('Type what you ate first.', 'warn'); focusEl('#ff-name'); return; }
+    if (f.kcal === '' || f.kcal == null || isNaN(Number(f.kcal)) || Number(f.kcal) < 0) { setStatus('Enter the calories, tap Find food to look them up, or ask Claude to estimate.', 'warn'); focusEl('#ff-kcal'); return; }
+    const o = entryFromForm(f);
+    if (f.editId) { const e = state.food.entries.find(x => x.id === f.editId); if (!e) { setStatus('That entry no longer exists.', 'warn'); state.foodForm = blankFoodForm(f.meal); bumpFood(); return; } Object.assign(e, o, { source: e.source || o.source }); delete e.status; }
+    else addFoodEntry(o);
+    try { saveFood(); } catch (e) { setStatus('Could not save: ' + (e && e.message || e), 'warn'); return; }
+    state.foodForm = blankFoodForm(o.meal); state.foodResults = null; bumpFood(); setStatus((f.editId ? 'Changes saved: ' : 'Added: ') + o.name + ', ' + fmtNum(o.kcal) + ' kcal.', 'ok'); return;
+  }
+  if (act === 'food-find') {
+    const q = String(f.name || '').trim(); if (!q) { setStatus('Type a food name or a barcode number, then tap Find food.', 'warn'); focusEl('#ff-name'); return; }
+    const items = foodSearch(q); state.foodResults = { q: q, items: items, online: false, msg: '' };
+    if (!items.length || /^\d[\d\s]{7,15}$/.test(q)) { await foodOnline(q); return; }
+    bumpFood(); return;
+  }
+  if (act === 'food-online') { if (state.foodResults) await foodOnline(state.foodResults.q); return; }
+  if (act === 'food-clear') { state.foodResults = null; bumpFood(); return; }
+  if (act === 'food-use' || act === 'food-addnow') {
+    const it = state.foodResults && state.foodResults.items[Number(b.dataset.i)]; if (!it) return;
+    const nf = formFromItem(it, f);
+    if (act === 'food-use') { state.foodForm = nf; state.foodResults = null; bumpFood(); focusEl('#ff-qty'); return; }
+    const o = entryFromForm(nf); addFoodEntry(o); try { saveFood(); } catch (e) { setStatus('Could not save: ' + (e && e.message || e), 'warn'); return; }
+    state.foodForm = blankFoodForm(o.meal); state.foodResults = null; bumpFood(); setStatus('Added: ' + o.name + ', ' + fmtNum(o.kcal) + ' kcal.', 'ok'); return;
+  }
+  if (act === 'food-quick') {
+    const s = state.food.saved.find(x => x.id === id); if (!s) return;
+    const o = entryFromForm(Object.assign(blankFoodForm(f.meal), { name: s.name, kcal: s.kcal, protein: s.protein, carbs: s.carbs, fat: s.fat, serving: s.serving || '', source: 'favourite' }));
+    addFoodEntry(o); s.uses = (s.uses || 0) + 1; s.lastUsed = Date.now(); try { saveFood(); } catch (e) { setStatus('Could not save: ' + (e && e.message || e), 'warn'); return; }
+    bumpFood(); setStatus('Added: ' + o.name + ', ' + fmtNum(o.kcal) + ' kcal.', 'ok'); return;
+  }
+  if (act === 'food-fav') {
+    const e = state.food.entries.find(x => x.id === id); if (!e || e.status === 'pending') return;
+    if (state.food.saved.some(s => norm(s.name) === norm(e.name))) { setStatus('“' + e.name + '” is already a favourite.', 'ok'); return; }
+    const q = Number(e.qty) > 0 ? Number(e.qty) : 1;
+    state.food.saved.push({ id: uid(), name: e.name, serving: e.serving || '', kcal: Math.round((Number(e.kcal) || 0) / q), protein: num1((Number(e.protein) || 0) / q), carbs: num1((Number(e.carbs) || 0) / q), fat: num1((Number(e.fat) || 0) / q), uses: 1, lastUsed: Date.now() });
+    saveFood(); fillFoodNames(); bumpFood(); setStatus('Saved “' + e.name + '” as a favourite. Tap it under Favourites to log it again.', 'ok'); return;
+  }
+  if (act === 'food-unfav') { state.food.saved = state.food.saved.filter(s => s.id !== id); saveFood(); fillFoodNames(); bumpFood(); return; }
+  if (act === 'food-edit') {
+    const e = state.food.entries.find(x => x.id === id); if (!e) return; const q = Number(e.qty) > 0 ? Number(e.qty) : 1, pend = e.status === 'pending';
+    state.foodForm = { name: e.name || '', qty: q, kcal: pend || e.kcal == null ? '' : num1(e.kcal / q), protein: pend ? '' : num1((Number(e.protein) || 0) / q), carbs: pend ? '' : num1((Number(e.carbs) || 0) / q), fat: pend ? '' : num1((Number(e.fat) || 0) / q), serving: e.serving || '', meal: MEALS.includes(e.meal) ? e.meal : mealNow(), editId: e.id, source: e.source || 'manual' };
+    state.foodResults = null; state.foodConfirmDel = null; bumpFood(); window.scrollTo({ top: 0 }); return;
+  }
+  if (act === 'food-cancel') { state.foodForm = blankFoodForm(f.meal); state.foodResults = null; bumpFood(); return; }
+  if (act === 'food-del') { state.foodConfirmDel = id; bumpFood(); return; }
+  if (act === 'food-del-no') { state.foodConfirmDel = null; bumpFood(); return; }
+  if (act === 'food-del-yes') { state.food.entries = state.food.entries.filter(x => x.id !== id); state.foodConfirmDel = null; if (f.editId === id) state.foodForm = blankFoodForm(f.meal); saveFood(); bumpFood(); setStatus('Entry deleted.', 'ok'); return; }
+  if (act === 'food-check') { setStatus('Checking…'); await checkEstimates(true); return; }
+  if (act === 'food-ask' || act === 'food-photo') {
+    if (!syncCfg()) { setStatus('Turn on Cloud sync in Settings first. Claude reads your requests from your private GitHub repository.', 'warn'); return; }
+    if (act === 'food-photo') { $('#foodPhoto').click(); return; }
+    const note = String(f.name || '').trim(); if (!note) { setStatus('Describe what you ate first, for example “Jollibee 2pc Chickenjoy with rice and gravy”.', 'warn'); focusEl('#ff-name'); return; }
+    addFoodEntry({ name: note, note: note, qty: 1, serving: '', kcal: null, protein: null, carbs: null, fat: null, meal: MEALS.includes(f.meal) ? f.meal : mealNow(), source: 'claude', status: 'pending' });
+    saveFood(); state.foodForm = blankFoodForm(f.meal); state.foodResults = null; bumpFood(); setStatus('Sent. Claude will fill in the estimate within about 12 hours.', 'ok'); return;
+  }
+}
+$('#foodPhoto').addEventListener('change', async ev => {
+  const file = ev.target.files && ev.target.files[0]; ev.target.value = ''; if (!file) return;
+  const cfg = syncCfg(); if (!cfg) { setStatus('Turn on Cloud sync in Settings first.', 'warn'); return; }
+  if (navigator.onLine === false) { setStatus('Offline. The photo can only be sent when the phone is online - try again then, or use Ask Claude with a description.', 'warn'); return; }
+  const f = state.tab === 'food' ? readFoodForm() : state.foodForm, id = uid(), path = 'photos/' + state.foodDate + '-' + id + '.jpg';
+  setStatus('Sending the photo…');
+  try {
+    const b64 = await photoB64(file), r = await ghReq(cfg, 'PUT', path, { message: 'Food photo ' + state.foodDate, content: b64 }, false);
+    if (!r.ok) throw new Error(r.status === 401 ? 'the token was rejected' : (r.status === 404 || r.status === 403) ? 'the repository was not found or the token cannot write to it' : 'GitHub answered ' + r.status);
+  } catch (e) { setStatus('Could not send the photo: ' + (e && e.message || e) + '.', 'warn'); return; }
+  const note = String(f.name || '').trim();
+  state.food.entries.push({ id: id, date: state.foodDate, at: Date.now(), name: note || 'Photo', note: note, photo: path, qty: 1, serving: '', kcal: null, protein: null, carbs: null, fat: null, meal: MEALS.includes(f.meal) ? f.meal : mealNow(), source: 'claude', status: 'pending' });
+  try { saveFood(); } catch (e) { setStatus('The photo was sent but the entry could not be saved: ' + (e && e.message || e), 'warn'); return; }
+  state.foodForm = blankFoodForm(f.meal); state.foodResults = null; bumpFood(); setStatus('Photo sent. Claude will fill in the estimate within about 12 hours.', 'ok');
+});
+
 /* ---------- charts ---------- */
 const NS = 'http://www.w3.org/2000/svg';
 function svgEl(tag, attrs){ const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); return e; }
@@ -806,6 +1080,7 @@ view.addEventListener('click', async ev => {
   const act = b.dataset.action, i = Number(b.dataset.ex), j = Number(b.dataset.set);
   if (!state.canWrite && act !== 'del-no' && act !== 'discard-no') { setStatus('This log is read-only for you.', 'warn'); return; }
   if (act === 'open-settings') { openSettings(true); window.scrollTo({ top: 0 }); return; }
+  if (act.indexOf('food-') === 0) { await foodAction(act, b); return; }
   if (act === 'start') { unlockAudio(); state.active = { startedAt: Date.now(), type: 'Strength', exercises: [] }; render(); persistActive(); }
   else if (act === 'repeat') {
     unlockAudio(); const last = state.workouts[0]; if (!last) return;
@@ -837,7 +1112,9 @@ view.addEventListener('click', async ev => {
   else if (act === 'del-yes') { const id = b.dataset.id; state.confirmDelete = null; try { await store.deleteWorkout(id); setStatus('Workout deleted.', 'ok'); } catch (e) { setStatus('Could not delete: ' + (e && e.message || e), 'warn'); } render(); }
 });
 view.addEventListener('keydown', ev => {
-  if (ev.key !== 'Enter') return; const t = ev.target; const f = t.dataset && t.dataset.field; if (!f) return;
+  if (ev.key !== 'Enter') return; const t = ev.target;
+  if (t.dataset && t.dataset.ff) { ev.preventDefault(); const kc = view.querySelector('#ff-kcal'), sel = t.dataset.ff === 'name' && !(kc && kc.value) ? '[data-action="food-find"]' : '[data-action="food-add"]'; t.blur(); const btn = view.querySelector(sel); if (btn && !btn.disabled) btn.click(); return; }
+  const f = t.dataset && t.dataset.field; if (!f) return;
   if (f === 'set-reps') { ev.preventDefault(); t.dispatchEvent(new Event('change', { bubbles: true })); focusEl('#f-wt-' + t.dataset.ex + '-' + t.dataset.set); }
   else if (f === 'set-weight') { ev.preventDefault(); t.dispatchEvent(new Event('change', { bubbles: true })); const btn = view.querySelector('[data-action="add-set"][data-ex="' + t.dataset.ex + '"]'); if (btn) btn.click(); }
   else if (f === 'ex-name') { ev.preventDefault(); t.dispatchEvent(new Event('change', { bubbles: true })); const e = activeExercise(Number(t.dataset.ex)); focusEl(e && e.kind === 'cardio' ? '#f-dist-' + t.dataset.ex : '#f-reps-' + t.dataset.ex + '-0'); }
@@ -846,6 +1123,14 @@ view.addEventListener('change', ev => {
   const t = ev.target;
   if (t.id === 'progEx') { state.progEx = t.value; lsSet('progEx', t.value); render(); return; }
   if (t.id === 'progMetric') { state.progMetric = t.value; lsSet('progMetric', t.value); render(); return; }
+  if (t.dataset.ff) {
+    const ff = state.foodForm; ff[t.dataset.ff] = t.value;
+    if (t.dataset.ff === 'name' && (ff.kcal === '' || ff.kcal == null)) {
+      const k = norm(t.value), fav = state.food.saved.find(s => norm(s.name) === k), lib = fav ? [] : state.foodLib.filter(i => norm(i.name) === k), it = fav ? Object.assign({ fav: true }, fav) : (lib.length === 1 ? lib[0] : null);
+      if (it) { state.foodForm = formFromItem(it, ff); bumpFood(); }
+    }
+    return;
+  }
   const f = t.dataset.field; if (!f || !state.active) return;
   const a = state.active, i = Number(t.dataset.ex), j = Number(t.dataset.set);
   let rerender = false;
@@ -898,7 +1183,8 @@ async function finishWorkout(){
 
 /* ---------- tabs & settings ---------- */
 $('#tabs').addEventListener('click', ev => { const b = ev.target.closest('button[data-tab]'); if (!b) return; state.tab = b.dataset.tab; lsSet('tab', state.tab); render(); window.scrollTo({ top: 0 }); });
-function openSettings(open){ const p = $('#settingsPanel'); p.hidden = !open; $('#settingsBtn').setAttribute('aria-expanded', String(open)); if (open) { $('#setTarget').value = state.settings.weeklyTarget; $('#setRest').value = state.settings.restSec || 90; $('#setWeight').value = state.settings.weightUnit; $('#setDist').value = state.settings.distUnit; const th = $('#setTheme'); if (th) th.value = state.settings.theme || 'system'; renderBackupInfo(); const sc = lsGet('sync', null); $('#syncRepo').value = sc && sc.repo || SYNC_DEFAULT_REPO; $('#syncToken').value = ''; $('#syncToken').placeholder = sc && sc.token ? 'saved on this phone (leave blank to keep)' : 'github_pat_...'; renderSyncInfo(); } }
+$('#tabs').addEventListener('click', () => { if (state.tab === 'food' && Date.now() - (lsGet('estCheckedAt', 0) || 0) > 10 * 60000) checkEstimates(false); });
+function openSettings(open){ const p = $('#settingsPanel'); p.hidden = !open; $('#settingsBtn').setAttribute('aria-expanded', String(open)); if (open) { $('#setTarget').value = state.settings.weeklyTarget; $('#setRest').value = state.settings.restSec || 90; $('#setWeight').value = state.settings.weightUnit; $('#setDist').value = state.settings.distUnit; const th = $('#setTheme'); if (th) th.value = state.settings.theme || 'system'; $('#setKcal').value = state.settings.kcalTarget || ''; $('#setProtein').value = state.settings.proteinTarget || ''; renderBackupInfo(); const sc = lsGet('sync', null); $('#syncRepo').value = sc && sc.repo || SYNC_DEFAULT_REPO; $('#syncToken').value = ''; $('#syncToken').placeholder = sc && sc.token ? 'saved on this phone (leave blank to keep)' : 'github_pat_...'; renderSyncInfo(); } }
 $('#settingsBtn').addEventListener('click', () => openSettings($('#settingsPanel').hidden));
 $('#shareBackup').addEventListener('click', shareBackup);
 $('#downloadBackup').addEventListener('click', downloadBackup);
@@ -920,17 +1206,18 @@ if ('serviceWorker' in navigator) { window.addEventListener('load', () => { navi
 $('#closeSettings').addEventListener('click', () => openSettings(false));
 $('#saveSettings').addEventListener('click', async () => {
   const th = $('#setTheme');
-  const s = { weeklyTarget: Math.min(14, Math.max(1, Math.round(Number($('#setTarget').value) || 4))), restSec: Math.min(600, Math.max(15, Math.round(Number($('#setRest').value) || 90))), weightUnit: $('#setWeight').value === 'kg' ? 'kg' : 'lb', distUnit: $('#setDist').value === 'km' ? 'km' : 'mi', theme: th && ['light', 'dark'].includes(th.value) ? th.value : 'system' };
+  const s = { kcalTarget: Math.min(10000, Math.max(0, Math.round(Number($('#setKcal').value) || 0))), proteinTarget: Math.min(500, Math.max(0, Math.round(Number($('#setProtein').value) || 0))), weeklyTarget: Math.min(14, Math.max(1, Math.round(Number($('#setTarget').value) || 4))), restSec: Math.min(600, Math.max(15, Math.round(Number($('#setRest').value) || 90))), weightUnit: $('#setWeight').value === 'kg' ? 'kg' : 'lb', distUnit: $('#setDist').value === 'km' ? 'km' : 'mi', theme: th && ['light', 'dark'].includes(th.value) ? th.value : 'system' };
   try { await store.saveSettings(s); openSettings(false); setStatus('Settings saved.', 'ok'); } catch (e) { setStatus('Could not save settings: ' + (e && e.message || e), 'warn'); }
 });
 let resizeT = null; window.addEventListener('resize', () => { clearTimeout(resizeT); resizeT = setTimeout(() => { if (state.tab === 'progress') { lastKey = ''; render(); } }, 150); });
 
 /* ---------- boot ---------- */
 const hash = (location.hash || '').slice(1); const savedTab = lsGet('tab', 'today');
-state.tab = ['today', 'progress', 'history'].includes(hash) ? hash : (['today', 'progress', 'history'].includes(savedTab) ? savedTab : 'today');
+state.tab = TABS.includes(hash) ? hash : (TABS.includes(savedTab) ? savedTab : 'today');
+state.foodDate = todayStr(); state.foodForm = blankFoodForm();
 state.progEx = lsGet('progEx', null); state.progMetric = ['e1rm', 'top', 'vol'].includes(lsGet('progMetric', 'e1rm')) ? lsGet('progMetric', 'e1rm') : 'e1rm';
 render();
-store.init().then(() => { if (lsGet('syncDirty', false)) queueSync(2500); });
+store.init().then(() => { if (lsGet('syncDirty', false)) queueSync(2500); loadFoodLib(); setTimeout(() => { checkEstimates(false); }, 3500); });
 })();
 </script>
 </body>

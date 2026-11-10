@@ -24,6 +24,15 @@ Settings → **Cloud sync** copies the same backup file to a private GitHub repo
 
 The token is stored only in this app's storage on the phone. It is never included in the backup file or in what is synced. **Turn off** removes it from the phone.
 
+## Food log
+
+The **Food** tab tracks calories and macros against a daily target (Settings → Daily calorie target; 1,900 kcal by default).
+
+- **Add food** by typing the numbers, or type a name and tap **Find food**. The search covers your favourites and the bundled library of Filipino dishes and Philippine restaurant items (`food-library.json`, approximate values with sources). A barcode number typed from a pack is looked up in Open Food Facts; a text search of that database is offered too, but it is slow.
+- **Favourites**: tap *Favourite* on any entry, then log it again with one tap.
+- **Photo for Claude / Ask Claude to estimate**: for meals you cannot look up. The photo (shrunk to 1280 px) or the description goes to the private data repository and the entry shows as *Pending*. A scheduled Claude task reads pending entries about every 12 hours and writes its estimates to `food-estimates.json` in that repository; the app picks them up when it opens. Needs Cloud sync on. Estimates are rough: check them and use *Edit* to correct.
+- Food entries and favourites are part of the backup file and the cloud sync (under `food`). Photos are stored only in the private data repository, never in this one.
+
 ## Apple Health import
 
 `tools/apple_health_import.py` turns an Apple Health export into a file the app can restore. Nothing is uploaded anywhere; it runs on your computer with Python 3 and no extra packages.

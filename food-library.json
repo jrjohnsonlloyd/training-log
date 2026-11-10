@@ -1,0 +1,7 @@
+{"version":1,"updatedAt":"2026-11-11","note":"TEST PLACEHOLDER - replaced before shipping","items":[
+{"name":"Chicken adobo","aka":["adobong manok"],"cat":"Home dish","serving":"1 cup (240 g)","kcal":350,"protein":30,"carbs":5,"fat":23,"basis":"database","src":"","checked":"2026-11"},
+{"name":"Steamed white rice","aka":["kanin","rice"],"cat":"Rice & staples","serving":"1 cup cooked (160 g)","kcal":205,"protein":4.3,"carbs":44.5,"fat":0.4,"basis":"database","src":"","checked":"2026-11"},
+{"name":"Chickenjoy 1pc with rice","aka":[],"cat":"Jollibee","serving":"1 meal","kcal":560,"protein":28,"carbs":50,"fat":27,"basis":"estimate","src":"","checked":"2026-11"},
+{"name":"Halo-halo","aka":[],"cat":"Dessert","serving":"1 glass","kcal":350,"protein":6,"carbs":70,"fat":6,"basis":"estimate","src":"","checked":"2026-11"},
+{"name":"Halo-halo","aka":[],"cat":"Mang Inasal","serving":"1 regular","kcal":380,"protein":6,"carbs":75,"fat":7,"basis":"estimate","src":"","checked":"2026-11"}
+]}
