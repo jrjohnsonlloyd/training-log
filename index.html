@@ -775,12 +775,13 @@ async function loadFoodLib(){
   } catch (e) {}
 }
 function foodSearch(q){
-  const terms = norm(q).split(/\s+/).filter(Boolean); if (!terms.length) return [];
+  const plain = s => norm(s).replace(/['’`.]/g, '').replace(/&/g, ' and ').replace(/[^a-z0-9ñ]+/g, ' ').trim();
+  const terms = plain(q).split(' ').filter(Boolean); if (!terms.length) return [];
   const pool = state.food.saved.map(s => Object.assign({}, s, { fav: true, cat: 'Favourite' })).concat(state.foodLib), scored = [];
   pool.forEach(it => {
-    const name = norm(it.name), hay = name + ' ' + norm((it.aka || []).join(' ')) + ' ' + norm(it.cat || ''); let score = 0;
+    const name = plain(it.name), hay = name + ' ' + plain((it.aka || []).join(' ')) + ' ' + plain(it.cat || ''); let score = 0;
     for (let k = 0; k < terms.length; k++) { const i = hay.indexOf(terms[k]); if (i < 0) return; score += name.indexOf(terms[k]) === 0 ? 3 : name.indexOf(terms[k]) > 0 ? 2 : 1; }
-    scored.push({ it: it, score: score + (it.fav ? 2 : 0) + (name === norm(q) ? 5 : 0) });
+    scored.push({ it: it, score: score + (it.fav ? 2 : 0) + (name === plain(q) ? 5 : 0) });
   });
   return scored.sort((a, b) => b.score - a.score || String(a.it.name).length - String(b.it.name).length).slice(0, 10).map(x => x.it);
 }
