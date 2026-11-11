@@ -71,6 +71,8 @@ p{margin:0 0 10px}
 button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid var(--hot);outline-offset:2px}
 .status{font-size:13px;color:var(--fg-2);padding-block:10px 0;min-height:1.2em}
 .status.warn{color:var(--critical)} .status.ok{color:var(--good);font-weight:600}
+.toast{position:fixed;left:50%;bottom:calc(84px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:10px 16px;border-radius:14px;font-size:13px;font-weight:600;z-index:60;max-width:90vw;text-align:center;box-shadow:0 8px 24px rgba(0,0,0,.25)}
+.toast.warn{background:var(--critical);color:#fff}
 section{margin-block:20px}
 .btn{font:inherit;font-weight:600;padding:11px 16px;border-radius:10px;border:1px solid var(--line);background:var(--surface);color:var(--fg);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:8px;text-decoration:none}
 .btn.primary{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}
@@ -276,6 +278,7 @@ details.hist summary::-webkit-details-marker{display:none}
   </div>
 
   <div class="status" id="status" role="status" aria-live="polite"></div>
+  <div class="toast" id="toast" hidden></div>
   <main id="view"></main>
   <datalist id="exnames"></datalist>
   <datalist id="foodnames"></datalist>
@@ -340,7 +343,10 @@ const e1rm = (w, r) => r > 1 ? w * (1 + r / 30) : w;
 function lsGet(k, d){ try { const v = localStorage.getItem('tl.' + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } }
 function lsSet(k, v){ try { if (v == null) localStorage.removeItem('tl.' + k); else localStorage.setItem('tl.' + k, JSON.stringify(v)); } catch (e) {} }
 let statusTimer = null;
-function setStatus(msg, kind){ const s = $('#status'); s.textContent = msg || ''; s.className = 'status' + (kind ? ' ' + kind : ''); clearTimeout(statusTimer); if (kind === 'ok') statusTimer = setTimeout(() => { if (s.textContent === msg) { s.textContent = ''; s.className = 'status'; } }, 6000); }
+/* The status line sits at the top of the page. When it is scrolled out of sight, repeat the message in a floating note so a button further down still gives an answer. */
+let toastTimer = null;
+function showToastIfHidden(s, msg, kind){ const t = $('#toast'); if (!t) return; clearTimeout(toastTimer); const r = s.getBoundingClientRect(); if (!msg || (r.bottom > 0 && r.top < window.innerHeight)) { t.hidden = true; return; } t.textContent = msg; t.className = 'toast' + (kind === 'warn' ? ' warn' : ''); t.hidden = false; toastTimer = setTimeout(() => { t.hidden = true; }, kind === 'warn' ? 7000 : 5000); }
+function setStatus(msg, kind){ const s = $('#status'); s.textContent = msg || ''; s.className = 'status' + (kind ? ' ' + kind : ''); showToastIfHidden(s, msg, kind); clearTimeout(statusTimer); if (kind === 'ok') statusTimer = setTimeout(() => { if (s.textContent === msg) { s.textContent = ''; s.className = 'status'; } }, 6000); }
 
 /* ---------- storage: this device only, with backup and restore ---------- */
 function lsPut(k, v){ try { if (v == null) localStorage.removeItem('tl.' + k); else localStorage.setItem('tl.' + k, JSON.stringify(v)); } catch (e) { throw new Error('this device refused to store it (storage full or blocked)'); } }
