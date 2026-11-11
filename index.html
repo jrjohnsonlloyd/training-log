@@ -800,6 +800,10 @@ async function offSearch(q){
     const j = await r.json(); return (j && Array.isArray(j.products) ? j.products : []).map(offItem).filter(Boolean).slice(0, 8);
   } finally { clearTimeout(to); }
 }
+function paintFoodForm(){ /* update the form in place so the field being typed in keeps its focus */
+  const f = state.foodForm; view.querySelectorAll('[data-ff]').forEach(el => { const v = f[el.dataset.ff]; if (document.activeElement !== el || el.dataset.ff !== 'name') el.value = v == null ? '' : v; });
+  const p = view.querySelector('#ff-serving'); if (p) { p.hidden = !f.serving; p.textContent = f.serving ? 'One serving: ' + f.serving + '. Change Servings if you had more or less.' : ''; }
+}
 function readFoodForm(){ const f = state.foodForm; view.querySelectorAll('[data-ff]').forEach(el => { f[el.dataset.ff] = el.value; }); return f; }
 function entryFromForm(f){
   const qty = Number(f.qty) > 0 ? Number(f.qty) : 1;
@@ -839,7 +843,7 @@ function renderFood(){
       '<div class="frow"><label class="f">Protein (g)<input type="number" data-ff="protein" min="0" step="0.1" inputmode="decimal" value="' + esc(f.protein) + '"></label>' +
       '<label class="f">Carbs (g)<input type="number" data-ff="carbs" min="0" step="0.1" inputmode="decimal" value="' + esc(f.carbs) + '"></label>' +
       '<label class="f">Fat (g)<input type="number" data-ff="fat" min="0" step="0.1" inputmode="decimal" value="' + esc(f.fat) + '"></label></div>' +
-      (f.serving ? '<p class="hr-note" style="margin:10px 0 0">One serving: ' + esc(f.serving) + '. Change Servings if you had more or less.</p>' : '') +
+      '<p class="hr-note" id="ff-serving" style="margin:10px 0 0"' + (f.serving ? '' : ' hidden') + '>' + (f.serving ? 'One serving: ' + esc(f.serving) + '. Change Servings if you had more or less.' : '') + '</p>' +
       '<div class="btn-row"><button class="btn primary" data-action="food-add">' + (f.editId ? 'Save changes' : 'Add to log') + '</button><button class="btn" data-action="food-find"' + (state.foodBusy ? ' disabled' : '') + '>Find food</button>' + (f.editId ? '<button class="btn" data-action="food-cancel">Cancel</button>' : '') + '</div>' +
       (f.editId ? '' : '<div class="btn-row"><button class="btn" data-action="food-photo">Photo for Claude</button><button class="btn" data-action="food-ask">Ask Claude to estimate</button></div>' +
         '<p class="hr-note" style="margin:10px 0 0">Not sure of the numbers? Send a photo or just the description. Claude checks about every 12 hours and fills in an estimate you can correct. Needs Cloud sync on.</p>') +
@@ -1125,10 +1129,13 @@ view.addEventListener('change', ev => {
   if (t.id === 'progEx') { state.progEx = t.value; lsSet('progEx', t.value); render(); return; }
   if (t.id === 'progMetric') { state.progMetric = t.value; lsSet('progMetric', t.value); render(); return; }
   if (t.dataset.ff) {
-    const ff = state.foodForm; ff[t.dataset.ff] = t.value;
-    if (t.dataset.ff === 'name' && (ff.kcal === '' || ff.kcal == null)) {
+    const ff = state.foodForm, key = t.dataset.ff; ff[key] = t.value;
+    if (key === 'kcal' || key === 'protein' || key === 'carbs' || key === 'fat') ff.auto = false; /* numbers typed by hand are never replaced or cleared */
+    if (key === 'name') {
       const k = norm(t.value), fav = state.food.saved.find(s => norm(s.name) === k), lib = fav ? [] : state.foodLib.filter(i => norm(i.name) === k), it = fav ? Object.assign({ fav: true }, fav) : (lib.length === 1 ? lib[0] : null);
-      if (it) { state.foodForm = formFromItem(it, ff); bumpFood(); }
+      const empty = ff.kcal === '' || ff.kcal == null;
+      if (it && (empty || ff.auto || (ff.source && ff.source !== 'manual'))) { state.foodForm = Object.assign(formFromItem(it, ff), { auto: true }); paintFoodForm(); setStatus(''); }
+      else if (!it && ff.auto) { state.foodForm = Object.assign(blankFoodForm(ff.meal), { name: t.value, editId: ff.editId || null }); paintFoodForm(); } /* the numbers belonged to the previous food */
     }
     return;
   }
@@ -1183,7 +1190,7 @@ async function finishWorkout(){
 }
 
 /* ---------- tabs & settings ---------- */
-$('#tabs').addEventListener('click', ev => { const b = ev.target.closest('button[data-tab]'); if (!b) return; state.tab = b.dataset.tab; lsSet('tab', state.tab); render(); window.scrollTo({ top: 0 }); });
+$('#tabs').addEventListener('click', ev => { const b = ev.target.closest('button[data-tab]'); if (!b) return; if (state.tab !== b.dataset.tab) setStatus(''); state.tab = b.dataset.tab; lsSet('tab', state.tab); render(); window.scrollTo({ top: 0 }); });
 $('#tabs').addEventListener('click', () => { if (state.tab === 'food' && Date.now() - (lsGet('estCheckedAt', 0) || 0) > 10 * 60000) checkEstimates(false); });
 function openSettings(open){ const p = $('#settingsPanel'); p.hidden = !open; $('#settingsBtn').setAttribute('aria-expanded', String(open)); if (open) { $('#setTarget').value = state.settings.weeklyTarget; $('#setRest').value = state.settings.restSec || 90; $('#setWeight').value = state.settings.weightUnit; $('#setDist').value = state.settings.distUnit; const th = $('#setTheme'); if (th) th.value = state.settings.theme || 'system'; $('#setKcal').value = state.settings.kcalTarget || ''; $('#setProtein').value = state.settings.proteinTarget || ''; renderBackupInfo(); const sc = lsGet('sync', null); $('#syncRepo').value = sc && sc.repo || SYNC_DEFAULT_REPO; $('#syncToken').value = ''; $('#syncToken').placeholder = sc && sc.token ? 'saved on this phone (leave blank to keep)' : 'github_pat_...'; renderSyncInfo(); } }
 $('#settingsBtn').addEventListener('click', () => openSettings($('#settingsPanel').hidden));

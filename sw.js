@@ -1,5 +1,5 @@
 /* Training Log service worker: app shell cached for offline use; the page itself is fetched network-first so updates land on the next open. */
-const CACHE = 'training-log-v5';
+const CACHE = 'training-log-v6';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './food-library.json', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())); });
 self.addEventListener('activate', e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim())); });
