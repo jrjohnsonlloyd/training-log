@@ -28,7 +28,12 @@ The token is stored only in this app's storage on the phone. It is never include
 
 The **Food** tab tracks calories and macros against a daily target (Settings → Daily calorie target; 1,900 kcal by default).
 
-- **Add food** by typing the numbers, or type a name and tap **Find food**. The search covers your favourites and the bundled library of Filipino dishes and Philippine restaurant items (`food-library.json`, approximate values with sources). A barcode number typed from a pack is looked up in Open Food Facts; a text search of that database is offered too, but it is slow.
+- **Add food** by typing the numbers, or start typing a name: matches appear under the box as you type. Each row shows a small pack photo (or an icon for the kind of food), the name, the brand or group, the serving, and the calories on the right. Tap a row to fill the form (then pick a **Serving size** such as 1 cup, 1 piece, 100 g or 1 g and set Servings), or tap **Add** to log one serving straight away.
+- **Filters** above the results: **All**, **Supermarket & Imported** (packaged products), **Dining Out** (restaurant and fast-food items) and **Whole Foods** (plain foods and home dishes).
+- **What is searched, all saved in the app and usable offline:** your favourites and recent foods first; the curated lists (`data/local_ph_curated.json` and the older `food-library.json`: Filipino dishes and Philippine restaurant items, approximate values with sources); and about 12,600 everyday foods and dishes from the USDA's public food tables. They are bundled as `food-db.json`.
+- **Brands and barcodes:** a barcode number typed from a pack is matched against the bundled list first, with no network needed. **Find food** (or Enter) also looks up packaged products in Open Food Facts (worldwide, volunteer-entered, with pack photos) and US label data in USDA FoodData Central when the app itself has fewer than three matches; **Search brands online** does it on request. The USDA lookup works a few times an hour without a key; a free key from https://fdc.nal.usda.gov/api-key-signup pasted into Settings → *USDA food search key* removes that limit. The key stays on the phone and is not part of the backup or the sync.
+- **More nutrition:** sugars, saturates, fibre and sodium are filled in when the food has them, saved with the entry, and totalled for the day. A toggle (and Settings → *Show as*) switches between **Sodium (mg)**, as on Philippine and US labels, and **Salt (g)**, as on UK labels. Sodium in mg is what is stored; salt g = sodium mg ÷ 400.
+- **Recent**: the last foods you logged, one tap to log the same amount again.
 - **Favourites**: tap *Favourite* on any entry, then log it again with one tap.
 - **Photo for Claude / Ask Claude to estimate**: for meals you cannot look up. The photo (shrunk to 1280 px) or the description goes to the private data repository and the entry shows as *Pending*. A scheduled Claude task reads pending entries about every 12 hours and writes its estimates to `food-estimates.json` in that repository; the app picks them up when it opens. Needs Cloud sync on. Estimates are rough: check them and use *Edit* to correct.
 - Food entries and favourites are part of the backup file and the cloud sync (under `food`). Photos are stored only in the private data repository, never in this one.
@@ -58,3 +63,31 @@ A single static page (`index.html`) with no framework and no build step, a servi
 Strength progression uses the Epley estimate: 1RM ≈ weight × (1 + reps ÷ 30). Streaks count consecutive weeks (Monday to Sunday) at or above the weekly target.
 
 To ship a change: edit `index.html`, bump `CACHE` in `sw.js` so installed copies refresh, push to `main`.
+
+## Food data pipeline
+
+`food-db.json` is built on a computer by `scripts/import_foods.py` (Python 3, no extra packages). It reads the sources line by line into a small SQLite database (`data/foods.sqlite`, not committed; its table and versioned migrations are in `scripts/food_schema.py`), removes duplicates, and writes the file the app loads.
+
+```
+python scripts/import_foods.py --db data/foods.sqlite \
+  --curated-json data/local_ph_curated.json \
+  --usda-path "<Survey Foods (FNDDS) CSV folder>" --usda-path "<SR Legacy CSV folder>" \
+  --off-path "<Open Food Facts export, en.openfoodfacts.org.products.csv or .csv.gz>" \
+  --export-app food-db.json --built 2026-11-22
+```
+
+- **Sources and priority:** 1 = the curated list, 2 = USDA FoodData Central (https://fdc.nal.usda.gov/download-datasets, public domain), 3 = Open Food Facts (https://world.openfoodfacts.org/data, Open Database Licence). When two rows share a barcode, or the same name and brand, the higher-priority row is kept; it inherits the other row's pack photo.
+- **Open Food Facts rows** are kept only when tagged for the Philippines, the United States, the United Kingdom, Japan or South Korea. Every Philippine-tagged product is bundled; the others are limited to the most-scanned (`--max-off`, default 20,000) so the file stays small enough for a phone. Anything left out is still found by the online lookup.
+- **Clean-up rules:** values are per 100 g; kilojoules become calories (÷ 4.184) when calories are missing; salt becomes sodium (g × 400 = mg) when sodium is missing; rows with no name, no calories, or impossible numbers (more than 100 g of a nutrient per 100 g) are dropped. Baby foods and infant formulas are left out.
+- **Curated list:** `data/local_ph_curated.json` is the list to grow. Copy an entry, fill it in, say whether the numbers are for the serving or for 100 g, mark `basis` honestly (`official`, `database` or `estimate`), then run the command above and commit the new `food-db.json`. A curated entry hides an older `food-library.json` entry when its name, or one of its `aka` names, is the same.
+
+Tests (no downloads needed; they use the small made-up files in `tests/fixtures`):
+
+```
+python -m unittest discover -s tests -p "test_*.py"
+python tests/run_ui_smoke.py
+python tests/run_ui_smoke.py --db-file tests/fixtures/food-db.v1.sample.json
+python tests/run_ui_smoke.py --suite v2
+```
+
+The first checks the import rules and the database migration. The others drive the app itself in headless Chrome: the second and third prove that food data saved by the previous version still loads and is left untouched (with the current file and with an old-format one), the fourth checks filters, photos, barcode lookup and the sodium/salt toggle.

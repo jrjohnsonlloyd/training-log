@@ -1,0 +1,20 @@
+{"version":2,"built":"2026-11-22","note":"Hand-written sample of the version 2 app bundle for the UI smoke tests: synthetic fixture rows standing in for the curated Philippine list, USDA FoodData Central and Open Food Facts.",
+"fields":["name","brand","group","category","regions","barcode","thumb","per","kcal","protein","carbs","sugars","fat","saturates","fibre","sodium","portions","source","aka"],
+"brands":["Jollibee","Lucky Me!","Starbucks","Mars","Nongshim","Glico"],
+"groups":["Jollibee","Home dish","Lucky Me!","Starbucks","Bananas","Burgers","Apples","Rice","Dairy and Egg Products"],
+"thumbBase":"https://images.openfoodfacts.org/images/products/",
+"counts":{"curated":4,"usda":5,"off":3},
+"items":[
+["Chickenjoy 1 pc (thigh)",0,0,1,"PH",0,0,0,304,21.6,4,null,22.4,null,null,null,[["1 thigh",125]],0,["chicken joy"]],
+["Chicken adobo",-1,1,2,"PH",0,0,0,141,15.7,3.3,null,6.5,null,null,null,[["1 serving with sauce",152]],0,["adobong manok"]],
+["Lucky Me! Pancit Canton Kalamansi",1,2,0,"PH","4807770270123","480/777/027/0123/front_en.3.200.jpg",0,467,10,58.3,5,20,10,3.3,1500,[["1 pack",60]],0,["pancit canton calamansi"]],
+["Flat White (tall)",2,3,1,"PH,US",0,0,1,170,9,14,13,9,5,null,115,[["1 tall (12 fl oz)",null]],0,0],
+["Banana, raw",-1,4,2,"US",0,0,0,97,0.7,23,15.8,0.3,0.1,1.7,0,[["1 banana",126]],1,0],
+["Big Mac (McDonalds)",-1,5,1,"US",0,0,0,257,11.8,20.1,4,14.9,5.3,1.6,460,[["1 burger",219]],1,0],
+["Apple, raw",-1,6,2,"US",0,0,0,52,0.3,13.8,10.4,0.2,0,2.4,1,[["1 medium",182]],1,0],
+["Rice, white, cooked",-1,7,2,"US",0,0,0,130,2.7,28.2,0.1,0.3,0.1,0.4,1,[["1 cup",158]],1,0],
+["Egg, whole, cooked, hard-boiled",-1,8,2,"US",0,0,0,155,12.6,1.1,1.1,10.6,3.3,0,124,[["1 large",50]],2,0],
+["Snickers",3,-1,0,"UK","5000159407236","500/015/940/7236/front_en.4.200.jpg",0,485,8.6,60.5,51.8,22.5,7.9,null,252,[["48 g",48]],3,0],
+["Shin Ramyun",4,-1,0,"US,KR","8801043014830","880/104/301/4830/front_en.7.200.jpg",0,433,9.2,65,3.3,15,7.5,2.5,1790,[["120 g",120]],3,0],
+["Pocky Chocolate",5,-1,0,"JP","4901330502881","490/133/050/2881/front_ja.3.200.jpg",0,503,8.3,66.7,36.1,22.2,11.1,2.8,200,[["1 pack (36 g)",36]],3,0]
+]}

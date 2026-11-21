@@ -106,6 +106,47 @@ label.f{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--fg
 .food-item .k{font-family:var(--display);font-weight:800;font-size:20px;white-space:nowrap;text-align:right}
 .food-item .k small{display:block;font-family:var(--body);font-weight:600;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
 .food-item .chip-row{margin-top:6px}
+.food-res{margin:10px -6px 2px;border:1px solid var(--grid);border-radius:14px;padding:0 10px 10px;max-height:58vh;overflow-x:hidden;overflow-y:auto;-webkit-overflow-scrolling:touch}
+.food-res .head{font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);padding:0 0 2px}
+.food-res .food-item{align-items:center;gap:8px;padding:8px 0}
+.food-res .k{font-size:17px}
+.food-res .btn.small{min-height:40px}
+.pickbtn{all:unset;display:block;flex:1;min-width:0;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.pickbtn b{display:block;overflow-wrap:anywhere}
+.pickbtn:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+/* Search results: filter pills that scroll sideways inside their own strip, then one row per food (thumbnail or category icon, name, brand and serving, calories, Add). */
+.fcats{display:flex;gap:8px;overflow-x:auto;overscroll-behavior-x:contain;-webkit-overflow-scrolling:touch;scrollbar-width:none;position:sticky;top:0;z-index:1;background:var(--surface);padding:8px 0}
+.fcats::-webkit-scrollbar{display:none}
+.fcat{flex:none;font:inherit;font-size:13px;font-weight:600;min-height:40px;padding:0 14px;border-radius:999px;border:1px solid var(--line);background:var(--surface);color:var(--fg-2);white-space:nowrap;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.fcat[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}
+.food-res .pickbtn{display:flex;align-items:center;gap:10px;min-height:44px}
+.fthumb{position:relative;flex:none;width:44px;height:44px;border-radius:10px;overflow:hidden;display:flex;align-items:center;justify-content:center;background:var(--surface-2);color:var(--muted)}
+.fthumb svg{width:24px;height:24px}
+.fthumb[data-cat="supermarket"]{background:var(--accent-soft);color:var(--accent)}
+.fthumb[data-cat="dining_out"]{background:var(--hot-soft);color:var(--hot)}
+.fthumb[data-cat="whole_food"]{color:var(--good)}
+.fthumb img{position:absolute;inset:0;width:100%;height:100%;max-width:none;object-fit:cover;background:var(--surface)}
+.fr-txt{display:block;flex:1;min-width:0}
+.fr-txt b{line-height:1.25}
+.fr-txt .s{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden} /* long serving notes stop after two lines here; the form shows them in full once the food is chosen */
+.fr-txt .fr-mac{font-size:12px;color:var(--muted)}
+/* Sugars, saturates, fibre and sodium or salt: a folded part of the form and one extra strip in the day summary. */
+.food-hero{flex-wrap:wrap}
+.daymore{flex:1 1 100%;min-width:0;border-top:1px solid var(--grid);padding-top:10px;margin-top:-4px}
+.dm-vals{display:flex;flex-wrap:wrap;gap:2px 14px;font-size:13px;color:var(--fg-2)}
+.dm-vals b{color:var(--fg);font-variant-numeric:tabular-nums}
+.dm-foot{display:flex;align-items:center;justify-content:space-between;gap:8px 10px;flex-wrap:wrap;margin-top:8px}
+.dm-foot .hr-note{flex:1 1 120px}
+.salt-t button{min-height:40px;padding:0 12px}
+.more-n{margin-top:12px;border-top:1px solid var(--grid)}
+.more-n summary{list-style:none;cursor:pointer;min-height:44px;display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;color:var(--fg-2)}
+.more-n summary::-webkit-details-marker{display:none}
+.more-n summary::before{content:"+";flex:none;width:22px;height:22px;border-radius:999px;background:var(--surface-2);color:var(--accent);display:inline-flex;align-items:center;justify-content:center;font-size:15px;line-height:1}
+.more-n[open] summary::before{content:"\2212"}
+.more-n summary .hr-note{font-weight:400}
+.more-n .frow{margin-top:2px}
+.more-n .frow+.frow{margin-top:10px}
+.more-unit{grid-column:span 2;display:flex;align-items:center;justify-content:flex-end;gap:8px;min-width:0}
 .frow{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:10px;align-items:end}
 .daynav{display:flex;gap:8px;align-items:center}
 .daynav b{flex:1;text-align:center}
@@ -251,6 +292,8 @@ details.hist summary::-webkit-details-marker{display:none}
       <label class="f">Appearance<select id="setTheme"><option value="system">Match the phone</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
       <label class="f">Daily calorie target (kcal)<input type="number" id="setKcal" min="0" max="10000" step="50" inputmode="numeric" placeholder="none"></label>
       <label class="f">Daily protein target (g, optional)<input type="number" id="setProtein" min="0" max="500" step="5" inputmode="numeric" placeholder="none"></label>
+      <label class="f">Sodium or salt in food: show as<select id="setSalt"><option value="sodium">Sodium (mg)</option><option value="salt">Salt (g)</option></select></label>
+      <label class="f">USDA food search key (optional)<input type="password" id="setFdc" placeholder="none" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
     </div>
     <div class="btn-row">
       <button class="btn primary" id="saveSettings">Save settings</button>
@@ -281,7 +324,6 @@ details.hist summary::-webkit-details-marker{display:none}
   <div class="toast" id="toast" hidden></div>
   <main id="view"></main>
   <datalist id="exnames"></datalist>
-  <datalist id="foodnames"></datalist>
   <input type="file" id="foodPhoto" accept="image/*" hidden>
 </div>
 
@@ -307,7 +349,8 @@ details.hist summary::-webkit-details-marker{display:none}
 <script>
 (function(){
 'use strict';
-const DEFAULT_SETTINGS = { weeklyTarget: 4, weightUnit: 'lb', distUnit: 'mi', restSec: 90, theme: 'system', kcalTarget: 1900, proteinTarget: 0 };
+const DEFAULT_SETTINGS = { weeklyTarget: 4, weightUnit: 'lb', distUnit: 'mi', restSec: 90, theme: 'system', kcalTarget: 1900, proteinTarget: 0, saltUnit: 'sodium' };
+const FOOD_SCHEMA = 2; /* marker written with the stored food object from the food-database upgrade on; entries and favourites only ever gain optional fields, so data without the marker loads the same way */
 const TABS = ['today', 'food', 'progress', 'history'];
 const TYPES = ['Strength', 'Cardio', 'Mobility', 'Sport', 'Other'];
 const STARTER_NAMES = ['Squat','Bench press','Deadlift','Overhead press','Barbell row','Pull-up','Lat pulldown','Leg press','Romanian deadlift','Dumbbell curl','Dip','Run','Cycle','Row (erg)','Walk'];
@@ -316,7 +359,8 @@ const state = {
   workouts: [], settings: Object.assign({}, DEFAULT_SETTINGS), active: null, rest: null,
   tab: 'today', loaded: false, backend: 'none', canWrite: true,
   progEx: null, progMetric: 'e1rm', confirmDelete: null, confirmDiscard: false,
-  food: { entries: [], saved: [] }, foodLib: [], foodDate: null, foodForm: null, foodResults: null, foodConfirmDel: null, foodBusy: false, foodRev: 0
+  food: { entries: [], saved: [] }, foodLib: [], foodDb: null, foodDbBusy: false, foodDate: null, foodForm: null, foodResults: null, foodConfirmDel: null, foodBusy: false, foodRev: 0,
+  foodCat: 'all', foodMoreOpen: false /* the results filter and the folded "More nutrition" part of the form: kept for this session only */
 };
 const $ = s => document.querySelector(s);
 const view = $('#view');
@@ -356,7 +400,8 @@ const store = {
     state.workouts = lsGet('workouts', []); sortWorkouts();
     state.settings = Object.assign({}, DEFAULT_SETTINGS, lsGet('settings', {}));
     state.active = lsGet('active', null);
-    const fd = lsGet('food', null); state.food = { entries: fd && Array.isArray(fd.entries) ? fd.entries : [], saved: fd && Array.isArray(fd.saved) ? fd.saved : [] };
+    const fd = lsGet('food', null), fo = fd && typeof fd === 'object' && !Array.isArray(fd) ? fd : {}; /* with or without the "schema" marker; anything else stored beside entries and saved is carried along untouched */
+    state.food = Object.assign({}, fo, { entries: Array.isArray(fo.entries) ? fo.entries : [], saved: Array.isArray(fo.saved) ? fo.saved : [] });
     state.loaded = true;
     try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}
     render();
@@ -367,7 +412,7 @@ const store = {
   async saveActive(a){ lsPut('active', a); }
 };
 function backupName(){ return 'training-log-backup-' + todayStr() + '.json'; }
-function backupJson(){ return JSON.stringify({ app: 'training-log', version: 1, exportedAt: new Date().toISOString(), settings: state.settings, workouts: state.workouts, food: state.food }, null, 1); }
+function backupJson(){ return JSON.stringify({ app: 'training-log', version: 1, exportedAt: new Date().toISOString(), settings: state.settings, workouts: state.workouts, food: Object.assign({}, state.food, { schema: Math.max(FOOD_SCHEMA, Number(state.food.schema) || 0) }) }, null, 1); }
 function lastBackupText(){ const t = lsGet('lastBackup', null); return t ? new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'never'; }
 function markBackedUp(){ lsSet('lastBackup', Date.now()); renderBackupInfo(); lastKey = ''; render(); }
 function renderBackupInfo(){ const el = $('#backupInfo'); if (el) el.textContent = state.workouts.length + (state.workouts.length === 1 ? ' workout' : ' workouts') + ' stored on this device · last backup: ' + lastBackupText() + '. Save the file to Google Drive to keep a copy off the phone.'; }
@@ -406,12 +451,12 @@ async function restoreFromFile(file){
   });
   sortWorkouts();
   let foodAdded = 0;
-  if (data && data.food && typeof data.food === 'object') {
+  if (data && data.food && typeof data.food === 'object') { /* old backups have no "schema" marker and no sugars, saturates, fibre, sodium, category or brand; newer ones do. Entries and favourites are taken whole either way. */
     const ids = new Set(state.food.entries.map(e => e.id)), names = new Set(state.food.saved.map(s => norm(s.name)));
     (Array.isArray(data.food.entries) ? data.food.entries : []).forEach(e => { if (e && e.id && e.date && !ids.has(e.id)) { state.food.entries.push(e); ids.add(e.id); foodAdded++; } });
     (Array.isArray(data.food.saved) ? data.food.saved : []).forEach(s => { if (s && s.name && !names.has(norm(s.name))) { state.food.saved.push(s); names.add(norm(s.name)); } });
   }
-  try { lsPut('food', state.food); lsPut('workouts', state.workouts); if (data.settings && !lsGet('settings', null)) { state.settings = Object.assign({}, DEFAULT_SETTINGS, data.settings); lsPut('settings', state.settings); } }
+  try { lsPut('food', stampFood()); lsPut('workouts', state.workouts); if (data.settings && !lsGet('settings', null)) { state.settings = Object.assign({}, DEFAULT_SETTINGS, data.settings); lsPut('settings', state.settings); } }
   catch (e) { setStatus('Could not restore: ' + e.message, 'warn'); return; }
   state.foodRev++; lastKey = ''; render(); renderBackupInfo(); queueSync();
   const parts = []; if (added) parts.push('added ' + added + (added === 1 ? ' workout' : ' workouts')); if (foodAdded) parts.push('added ' + foodAdded + (foodAdded === 1 ? ' food entry' : ' food entries')); if (updated) parts.push('filled in details on ' + updated);
@@ -757,74 +802,357 @@ function renderHistory(){
 
 /* ---------- food log ---------- */
 const MEALS = ['Breakfast', 'Lunch', 'Dinner', 'Snack'];
+const FOOD_CATS = ['supermarket', 'dining_out', 'whole_food'];
+const FOOD_CAT_LABEL = { all: 'All', supermarket: 'Supermarket & Imported', dining_out: 'Dining Out', whole_food: 'Whole Foods' };
+const NUTRI_X = ['sugars', 'saturates', 'fibre', 'sodium']; /* optional extra detail on items, entries and favourites: grams, except sodium, which is always milligrams */
 const num1 = v => Math.round((Number(v) || 0) * 10) / 10;
+const hasNum = v => v != null && typeof v !== 'boolean' && String(v).trim() !== '' && !isNaN(Number(v));
+/* Sodium is what gets stored, always in mg (Philippine and US labels). UK labels print salt in g; these two are the only place the conversion lives. */
+function saltGFromSodiumMg(mg){ return Number(mg) / 400; }
+function sodiumMgFromSaltG(g){ return Number(g) * 400; }
+const saltMode = () => state.settings.saltUnit === 'salt';
+function sodiumText(mg){ return saltMode() ? fmtNum(roundTo(saltGFromSodiumMg(mg), 2), 2) + ' g' : fmtNum(mg) + ' mg'; }
+function sodiumFieldText(mg){ return hasNum(mg) ? String(saltMode() ? roundTo(saltGFromSodiumMg(mg), 2) : roundTo(mg, 1)) : ''; } /* what the sodium or salt box shows for a stored mg value */
+function sodiumFromField(v){ return hasNum(v) ? (saltMode() ? roundTo(sodiumMgFromSaltG(v), 1) : Number(v)) : ''; } /* and back to mg from what was typed */
+/* The optional detail of an item, entry or favourite, ready to drop into a form or a new record: only what is known. div turns a logged total back into one serving. */
+function foodExtras(x, div){
+  const o = {}, d = div > 0 ? div : 1;
+  NUTRI_X.forEach(k => { if (hasNum(x[k]) && Number(x[k]) >= 0) o[k] = d === 1 ? Number(x[k]) : k === 'sodium' ? roundTo(x[k] / d, 1) : num1(x[k] / d); });
+  if (FOOD_CATS.includes(x.category)) o.category = x.category;
+  if (x.brand) o.brand = String(x.brand);
+  return o;
+}
 function mealNow(){ const n = new Date(), h = n.getHours() + n.getMinutes() / 60; return h < 10.5 ? 'Breakfast' : h < 15 ? 'Lunch' : h < 21 ? 'Dinner' : 'Snack'; }
-function blankFoodForm(meal){ return { name: '', qty: 1, kcal: '', protein: '', carbs: '', fat: '', serving: '', meal: MEALS.includes(meal) ? meal : mealNow(), editId: null, source: 'manual' }; }
+function blankFoodForm(meal){ return { name: '', qty: 1, kcal: '', protein: '', carbs: '', fat: '', sugars: '', saturates: '', fibre: '', sodium: '', serving: '', meal: MEALS.includes(meal) ? meal : mealNow(), editId: null, source: 'manual', category: '', brand: '' }; }
 function foodDay(d){ return state.food.entries.filter(e => e.date === d).sort((a, b) => (a.at || 0) - (b.at || 0)); }
-function foodTotals(list){ const t = { kcal: 0, protein: 0, carbs: 0, fat: 0, pending: 0, n: 0 }; list.forEach(e => { if (e.status === 'pending') { t.pending++; return; } t.n++; t.kcal += Number(e.kcal) || 0; t.protein += Number(e.protein) || 0; t.carbs += Number(e.carbs) || 0; t.fat += Number(e.fat) || 0; }); return t; }
-function saveFood(){ lsPut('food', state.food); queueSync(); }
+/* xn = how many counted entries carry any of the optional detail, xc = how many carry each one. */
+function foodTotals(list){
+  const t = { kcal: 0, protein: 0, carbs: 0, fat: 0, pending: 0, n: 0, sugars: 0, saturates: 0, fibre: 0, sodium: 0, xn: 0, xc: { sugars: 0, saturates: 0, fibre: 0, sodium: 0 } };
+  list.forEach(e => {
+    if (e.status === 'pending') { t.pending++; return; }
+    t.n++; t.kcal += Number(e.kcal) || 0; t.protein += Number(e.protein) || 0; t.carbs += Number(e.carbs) || 0; t.fat += Number(e.fat) || 0;
+    let any = false; NUTRI_X.forEach(k => { if (hasNum(e[k])) { t[k] += Number(e[k]); t.xc[k]++; any = true; } }); if (any) t.xn++;
+  });
+  return t;
+}
+function stampFood(){ state.food.schema = Math.max(FOOD_SCHEMA, Number(state.food.schema) || 0); return state.food; }
+function saveFood(){ lsPut('food', stampFood()); queueSync(); }
 function bumpFood(){ state.foodRev++; render(); }
 function foodDayLabel(d){ return d === todayStr() ? 'Today' : d === dateStr(addDays(new Date(), -1)) ? 'Yesterday' : parseDate(d).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }); }
 function libKey(i){ return norm(i.name) + '|' + norm(i.cat || ''); }
 function mergeLib(base, extra){ const m = new Map(); base.concat(extra).forEach(i => { if (i && i.name && i.kcal != null) m.set(libKey(i), i); }); return Array.from(m.values()); }
-function fillFoodNames(){ const dl = $('#foodnames'); if (!dl) return; const seen = new Set(), out = []; state.food.saved.concat(state.foodLib).forEach(i => { const k = norm(i.name); if (k && !seen.has(k)) { seen.add(k); out.push('<option value="' + esc(i.name) + '"></option>'); } }); dl.innerHTML = out.join(''); }
+/* Library items say which restaurant or kind of dish they are in "cat". For the filter: an explicit "category" wins, the home-cooking groups are whole foods, drinks sit with the supermarket shelf, and every other group is a restaurant or chain. */
+const LIB_HOME_CATS = ['home dish', 'street food & snacks', 'noodles', 'rice & staples', 'breakfast (silog)', 'bread & bakery', 'dessert'];
+function libCategory(it){ const c = norm(it.cat); return !c || LIB_HOME_CATS.includes(c) ? 'whole_food' : c === 'drinks' ? 'supermarket' : 'dining_out'; }
+function setFoodLib(list){ list.forEach(it => { if (!FOOD_CATS.includes(it.category)) it.category = libCategory(it); }); state.foodLib = list; }
 async function loadFoodLib(){
   let items = [];
   try { const r = await fetch('./food-library.json'); if (r.ok) { const j = await r.json(); if (j && Array.isArray(j.items)) items = j.items; } } catch (e) {}
   const ex = lsGet('foodLibExtra', null);
-  state.foodLib = mergeLib(items, ex && Array.isArray(ex.items) ? ex.items : []); fillFoodNames();
+  setFoodLib(mergeLib(items, ex && Array.isArray(ex.items) ? ex.items : []));
   const cfg = syncCfg();
   if (!cfg || navigator.onLine === false || Date.now() - (lsGet('foodLibExtraAt', 0) || 0) < 12 * 3600 * 1000) return;
   try {
     const r = await ghReq(cfg, 'GET', 'food-library.json', null, true); lsSet('foodLibExtraAt', Date.now());
-    if (r.ok) { const j = await r.json(); if (j && Array.isArray(j.items)) { lsSet('foodLibExtra', { items: j.items }); state.foodLib = mergeLib(items, j.items); fillFoodNames(); } }
+    if (r.ok) { const j = await r.json(); if (j && Array.isArray(j.items)) { lsSet('foodLibExtra', { items: j.items }); setFoodLib(mergeLib(items, j.items)); } }
   } catch (e) {}
 }
-function foodSearch(q){
-  const plain = s => norm(s).replace(/['’`.]/g, '').replace(/&/g, ' and ').replace(/[^a-z0-9ñ]+/g, ' ').trim();
-  const terms = plain(q).split(' ').filter(Boolean); if (!terms.length) return [];
-  const pool = state.food.saved.map(s => Object.assign({}, s, { fav: true, cat: 'Favourite' })).concat(state.foodLib), scored = [];
-  pool.forEach(it => {
-    const name = plain(it.name), hay = name + ' ' + plain((it.aka || []).join(' ')) + ' ' + plain(it.cat || ''); let score = 0;
-    for (let k = 0; k < terms.length; k++) { const i = hay.indexOf(terms[k]); if (i < 0) return; score += name.indexOf(terms[k]) === 0 ? 3 : name.indexOf(terms[k]) > 0 ? 2 : 1; }
-    scored.push({ it: it, score: score + (it.fav ? 2 : 0) + (name === plain(q) ? 5 : 0) });
+const plainTxt = s => norm(s).replace(/['’`.]/g, '').replace(/&/g, ' and ').replace(/[^a-z0-9ñ]+/g, ' ').trim();
+const plainCache = new WeakMap();
+function plainOf(it){ let p = plainCache.get(it); if (!p) { const n = plainTxt(it.name); p = { n: n, a: plainTxt([it.brand || ''].concat(it.aka || []).join(' ')), c: plainTxt(it.cat || '') }; plainCache.set(it, p); } return p; }
+function roundTo(v, d){ const m = Math.pow(10, d); return Math.round((Number(v) || 0) * m) / m; }
+/* One canonical spelling per barcode, the same rule as normalize_barcode in scripts/food_schema.py: digits only, 8 to 14 of them, leading zeros dropped, then padded to 13, so "016000275287", "0016000275287" and "00016000275287" are one product. In-store codes starting with 2 are reused by every shop, so they never match. */
+function normBarcode(raw){
+  const d = String(raw == null ? '' : raw).replace(/[^0-9]/g, ''); if (d.length < 8 || d.length > 14) return null;
+  const s = d.replace(/^0+/, ''); if (!s) return null;
+  const c = s.padStart(13, '0');
+  return c.charAt(0) === '2' || c.slice(0, 2) === '02' ? null : c;
+}
+/* The big offline table, bundled as food-db.json. Two shapes load:
+   version 1 (the first USDA build): about 12,600 USDA rows [name, category index, kcal, protein, carbs, fat, portions, source, fdcId] with the category names in "cats";
+   version 2 (scripts/import_foods.py): curated, USDA and Open Food Facts rows, each value at the position its name has in "fields", with "brands" and "groups" as string tables.
+   dbRec reads one row of either shape into the same record, and dbItem turns that record into the item object the rest of the app uses. */
+const DB_BONUS = [4, 0.75, 0, -0.25]; /* search bonus by source: curated like the library, USDA survey, other USDA, Open Food Facts */
+function dbRec(db, row){
+  if (db.version !== 2) {
+    const g = db.cats[row[1]] || '', nm = String(row[0] || '');
+    return { name: nm, brand: '', group: g, category: g === 'Fast Foods' || g === 'Restaurant Foods' || /fast food|restaurant/i.test(nm) ? 'dining_out' : 'whole_food', regions: 'US', barcode: '', thumb: '', per: 0,
+      kcal: row[2], protein: row[3], carbs: row[4], sugars: null, fat: row[5], saturates: null, fibre: null, sodium: null, portions: row[6] || [], source: row[7] === 0 ? 1 : 2, aka: [], basis: 'database' };
+  }
+  const x = db.ix, v = k => x[k] == null ? undefined : row[x[k]], nn = k => { const y = v(k); return hasNum(y) ? Number(y) : null; };
+  const str = (tbl, k) => { const i = v(k); return typeof i === 'number' ? (i >= 0 && tbl[i] != null ? String(tbl[i]) : '') : typeof i === 'string' ? i : ''; };
+  const t = v('thumb'), full = t && typeof t === 'string' ? (/^https?:\/\//i.test(t) ? t : db.thumbBase + t) : '', bc = v('barcode'), aka = v('aka'), ps = v('portions'), c = v('category'), s = Number(v('source'));
+  return { name: String(v('name') || ''), brand: str(db.brands, 'brand'), group: str(db.groups, 'group'), category: (typeof c === 'number' && FOOD_CATS[c]) || (FOOD_CATS.includes(c) ? c : 'whole_food'), regions: String(v('regions') || ''),
+    barcode: bc ? String(bc) : '', thumb: /^https?:\/\//i.test(full) ? full : '', per: Number(v('per')) === 1 ? 1 : 0,
+    kcal: nn('kcal') || 0, protein: nn('protein'), carbs: nn('carbs'), sugars: nn('sugars'), fat: nn('fat'), saturates: nn('saturates'), fibre: nn('fibre'), sodium: nn('sodium'),
+    portions: Array.isArray(ps) ? ps : [], source: s >= 0 && s <= 3 ? s : 2, aka: Array.isArray(aka) ? aka.map(String) : [], basis: v('basis') ? String(v('basis')) : 'database' };
+}
+/* Builds the search tables once: plain names, brand and other names, group, category and source per row, a barcode map, and the names by which curated rows replace older library items. */
+function prepFoodDb(j){
+  if (!j || !Array.isArray(j.items)) return null;
+  const v2 = Array.isArray(j.fields); if (!v2 && !Array.isArray(j.cats)) return null;
+  const tbl = k => v2 && Array.isArray(j[k]) ? j[k] : [];
+  const db = { version: v2 ? 2 : 1, items: j.items, ix: {}, cats: v2 ? [] : j.cats, brands: tbl('brands'), groups: tbl('groups'), thumbBase: v2 && typeof j.thumbBase === 'string' ? j.thumbBase : '', byBarcode: new Map(), hide: new Set(), exact: new Map() };
+  if (v2) j.fields.forEach((f, i) => { db.ix[f] = i; });
+  const n = db.items.length, memo = new Map(), pl = s => { let p = memo.get(s); if (p == null) { p = plainTxt(s); memo.set(s, p); } return p; };
+  db.nameAt = v2 ? (db.ix.name == null ? 0 : db.ix.name) : 0;
+  db.plain = new Array(n); db.aux = new Array(n); db.grp = new Array(n); db.bp = new Array(n); db.code = new Uint8Array(n); db.src = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    const r = dbRec(db, db.items[i]), name = plainTxt(r.name), brand = r.brand ? pl(r.brand) : '', aka = r.aka.map(plainTxt).filter(Boolean);
+    db.plain[i] = name; db.bp[i] = brand; db.aux[i] = (brand + ' ' + aka.join(' ')).trim(); db.grp[i] = r.group ? pl(r.group) : '';
+    db.code[i] = Math.max(0, FOOD_CATS.indexOf(r.category)); db.src[i] = r.source;
+    if (r.barcode) { const k = normBarcode(r.barcode); if (k && !db.byBarcode.has(k)) db.byBarcode.set(k, i); }
+    if (r.source === 0) { db.hide.add(name); aka.forEach(a => db.hide.add(a)); db.exact.set(name, db.exact.has(name) ? -1 : i); }
+  }
+  return db;
+}
+let foodDbLoading = null;
+function loadFoodDb(){
+  if (state.foodDb) return Promise.resolve();
+  if (!foodDbLoading) foodDbLoading = (async () => {
+    state.foodDbBusy = true;
+    try { const r = await fetch('./food-db.json'); if (r.ok) state.foodDb = prepFoodDb(await r.json()); } catch (e) {}
+    state.foodDbBusy = false; foodDbLoading = null;
+    if (!state.foodDb || state.foodBusy) return;
+    const res = state.foodResults, box = document.activeElement;
+    if (res && !res.online) { state.foodResults = barcodeResults(res.q) || localResults(res.q, res.more); paintFoodResults(); }
+    else if (!res && state.tab === 'food' && box && box.id === 'ff-name') { const hit = barcodeResults(box.value.trim()); if (hit) { state.foodResults = hit; paintFoodResults(); } } /* a barcode typed while the list was still loading */
+  })();
+  return foodDbLoading;
+}
+function portionText(p){ return /\d\s*(g|ml)\b/i.test(p[0]) ? p[0] : p[0] + ' (' + fmtNum(p[1], 1) + ' g)'; }
+/* Sets serving, kcal, macros and whatever optional detail is known on o from its per-100 g values and the chosen portion. Small portions keep three decimals so 150 x "1 g" still adds up. */
+function applyPortion(o, i){
+  const ps = o.portions || [], p = ps[i] || ps[0]; if (!p || !o.per100) return o;
+  const k = p[1] / 100, per = o.per100, fine = p[1] < 20;
+  o.pi = ps.indexOf(p); o.serving = portionText(p); o.kcal = roundTo(per.kcal * k, fine ? 3 : 0); o.protein = roundTo(per.protein * k, fine ? 3 : 1); o.carbs = roundTo(per.carbs * k, fine ? 3 : 1); o.fat = roundTo(per.fat * k, fine ? 3 : 1);
+  NUTRI_X.forEach(x => { if (hasNum(per[x])) o[x] = roundTo(per[x] * k, fine ? 3 : x === 'sodium' ? 0 : 1); else if (!hasNum(o[x])) o[x] = null; }); /* nothing known per 100 g: a number typed by hand stays */
+  return o;
+}
+function per100Item(name, cat, per, portions, extra){
+  const ps = (portions || []).filter(p => p && p[0] && Number(p[1]) > 0).map(p => [String(p[0]), Number(p[1])]);
+  if (!ps.some(p => p[1] === 100)) ps.push(['100 g', 100]);
+  ps.push(['1 g', 1]);
+  return applyPortion(Object.assign({ name: name, cat: cat, per100: per, portions: ps, basis: 'database' }, extra || {}), 0);
+}
+/* A bundle row as the app's item: per 100 g with portions, or the plain per-serving numbers when the source gave no gram weight. cat is the line shown under the name when there is no brand. */
+function dbItem(row){
+  const r = dbRec(state.foodDb, row), nut = { kcal: r.kcal, protein: r.protein || 0, carbs: r.carbs || 0, fat: r.fat || 0, sugars: r.sugars, saturates: r.saturates, fibre: r.fibre, sodium: r.sodium };
+  const extra = { src: r.source === 0 ? 'curated' : r.source === 3 ? 'off' : 'usda', category: r.category, basis: r.basis };
+  ['brand', 'regions', 'barcode', 'thumb'].forEach(k => { if (r[k]) extra[k] = r[k]; }); if (r.aka.length) extra.aka = r.aka;
+  const cat = r.group || r.brand || (r.category === 'supermarket' ? 'Packaged' : 'Food');
+  if (r.per === 1) { const p = r.portions[0]; return Object.assign({ name: r.name, cat: cat, serving: p && p[0] ? String(p[0]) : '1 serving' }, nut, extra); }
+  return per100Item(r.name, cat, nut, r.portions, extra);
+}
+let recentMemo = { key: '', list: [] };
+function recentFoods(){ /* what you logged before, newest first, one row per name, in the amount you had; favourites are listed on their own */
+  const key = state.foodRev + ':' + state.food.entries.length + ':' + state.food.saved.length; if (recentMemo.key === key) return recentMemo.list;
+  const seen = new Set(state.food.saved.map(x => norm(x.name))), out = [];
+  state.food.entries.slice().sort((a, b) => (b.at || 0) - (a.at || 0)).forEach(e => {
+    if (out.length >= 200 || e.status === 'pending' || e.kcal == null || !e.name) return;
+    const k = norm(e.name); if (seen.has(k)) return; seen.add(k);
+    const q = Number(e.qty) > 0 ? Number(e.qty) : 1;
+    out.push(Object.assign({ name: e.name, cat: 'Recent', recent: true, serving: (q !== 1 ? fmtNum(q, 2) + ' × ' : '') + (e.serving || (q !== 1 ? 'serving' : '')), kcal: Math.round(Number(e.kcal) || 0), protein: num1(e.protein), carbs: num1(e.carbs), fat: num1(e.fat) }, foodExtras(e)));
   });
-  return scored.sort((a, b) => b.score - a.score || String(a.it.name).length - String(b.it.name).length).slice(0, 10).map(x => x.it);
+  recentMemo = { key: key, list: out }; return out;
 }
+function termScore(name, aka, cat, t){ /* in the name: whole word beats start of a word beats inside a word; then the brand and other names for the food; a match only on the category counts least */
+  const n = ' ' + name + ' ';
+  if (n.indexOf(' ' + t + ' ') >= 0) return name.indexOf(t) === 0 ? 6 : 3.5;
+  if (name.indexOf(t) === 0) return 4.5;
+  if (n.indexOf(' ' + t) >= 0) return 3;
+  if (name.indexOf(t) >= 0) return 1.5;
+  if (aka && (' ' + aka).indexOf(' ' + t) >= 0) return 3;
+  if (aka && aka.indexOf(t) >= 0) return 1;
+  return cat && (' ' + cat).indexOf(' ' + t) >= 0 ? -2 : -9;
+}
+/* Every word typed must appear. Your own foods rank first, then the curated Philippine foods (library and bundle), then the USDA tables, then other packaged products; shorter, closer names win.
+   cat narrows the list to one category (default: the filter pill that is pressed). Favourites and recent foods only pass a narrower filter when their stored record says which category they are. */
+function foodSearch(q, limit, cat){
+  const pq = plainTxt(q), terms = pq.split(' ').filter(Boolean).map(t => t.length > 3 && t.charAt(t.length - 1) === 's' ? t.slice(0, -1) : t); if (!terms.length) return { items: [], total: 0 };
+  const want = cat || state.foodCat || 'all', all = want === 'all';
+  const scored = [];
+  const pqs = terms.join(' ');
+  const head = raw => { /* +3 when the words typed are the food itself, not an ingredient or a side: "Rice, cooked", "Fried egg", "Fish, salmon" */
+    const segs = String(raw).replace(/\([^)]*\)/g, ' ').split(',').map(plainTxt), is = x => x === pq || x === pqs;
+    if (is(segs[0])) return 3;
+    if (segs.length > 1) return segs.slice(1).some(is) ? 2.75 : 0;
+    const n = segs[0], tail = x => n.length > x.length && n.slice(-x.length - 1) === ' ' + x;
+    return (tail(pq) || tail(pqs)) && n.indexOf(' with ') < 0 ? 3 : 0;
+  };
+  const rate = (name, aka, cat, bonus, raw) => { let sc = bonus; for (let k = 0; k < terms.length; k++) { const x = termScore(name, aka, cat, terms[k]); if (x < -5) return -1; sc += x; } return Math.max(0, sc + (name === pq ? 8 : head(raw)) - Math.min(4, name.length / 22)); };
+  const add = (it, bonus) => { if (!all && it.category !== want) return; const p = plainOf(it), sc = rate(p.n, p.a, p.c, bonus, it.name); if (sc >= 0) scored.push({ s: sc, it: it, n: p.n }); };
+  state.food.saved.forEach(x => add(Object.assign({}, x, { fav: true, cat: 'Favourite' }), 7));
+  recentFoods().forEach(it => add(it, 5));
+  const db = state.foodDb, hide = db && db.hide.size ? db.hide : null; /* a curated bundle row replaces the older library item of the same name */
+  state.foodLib.forEach(it => { if (hide && hide.has(plainOf(it).n)) return; add(it, 4); });
+  if (db) { const wc = all ? -1 : FOOD_CATS.indexOf(want); for (let i = 0; i < db.items.length; i++) { if (wc >= 0 && db.code[i] !== wc) continue; const n = db.plain[i], row = db.items[i], sc = rate(n, db.aux[i], db.grp[i], DB_BONUS[db.src[i]], row[db.nameAt]); if (sc >= 0) scored.push({ s: sc, row: row, n: n, k: 'db|' + n + '|' + db.bp[i] }); } }
+  scored.sort((a, b) => b.s - a.s || a.n.length - b.n.length || (a.n < b.n ? -1 : 1));
+  const out = [], seen = new Set(); let total = 0;
+  for (let i = 0; i < scored.length; i++) {
+    const x = scored[i], key = x.row ? x.k : x.n + '|' + Math.round(Number(x.it.kcal) || 0); if (seen.has(key)) continue; seen.add(key); total++;
+    if (out.length < limit) out.push(x.row ? dbItem(x.row) : x.it);
+  }
+  return { items: out, total: total };
+}
+function localResults(q, more){
+  const r = foodSearch(q, more ? 60 : 12); let msg = '';
+  if (!r.items.length) {
+    const cat = state.foodCat, wider = cat !== 'all' ? foodSearch(q, 1, 'all').total : 0;
+    msg = wider ? 'Nothing under “' + FOOD_CAT_LABEL[cat] + '” matches that. “All” has ' + fmtNum(wider) + (wider === 1 ? ' match.' : ' matches.')
+      : (state.foodDb ? 'Nothing saved in the app matches that. ' : 'The food list is still loading. ') + 'Try fewer words, search brands online, or ask Claude to estimate.';
+  }
+  return { q: q, items: r.items, total: r.total, more: !!more, online: false, msg: msg };
+}
+/* A typed barcode is looked up in the bundle first: a hit is shown at once, with no network call. */
+function barcodeResults(q){
+  const db = state.foodDb; if (!db || !db.byBarcode.size || !/^[\d\s-]+$/.test(q)) return null;
+  const code = normBarcode(q), i = code ? db.byBarcode.get(code) : undefined; if (i == null) return null;
+  return { q: q, items: [dbItem(db.items[i])], total: 1, more: false, online: false, barcode: code, msg: '' };
+}
+/* What the list shows while typing: a barcode saved in the app, else the foods matching the words; nothing for one letter or for a number that is not a saved barcode (Find food looks those up online). */
+function liveResults(q, more){ const hit = barcodeResults(q); return hit || (q.length < 2 || /^\d[\d\s-]*$/.test(q) ? null : localResults(q, more)); }
+/* Results after an online search: the app's own matches first, then the brand matches found online (net), both narrowed by the filter pill. */
+function onlineResults(q, more, net, note){
+  const hit = barcodeResults(q), local = hit ? hit.items : foodSearch(q, more ? 60 : 12).items, cat = state.foodCat, shown = cat === 'all' ? net : net.filter(i => i.category === cat);
+  return { q: q, more: !!more, net: net, note: note || '', items: local.concat(shown), online: true, msg: (note || '') + (net.length && !shown.length ? ' The brand matches found online are under “All” and “' + FOOD_CAT_LABEL.supermarket + '”.' : '') };
+}
+async function fetchT(url, ms, opts){ const c = new AbortController(), t = setTimeout(() => c.abort(), ms); try { const r = await fetch(url, Object.assign({ signal: c.signal }, opts || {})); return { ok: r.ok, status: r.status, data: r.ok ? await r.json() : null }; } finally { clearTimeout(t); } }
 function offItem(p){
-  const n = p && p.nutriments || {}; if (!p || !p.product_name) return null;
-  const serv = Number(n['energy-kcal_serving']) >= 20 && p.serving_size && n['energy-kcal_100g'] != null, sfx = serv ? '_serving' : '_100g', k = n['energy-kcal' + sfx];
-  if (k == null || isNaN(Number(k))) return null;
-  return { name: (p.brands ? String(p.brands).split(',')[0].trim() + ' ' : '') + p.product_name, cat: 'Packaged', serving: serv ? String(p.serving_size) : '100 g', kcal: Math.round(Number(k)), protein: num1(n['proteins' + sfx]), carbs: num1(n['carbohydrates' + sfx]), fat: num1(n['fat' + sfx]), basis: 'database' };
+  const n = p && p.nutriments || {}, nm = p && (p.product_name || p.product_name_en); if (!nm) return null;
+  const brand = Array.isArray(p.brands) ? String(p.brands[0] || '') : p.brands ? String(p.brands).split(',')[0].trim() : '';
+  const name = (brand && plainTxt(nm).indexOf(plainTxt(brand)) < 0 ? brand + ' ' : '') + nm, has = k => n[k] != null && n[k] !== '' && !isNaN(Number(n[k]));
+  const img = typeof p.image_front_small_url === 'string' ? p.image_front_small_url.trim() : '', code = normBarcode(p.code);
+  const extra = { src: 'off', online: true, category: 'supermarket' }; if (brand) extra.brand = brand; if (/^https?:\/\//i.test(img)) extra.thumb = img; if (code) extra.barcode = code;
+  /* optional detail: grams that make no sense are left out rather than shown; this database gives sodium in grams, and salt only when sodium is missing */
+  const grams = (k, max) => has(k) && Number(n[k]) >= 0 && Number(n[k]) <= max ? Number(n[k]) : null, r1 = v => v == null ? null : num1(v);
+  const sodium = (s, max) => { const g = grams('sodium' + s, max / 1000), salt = grams('salt' + s, max / 400); return g != null ? roundTo(g * 1000, 1) : salt != null ? roundTo(sodiumMgFromSaltG(salt), 1) : null; };
+  /* per 100 g as sold; else per 100 g as prepared (instant noodles, drink mixes); kilojoules are converted when calories are missing */
+  const sfx = has('energy-kcal_100g') || has('energy_100g') ? '_100g' : has('energy-kcal_prepared_100g') || has('energy_prepared_100g') ? '_prepared_100g' : '';
+  if (sfx) {
+    const kcal = has('energy-kcal' + sfx) ? Number(n['energy-kcal' + sfx]) : Number(n['energy' + sfx]) / 4.184;
+    const ps = [], m = /(\d+(?:[.,]\d+)?)\s*(g|ml)\b/i.exec(String(p.serving_size || '')), g = Number(p.serving_quantity) > 0 ? Number(p.serving_quantity) : m ? Number(m[1].replace(',', '.')) : 0;
+    if (p.serving_size && g > 0) ps.push([String(p.serving_size), g]);
+    return per100Item(name + (sfx === '_100g' ? '' : ' (prepared)'), 'Packaged', { kcal: Math.round(kcal), protein: Number(n['proteins' + sfx]) || 0, carbs: Number(n['carbohydrates' + sfx]) || 0, fat: Number(n['fat' + sfx]) || 0,
+      sugars: grams('sugars' + sfx, 100), saturates: grams('saturated-fat' + sfx, 100), fibre: grams('fiber' + sfx, 100), sodium: sodium(sfx, 40000) }, ps, extra);
+  }
+  if (p.serving_size && has('energy-kcal_serving')) return Object.assign({ name: name, cat: 'Packaged', serving: String(p.serving_size), kcal: Math.round(Number(n['energy-kcal_serving'])), protein: num1(n.proteins_serving), carbs: num1(n.carbohydrates_serving), fat: num1(n.fat_serving),
+    sugars: r1(grams('sugars_serving', 1000)), saturates: r1(grams('saturated-fat_serving', 1000)), fibre: r1(grams('fiber_serving', 1000)), sodium: sodium('_serving', 40000), basis: 'database' }, extra);
+  return null;
 }
+/* Open Food Facts: packaged products worldwide, scanned in by volunteers. A barcode number is exact; a name search is slower. */
 async function offSearch(q){
-  const fields = 'code,product_name,brands,serving_size,nutriments', digits = q.replace(/\s+/g, ''), ctrl = new AbortController(), to = setTimeout(() => ctrl.abort(), 25000);
-  try {
-    if (/^\d{8,14}$/.test(digits)) { const r = await fetch('https://world.openfoodfacts.org/api/v2/product/' + digits + '.json?fields=' + fields, { signal: ctrl.signal }); const j = await r.json(); const it = j && j.product ? offItem(j.product) : null; return it ? [it] : []; }
-    const r = await fetch('https://world.openfoodfacts.org/cgi/search.pl?search_terms=' + encodeURIComponent(q) + '&search_simple=1&action=process&json=1&page_size=12&fields=' + fields, { signal: ctrl.signal });
-    if (!r.ok) throw new Error('the food database answered ' + r.status);
-    const j = await r.json(); return (j && Array.isArray(j.products) ? j.products : []).map(offItem).filter(Boolean).slice(0, 8);
-  } finally { clearTimeout(to); }
+  const fields = 'code,product_name,product_name_en,brands,serving_size,serving_quantity,image_front_small_url,nutriments', digits = q.replace(/\s+/g, '');
+  if (/^\d{8,14}$/.test(digits)) { const r = await fetchT('https://world.openfoodfacts.org/api/v2/product/' + digits + '.json?fields=' + fields, 20000); const it = r.data && r.data.product ? offItem(r.data.product) : null; return it ? [it] : []; }
+  const url = 'https://world.openfoodfacts.org/cgi/search.pl?search_terms=' + encodeURIComponent(q) + '&search_simple=1&action=process&json=1&page_size=24&fields=' + fields;
+  let r; try { r = await fetchT(url, 20000); if (!r.ok) throw new Error('busy'); } catch (e) { await new Promise(res => setTimeout(res, 1500)); r = await fetchT(url, 20000); } /* it often refuses the first try when busy */
+  if (!r.ok) throw new Error('the packaged-food database answered ' + r.status);
+  return (r.data && Array.isArray(r.data.products) ? r.data.products : []).map(offItem).filter(Boolean).slice(0, 10);
 }
+function fdcItem(f){
+  if (!f || !f.description) return null; const per = {}, ids = { 1008: 'kcal', 1003: 'protein', 1005: 'carbs', 1004: 'fat', 2000: 'sugars', 1258: 'saturates', 1079: 'fibre', 1093: 'sodium' }; /* sodium arrives in mg, the rest in g */
+  (f.foodNutrients || []).forEach(n => { const k = ids[n.nutrientId], v = Number(n.value); if (k && per[k] == null && !isNaN(v)) per[k] = v; });
+  if (per.kcal == null) return null;
+  const title = t => String(t || '').toLowerCase().replace(/(^|[\s(\/-])([a-z])/g, (m, a, b) => a + b.toUpperCase());
+  const brand = f.brandName || f.brandOwner || '', desc = f.description === f.description.toUpperCase() ? title(f.description) : f.description, b = brand === brand.toUpperCase() ? title(brand) : brand;
+  const unit = String(f.servingSizeUnit || '').toLowerCase(), g = Number(f.servingSize) > 0 && /^(g|grm|ml|mlt)$/.test(unit) ? Number(f.servingSize) : 0, ps = [];
+  if (g) { const u = unit.charAt(0) === 'm' ? 'ml' : 'g', h0 = String(f.householdServingFullText || '').trim(), hh = /^[\d.,\/ ]+(onz|oz|grm|g|mlt|ml)\.?$/i.test(h0) ? '' : h0; ps.push([hh && !/\d\s*(g|ml)\b/i.test(hh) ? hh.toLowerCase() + ' (' + fmtNum(g, 1) + ' ' + u + ')' : hh ? hh.toLowerCase() : fmtNum(g, 1) + ' ' + u, g]); }
+  const known = (k, max) => per[k] != null && per[k] >= 0 && per[k] <= max ? per[k] : null, code = normBarcode(f.gtinUpc);
+  const extra = { src: 'fdc', online: true, category: 'supermarket' }; if (b) extra.brand = b; if (code) extra.barcode = code;
+  return per100Item((b && plainTxt(desc).indexOf(plainTxt(b)) < 0 ? b + ' ' : '') + desc, 'US brand', { kcal: per.kcal, protein: per.protein || 0, carbs: per.carbs || 0, fat: per.fat || 0,
+    sugars: known('sugars', 100), saturates: known('saturates', 100), fibre: known('fibre', 100), sodium: known('sodium', 40000) }, ps, extra);
+}
+/* USDA branded foods: label data for US packaged products and chains. Works a few times an hour without a key; a free key in Settings lifts that. */
+async function fdcSearch(q){
+  const own = lsGet('fdcKey', ''), digits = q.replace(/\s+/g, '');
+  const url = 'https://api.nal.usda.gov/fdc/v1/foods/search?dataType=Branded&pageSize=15&query=' + encodeURIComponent(/^\d{8,14}$/.test(digits) ? digits : q);
+  let r; /* a personal key goes in a header; the service does not always accept that from a web page, so the address form is the fallback. The shared demo key is public, so it always uses the address form. */
+  try { r = own ? await fetchT(url, 15000, { headers: { 'X-Api-Key': own } }) : await fetchT(url + '&api_key=DEMO_KEY', 15000); }
+  catch (e) { if (!own) throw new Error('limit'); try { r = await fetchT(url + '&api_key=' + encodeURIComponent(own), 15000); } catch (e2) { throw new Error('no answer (the key may have reached its hourly limit)'); } }
+  if (r.status === 429) throw new Error(own ? 'the USDA key has reached its hourly limit' : 'limit');
+  if (r.status === 403) throw new Error(own ? 'the USDA key was rejected' : 'limit');
+  if (!r.ok) throw new Error(own ? 'the USDA database answered ' + r.status : 'limit');
+  const seen = new Set(); return (r.data && Array.isArray(r.data.foods) ? r.data.foods : []).map(fdcItem).filter(it => { if (!it) return false; const k = plainTxt(it.name) + '|' + it.per100.kcal; if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, 8);
+}
+function portionSelectHtml(f){ return (f.portions || []).map((p, i) => '<option value="' + i + '"' + (i === Number(f.pi) ? ' selected' : '') + '>' + esc(portionText(p)) + '</option>').join(''); }
+function moreNoteText(f){ const n = NUTRI_X.filter(k => hasNum(f[k])).length; return n ? n + ' of 4 filled in' : 'sugars, saturates, fibre, ' + (saltMode() ? 'salt' : 'sodium'); }
+/* The quick switch between sodium in mg and salt in g. It changes the setting at once; what is stored stays sodium in mg. */
+function saltToggleHtml(){ const s = saltMode(); return '<span class="kind salt-t" role="group" aria-label="Show sodium or salt"><button type="button" data-action="food-salt" data-unit="sodium" aria-pressed="' + !s + '">Sodium mg</button><button type="button" data-action="food-salt" data-unit="salt" aria-pressed="' + s + '">Salt g</button></span>'; }
 function paintFoodForm(){ /* update the form in place so the field being typed in keeps its focus */
-  const f = state.foodForm; view.querySelectorAll('[data-ff]').forEach(el => { const v = f[el.dataset.ff]; if (document.activeElement !== el || el.dataset.ff !== 'name') el.value = v == null ? '' : v; });
+  const f = state.foodForm, w = view.querySelector('#ff-pi-wrap');
+  if (w) { const has = !!(f.portions && f.per100); w.hidden = !has; const sel = w.querySelector('select'); if (sel) sel.innerHTML = has ? portionSelectHtml(f) : ''; }
+  view.querySelectorAll('[data-ff]').forEach(el => { const k = el.dataset.ff; if (k === 'pi') return; const v = k === 'sodium' ? sodiumFieldText(f.sodium) : f[k]; if (document.activeElement !== el || k !== 'name') el.value = v == null ? '' : v; });
   const p = view.querySelector('#ff-serving'); if (p) { p.hidden = !f.serving; p.textContent = f.serving ? 'One serving: ' + f.serving + '. Change Servings if you had more or less.' : ''; }
+  const mn = view.querySelector('#ff-more-n'); if (mn) mn.textContent = moreNoteText(f);
 }
-function readFoodForm(){ const f = state.foodForm; view.querySelectorAll('[data-ff]').forEach(el => { f[el.dataset.ff] = el.value; }); return f; }
+/* The sodium box may be showing salt, rounded for display, so it is only read back when it no longer shows what the form holds: the stored milligrams never drift from being shown. */
+function readFoodForm(){ const f = state.foodForm; view.querySelectorAll('[data-ff]').forEach(el => { const k = el.dataset.ff; if (k === 'pi') return; if (k === 'sodium') { if (el.value !== sodiumFieldText(f.sodium)) f.sodium = sodiumFromField(el.value); return; } f[k] = el.value; }); return f; }
+/* A log entry holds totals for the amount eaten. Sugars, saturates, fibre (g) and sodium (mg), the category and the brand are only written when they are known. */
 function entryFromForm(f){
   const qty = Number(f.qty) > 0 ? Number(f.qty) : 1;
-  return { name: String(f.name || '').trim(), qty: qty, serving: f.serving || '', kcal: Math.round((Number(f.kcal) || 0) * qty), protein: num1((Number(f.protein) || 0) * qty), carbs: num1((Number(f.carbs) || 0) * qty), fat: num1((Number(f.fat) || 0) * qty), meal: MEALS.includes(f.meal) ? f.meal : mealNow(), source: f.source || 'manual' };
+  const o = { name: String(f.name || '').trim(), qty: qty, serving: f.serving || '', kcal: Math.round((Number(f.kcal) || 0) * qty), protein: num1((Number(f.protein) || 0) * qty), carbs: num1((Number(f.carbs) || 0) * qty), fat: num1((Number(f.fat) || 0) * qty), meal: MEALS.includes(f.meal) ? f.meal : mealNow(), source: f.source || 'manual' };
+  NUTRI_X.forEach(k => { if (hasNum(f[k]) && Number(f[k]) >= 0) o[k] = k === 'sodium' ? Math.round(Number(f[k]) * qty) : num1(Number(f[k]) * qty); });
+  if (FOOD_CATS.includes(f.category)) o.category = f.category;
+  if (f.brand) o.brand = String(f.brand);
+  return o;
 }
 function addFoodEntry(o){ const e = Object.assign({ id: uid(), date: state.foodDate, at: Date.now() }, o); state.food.entries.push(e); return e; }
-function formFromItem(it, f){ return Object.assign(blankFoodForm(f.meal), { name: it.name, kcal: it.kcal, protein: it.protein || '', carbs: it.carbs || '', fat: it.fat || '', serving: it.serving || '', source: it.fav ? 'favourite' : it.cat === 'Packaged' ? 'packaged' : 'library', editId: f.editId || null }); }
+function formFromItem(it, f){
+  const o = Object.assign(blankFoodForm(f.meal), { name: it.name, kcal: it.kcal, protein: it.protein || '', carbs: it.carbs || '', fat: it.fat || '', serving: it.serving || '', source: it.fav ? 'favourite' : it.recent ? 'recent' : it.src === 'usda' ? 'usda' : it.online || it.src === 'off' ? 'packaged' : 'library', editId: f.editId || null }, foodExtras(it));
+  if (it.per100 && it.portions) { o.per100 = it.per100; o.portions = it.portions; o.pi = it.pi || 0; }
+  return o;
+}
+/* Shown when a food has no picture, or its picture does not load: a basket for the supermarket shelf, a plate with cutlery for eating out, a leaf for whole foods. */
+const CAT_ICON = (() => {
+  const svg = d => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + d + '</svg>';
+  const basket = svg('<path d="M3.5 10h17"></path><path d="M5 10l1.2 8.1a2.2 2.2 0 0 0 2.2 1.9h7.2a2.2 2.2 0 0 0 2.2-1.9L19 10"></path><path d="M8.5 10 12 4.5l3.5 5.5"></path><path d="M10 13.5v3M14 13.5v3"></path>');
+  const plate = svg('<circle cx="12" cy="12" r="4"></circle><path d="M3.5 4v4.2a1.5 1.5 0 0 0 3 0V4M5 4v16"></path><path d="M20.5 20V4c-1.6 1.3-2.5 3.3-2.5 6v3h2.5"></path>');
+  const leaf = svg('<path d="M20 4c0 9.5-3.3 15.5-9.5 15.5-3 0-5-2-5-5C5.5 8.5 11 4 20 4z"></path><path d="M4 21c2-5 5.5-9 11-12"></path>');
+  return { supermarket: basket, dining_out: plate, whole_food: leaf, other: plate };
+})();
+const badThumbs = new Set(); /* pictures that failed to load in this session (offline, or gone): not asked for again until the phone is back online */
+/* data-cat is the food's category ("other" for your own foods saved before categories existed); data-thumb is the picture's address whenever the food has one, loaded or not. */
+function thumbHtml(it){
+  const c = FOOD_CATS.includes(it.category) ? it.category : 'other', u = typeof it.thumb === 'string' && /^https?:\/\//i.test(it.thumb) ? it.thumb : '';
+  return '<span class="fthumb" data-cat="' + c + '"' + (u ? ' data-thumb="' + esc(u) + '"' : '') + '>' + CAT_ICON[c] + (u && !badThumbs.has(u) ? '<img class="fthumb-img" src="' + esc(u) + '" alt="" width="44" height="44" loading="lazy" decoding="async" referrerpolicy="no-referrer">' : '') + '</span>';
+}
+function foodCatsHtml(){ return '<div class="fcats" role="group" aria-label="Show which foods">' + ['all'].concat(FOOD_CATS).map(c => '<button type="button" class="fcat" data-action="food-cat" data-cat="' + c + '" aria-pressed="' + (state.foodCat === c) + '">' + esc(FOOD_CAT_LABEL[c]) + '</button>').join('') + '</div>'; }
+function foodRowHtml(it, i){
+  const own = it.fav || it.recent, who = own ? it.brand || '' : it.brand || it.cat || '';
+  const line = (own ? '<span class="pill">' + esc(it.cat) + '</span> ' : '') + (who ? '<span class="fr-brand">' + esc(who) + '</span> · ' : '') + esc(it.serving || '1 serving');
+  return '<div class="food-item"><button type="button" class="pickbtn" data-action="food-use" data-i="' + i + '">' + thumbHtml(it) +
+    '<span class="fr-txt"><b>' + esc(it.name) + '</b><span class="s">' + line + '</span><span class="s fr-mac">P ' + fmtNum(it.protein, 1) + ' · C ' + fmtNum(it.carbs, 1) + ' · F ' + fmtNum(it.fat, 1) + ' g' + (it.basis === 'estimate' ? ' · approximate' : '') + '</span></span></button>' +
+    '<div class="k">' + fmtNum(it.kcal) + '<small>kcal</small></div><button type="button" class="btn small" data-action="food-addnow" data-i="' + i + '" aria-label="Add one serving of ' + esc(it.name) + '">Add</button></div>';
+}
+function foodResultsHtml(){
+  const res = state.foodResults; if (!res) return '';
+  const n = res.items.length, more = !res.online && !res.barcode && res.total > n;
+  const head = state.foodBusy ? 'Searching…' : res.barcode && n ? 'Barcode match · saved in the app' : n ? (res.online || !more ? n : 'Top ' + n + ' of ' + fmtNum(res.total)) + (n === 1 ? ' match' : ' matches') : 'No match yet';
+  return foodCatsHtml() + '<div class="head" id="food-res-head">' + esc(head) + '</div>' + res.items.map(foodRowHtml).join('') +
+    (res.msg ? '<p class="hr-note" style="margin:8px 0 0">' + esc(res.msg) + '</p>' : '') +
+    '<div class="chip-row" style="margin-top:10px">' + (more ? '<button type="button" class="btn small" data-action="food-more">Show more</button>' : '') + (res.online ? '' : '<button type="button" class="btn small" data-action="food-online"' + (state.foodBusy ? ' disabled' : '') + '>Search brands online</button>') + '<button type="button" class="btn small ghost" data-action="food-clear">Close</button></div>';
+}
+function paintFoodResults(){ /* only this box is redrawn, so the form and the keyboard stay as they are; the pill strip keeps its sideways scroll position */
+  const el = view.querySelector('#food-res'); if (!el) return;
+  const old = el.querySelector('.fcats'), x = old ? old.scrollLeft : 0;
+  el.hidden = !state.foodResults; el.innerHTML = foodResultsHtml();
+  const strip = el.querySelector('.fcats'); if (strip && x) strip.scrollLeft = x;
+}
 function foodRing(eaten, target){
   const r = 34, c = 2 * Math.PI * r, p = Math.min(1, eaten / target), left = Math.round(target - eaten);
   return '<svg class="ring" viewBox="0 0 80 80" width="88" height="88" role="img" aria-label="' + Math.round(eaten) + ' of ' + target + ' calories"><circle cx="40" cy="40" r="' + r + '" class="ring-bg"></circle><circle cx="40" cy="40" r="' + r + '" class="ring-fg' + (left < 0 ? ' over' : '') + '" stroke-dasharray="' + (c * p).toFixed(1) + ' ' + c.toFixed(1) + '" transform="rotate(-90 40 40)"></circle><text x="40" y="43" text-anchor="middle" class="ring-t">' + fmtNum(Math.abs(left)) + '</text><text x="40" y="56" text-anchor="middle" class="ring-s">' + (left < 0 ? 'kcal over' : 'kcal left') + '</text></svg>';
 }
+/* One extra strip under the day's calories: sugars, saturates, fibre and sodium or salt, from the entries that carry that detail (older entries and hand-typed ones may not). Left out when no entry of the day has any. */
+function dayMoreHtml(t){
+  if (!t.xn) return '';
+  const part = (k, label, text) => '<span data-nx="' + k + '">' + label + ' <b>' + (t.xc[k] ? text : '–') + '</b></span>';
+  return '<div class="daymore" id="food-daymore" data-n="' + t.xn + '" data-of="' + t.n + '"><div class="dm-vals">' + part('sugars', 'Sugars', fmtNum(t.sugars, 1) + ' g') + part('saturates', 'Saturates', fmtNum(t.saturates, 1) + ' g') + part('fibre', 'Fibre', fmtNum(t.fibre, 1) + ' g') + part('sodium', saltMode() ? 'Salt' : 'Sodium', sodiumText(t.sodium)) + '</div>' +
+    '<div class="dm-foot"><span class="hr-note" id="food-daymore-n">' + (t.xn < t.n ? 'From ' + t.xn + ' of ' + t.n + ' entries; the rest have no such detail.' : '') + '</span>' + saltToggleHtml() + '</div></div>';
+}
 function foodItemHtml(e){
-  const pending = e.status === 'pending', qty = Number(e.qty) || 1;
+  const pending = e.status === 'pending', qty = Number(e.qty) || 1, brand = e.brand && plainTxt(e.name || '').indexOf(plainTxt(e.brand)) < 0 ? String(e.brand) : ''; /* the brand, when it was stored and the name does not already say it */
   let sub = pending ? (e.photo ? 'Photo sent' : 'Description sent') + ' · waiting for Claude’s estimate' + (e.est && e.est.notes ? ' · ' + esc(e.est.notes) : '')
-    : (qty !== 1 || e.serving ? esc((qty !== 1 ? fmtNum(qty, 2) + ' × ' : '') + (e.serving || 'serving')) + ' · ' : '') + 'P ' + fmtNum(e.protein, 1) + ' · C ' + fmtNum(e.carbs, 1) + ' · F ' + fmtNum(e.fat, 1) + ' g';
+    : (brand ? esc(brand) + ' · ' : '') + (qty !== 1 || e.serving ? esc((qty !== 1 ? fmtNum(qty, 2) + ' × ' : '') + (e.serving || 'serving')) + ' · ' : '') + 'P ' + fmtNum(e.protein, 1) + ' · C ' + fmtNum(e.carbs, 1) + ' · F ' + fmtNum(e.fat, 1) + ' g';
   if (!pending && e.est) sub += '<br><span class="pill">Claude estimate' + (e.est.confidence ? ' · ' + esc(e.est.confidence) + ' confidence' : '') + '</span>' + (e.est.notes ? ' ' + esc(e.est.notes) : '');
   const actions = state.foodConfirmDel === e.id
     ? '<div class="confirm">Delete this entry? <button class="btn small danger" data-action="food-del-yes" data-id="' + esc(e.id) + '">Delete</button><button class="btn small" data-action="food-del-no">Keep</button></div>'
@@ -835,38 +1163,41 @@ function renderFood(){
   if (!state.loaded) { view.innerHTML = '<section><p class="lede">Loading your log…</p></section>'; return; }
   const d = state.foodDate, today = todayStr(), list = foodDay(d), t = foodTotals(list), f = state.foodForm;
   const target = Number(state.settings.kcalTarget) || 0, pt = Number(state.settings.proteinTarget) || 0, label = foodDayLabel(d);
-  let html = '<section class="card hero"><div class="txt"><h2>' + fmtNum(t.kcal) + ' kcal ' + (d === today ? 'so far' : 'eaten') + '</h2><p class="lede" style="margin:0">' +
+  let html = '<section class="card hero food-hero"><div class="txt"><h2>' + fmtNum(t.kcal) + ' kcal ' + (d === today ? 'so far' : 'eaten') + '</h2><p class="lede" style="margin:0">' +
     (target ? 'Target ' + fmtNum(target) + ' kcal. ' : '') + 'Protein ' + fmtNum(t.protein) + (pt ? ' of ' + fmtNum(pt) : '') + ' g · Carbs ' + fmtNum(t.carbs) + ' g · Fat ' + fmtNum(t.fat) + ' g' +
-    (t.pending ? '. ' + t.pending + (t.pending === 1 ? ' entry is' : ' entries are') + ' waiting for an estimate and not counted yet' : '') + '</p></div>' + (target ? foodRing(t.kcal, target) : '') + '</section>';
+    (t.pending ? '. ' + t.pending + (t.pending === 1 ? ' entry is' : ' entries are') + ' waiting for an estimate and not counted yet' : '') + '</p></div>' + (target ? foodRing(t.kcal, target) : '') + dayMoreHtml(t) + '</section>';
   html += '<section><div class="daynav"><button class="btn small" data-action="food-prev">‹ Earlier</button><b>' + esc(label) + '</b>' +
     (d !== today ? '<button class="btn small" data-action="food-today">Today</button>' : '') + '<button class="btn small" data-action="food-next"' + (d >= today ? ' disabled' : '') + '>Later ›</button></div></section>';
   if (state.canWrite) {
     html += '<section><h2>' + (f.editId ? 'Edit entry' : 'Add food') + '</h2><div class="card">' +
-      '<label class="f">Food or description<input type="text" id="ff-name" data-ff="name" list="foodnames" autocomplete="off" placeholder="chicken adobo, Jollibee Chickenjoy, or a barcode number" value="' + esc(f.name) + '"></label>' +
+      '<label class="f">Food or description<input type="text" id="ff-name" data-ff="name" autocomplete="off" autocorrect="off" enterkeyhint="search" placeholder="chicken adobo, Jollibee Chickenjoy, or a barcode number" value="' + esc(f.name) + '"></label>' +
+      '<div class="food-res" id="food-res"' + (state.foodResults ? '' : ' hidden') + '>' + foodResultsHtml() + '</div>' +
+      '<label class="f" id="ff-pi-wrap"' + (f.portions && f.per100 ? '' : ' hidden') + ' style="margin-top:10px">Serving size<select data-ff="pi">' + portionSelectHtml(f) + '</select></label>' +
       '<div class="frow"><label class="f">Servings<input type="number" id="ff-qty" data-ff="qty" min="0" step="0.25" inputmode="decimal" value="' + esc(f.qty) + '"></label>' +
-      '<label class="f">Kcal per serving<input type="number" id="ff-kcal" data-ff="kcal" min="0" step="1" inputmode="numeric" value="' + esc(f.kcal) + '"></label>' +
+      '<label class="f">Kcal per serving<input type="number" id="ff-kcal" data-ff="kcal" min="0" step="any" inputmode="decimal" value="' + esc(f.kcal) + '"></label>' +
       '<label class="f">Meal<select data-ff="meal">' + MEALS.map(m => '<option' + (m === f.meal ? ' selected' : '') + '>' + m + '</option>').join('') + '</select></label></div>' +
-      '<div class="frow"><label class="f">Protein (g)<input type="number" data-ff="protein" min="0" step="0.1" inputmode="decimal" value="' + esc(f.protein) + '"></label>' +
-      '<label class="f">Carbs (g)<input type="number" data-ff="carbs" min="0" step="0.1" inputmode="decimal" value="' + esc(f.carbs) + '"></label>' +
-      '<label class="f">Fat (g)<input type="number" data-ff="fat" min="0" step="0.1" inputmode="decimal" value="' + esc(f.fat) + '"></label></div>' +
+      '<div class="frow"><label class="f">Protein (g)<input type="number" data-ff="protein" min="0" step="any" inputmode="decimal" value="' + esc(f.protein) + '"></label>' +
+      '<label class="f">Carbs (g)<input type="number" data-ff="carbs" min="0" step="any" inputmode="decimal" value="' + esc(f.carbs) + '"></label>' +
+      '<label class="f">Fat (g)<input type="number" data-ff="fat" min="0" step="any" inputmode="decimal" value="' + esc(f.fat) + '"></label></div>' +
+      '<details class="more-n" id="ff-more"' + (state.foodMoreOpen ? ' open' : '') + '><summary><span>More nutrition</span><span class="hr-note" id="ff-more-n">' + esc(moreNoteText(f)) + '</span></summary>' +
+      '<div class="frow"><label class="f">Sugars (g)<input type="number" id="ff-sugars" data-ff="sugars" min="0" step="any" inputmode="decimal" value="' + esc(f.sugars) + '"></label>' +
+      '<label class="f">Saturates (g)<input type="number" id="ff-saturates" data-ff="saturates" min="0" step="any" inputmode="decimal" value="' + esc(f.saturates) + '"></label>' +
+      '<label class="f">Fibre (g)<input type="number" id="ff-fibre" data-ff="fibre" min="0" step="any" inputmode="decimal" value="' + esc(f.fibre) + '"></label></div>' +
+      '<div class="frow"><label class="f"><span id="ff-sodium-l">' + (saltMode() ? 'Salt (g)' : 'Sodium (mg)') + '</span><input type="number" id="ff-sodium" data-ff="sodium" min="0" step="any" inputmode="decimal" value="' + esc(sodiumFieldText(f.sodium)) + '"></label>' +
+      '<div class="more-unit"><span class="hr-note">Show as</span>' + saltToggleHtml() + '</div></div>' +
+      '<p class="hr-note" style="margin:8px 0 0">Per serving, like the numbers above; leave blank what the label does not say. Salt in g is sodium in mg ÷ 400.</p></details>' +
       '<p class="hr-note" id="ff-serving" style="margin:10px 0 0"' + (f.serving ? '' : ' hidden') + '>' + (f.serving ? 'One serving: ' + esc(f.serving) + '. Change Servings if you had more or less.' : '') + '</p>' +
       '<div class="btn-row"><button class="btn primary" data-action="food-add">' + (f.editId ? 'Save changes' : 'Add to log') + '</button><button class="btn" data-action="food-find"' + (state.foodBusy ? ' disabled' : '') + '>Find food</button>' + (f.editId ? '<button class="btn" data-action="food-cancel">Cancel</button>' : '') + '</div>' +
       (f.editId ? '' : '<div class="btn-row"><button class="btn" data-action="food-photo">Photo for Claude</button><button class="btn" data-action="food-ask">Ask Claude to estimate</button></div>' +
-        '<p class="hr-note" style="margin:10px 0 0">Not sure of the numbers? Send a photo or just the description. Claude checks about every 12 hours and fills in an estimate you can correct. Needs Cloud sync on.</p>') +
+        '<p class="hr-note" style="margin:10px 0 0">Start typing to search ' + (state.foodDb ? fmtNum(Math.floor((state.foodDb.items.length + state.foodLib.length) / 100) * 100) + '+ foods' : 'the food lists') + ' saved in the app, plus your own; a barcode saved in the app shows at once, other brands and barcodes are looked up online. Not sure of the numbers? Send a photo or just the description. Claude checks about every 12 hours and fills in an estimate you can correct. Needs Cloud sync on.</p>') +
       '</div></section>';
-    const res = state.foodResults;
-    if (res) {
-      html += '<section><h2>Matches for “' + esc(res.q) + '”</h2><div class="card">' +
-        (res.items.length ? res.items.map((it, i) => '<div class="food-item"><div class="n"><b>' + esc(it.name) + '</b><div class="s">' + (it.cat ? '<span class="pill">' + esc(it.cat) + '</span> ' : '') + esc(it.serving || '1 serving') + ' · P ' + fmtNum(it.protein, 1) + ' · C ' + fmtNum(it.carbs, 1) + ' · F ' + fmtNum(it.fat, 1) + ' g' + (it.basis === 'estimate' ? ' · approximate' : '') + '</div>' +
-          '<div class="chip-row"><button class="btn small" data-action="food-use" data-i="' + i + '">Use</button><button class="btn small" data-action="food-addnow" data-i="' + i + '">Add 1 serving</button></div></div><div class="k">' + fmtNum(it.kcal) + '<small>kcal</small></div></div>').join('') : '') +
-        (res.msg ? '<p class="hr-note" style="margin:8px 0 0">' + esc(res.msg) + '</p>' : '') +
-        '<div class="chip-row" style="margin-top:10px">' + (res.online ? '' : '<button class="btn small" data-action="food-online"' + (state.foodBusy ? ' disabled' : '') + '>Search packaged foods online</button>') + '<button class="btn small ghost" data-action="food-clear">Close</button></div></div></section>';
-    }
     const favs = state.food.saved.slice().sort((a, b) => (b.uses || 0) - (a.uses || 0) || (b.lastUsed || 0) - (a.lastUsed || 0));
     if (favs.length && !f.editId) {
       html += '<section><h2>Favourites</h2><div class="chip-row">' + favs.slice(0, 12).map(s => '<button class="btn small" data-action="food-quick" data-id="' + esc(s.id) + '">' + esc(s.name) + ' · ' + fmtNum(s.kcal) + '</button>').join('') + '</div>' +
         '<details style="margin-top:10px"><summary class="hr-note">Manage favourites</summary>' + favs.map(s => '<div class="food-item"><div class="n"><b>' + esc(s.name) + '</b><div class="s">' + esc(s.serving || '1 serving') + ' · ' + fmtNum(s.kcal) + ' kcal</div></div><div><button class="btn small ghost danger" data-action="food-unfav" data-id="' + esc(s.id) + '">Remove</button></div></div>').join('') + '</details></section>';
     }
+    const rec = recentFoods().slice(0, 10);
+    if (rec.length && !f.editId) html += '<section><h2>Recent</h2><div class="chip-row">' + rec.map((r, i) => '<button class="btn small" data-action="food-recent" data-i="' + i + '">' + esc(r.name.length > 34 ? r.name.slice(0, 32) + '…' : r.name) + ' · ' + fmtNum(r.kcal) + '</button>').join('') + '</div></section>';
   }
   html += '<section><h2>' + esc(label === 'Today' ? 'Today’s log' : label) + '</h2>';
   if (!list.length) html += '<div class="empty">Nothing logged for this day yet.</div>';
@@ -890,13 +1221,19 @@ function renderFood(){
   view.innerHTML = html;
 }
 async function foodOnline(q){
-  const local = state.foodResults && state.foodResults.q === q ? state.foodResults.items.filter(i => i.cat !== 'Packaged') : [];
-  state.foodBusy = true; state.foodResults = { q: q, items: local, online: true, msg: 'Searching packaged foods… this can take up to 20 seconds. Typing the barcode number from the pack is faster.' }; bumpFood();
-  let msg = '', off = [];
-  try { off = await offSearch(q); if (!off.length) msg = local.length ? 'No packaged-food match online.' : 'No match in the library or the packaged-food database. Type the numbers yourself, or ask Claude to estimate.'; }
-  catch (e) { msg = 'The packaged-food database did not answer (it is often slow). Try again, type the barcode number from the pack, enter the numbers yourself, or ask Claude to estimate.'; }
+  const more = !!(state.foodResults && state.foodResults.q === q && state.foodResults.more);
+  state.foodBusy = true; state.foodResults = onlineResults(q, more, [], 'Searching brands and packaged foods online… this can take up to 20 seconds. The barcode number from the pack is the quickest.'); paintFoodResults();
+  const hadLocal = state.foodResults.items.length > 0;
+  const got = await Promise.allSettled([offSearch(q), fdcSearch(q)]), off = got[0].status === 'fulfilled' ? got[0].value : [], fdc = got[1].status === 'fulfilled' ? got[1].value : [];
+  const items = [], seen = new Set(), n = Math.max(off.length, fdc.length);
+  for (let i = 0; i < n; i++) [off[i], fdc[i]].forEach(it => { if (!it) return; const k = plainTxt(it.name) + '|' + Math.round(it.kcal); if (!seen.has(k)) { seen.add(k); items.push(it); } });
+  const notes = [];
+  if (got[0].status === 'rejected') notes.push('The packaged-food database did not answer (it is often slow); try again in a moment.');
+  if (got[1].status === 'rejected') { const why = String(got[1].reason && got[1].reason.message || 'no answer'); if (why !== 'limit') notes.push('US brand search failed: ' + why + '.'); else if (!items.length) notes.push('US brand search allows only a few lookups an hour without a key. A free USDA key in Settings removes that limit.'); }
+  if (!items.length && !notes.length) notes.push(hadLocal ? 'No brand or packaged-food match online.' : 'No match in the app or online. Type the numbers yourself, or ask Claude to estimate.');
+  else if (!items.length) notes.push('Enter the numbers yourself, or ask Claude to estimate.');
   state.foodBusy = false;
-  if (state.foodResults && state.foodResults.q === q) { state.foodResults = { q: q, items: local.concat(off), online: true, msg: msg }; bumpFood(); }
+  if (state.foodResults && state.foodResults.q === q) { state.foodResults = onlineResults(q, more, items, notes.join(' ')); if (state.tab === 'food') paintFoodResults(); } /* the filter pill pressed by now decides what is listed */
 }
 async function checkEstimates(manual){
   const cfg = syncCfg(), pending = state.food.entries.filter(e => e.status === 'pending');
@@ -937,19 +1274,39 @@ async function foodAction(act, b){
     if (!String(f.name || '').trim()) { setStatus('Type what you ate first.', 'warn'); focusEl('#ff-name'); return; }
     if (f.kcal === '' || f.kcal == null || isNaN(Number(f.kcal)) || Number(f.kcal) < 0) { setStatus('Enter the calories, tap Find food to look them up, or ask Claude to estimate.', 'warn'); focusEl('#ff-kcal'); return; }
     const o = entryFromForm(f);
-    if (f.editId) { const e = state.food.entries.find(x => x.id === f.editId); if (!e) { setStatus('That entry no longer exists.', 'warn'); state.foodForm = blankFoodForm(f.meal); bumpFood(); return; } Object.assign(e, o, { source: e.source || o.source }); delete e.status; }
+    if (f.editId) { const e = state.food.entries.find(x => x.id === f.editId); if (!e) { setStatus('That entry no longer exists.', 'warn'); state.foodForm = blankFoodForm(f.meal); bumpFood(); return; } Object.assign(e, o, { source: e.source || o.source }); NUTRI_X.forEach(k => { if (!(k in o)) delete e[k]; }); delete e.status; } /* a detail box left blank removes that detail; every other field of the entry stays as it was */
     else addFoodEntry(o);
     try { saveFood(); } catch (e) { setStatus('Could not save: ' + (e && e.message || e), 'warn'); return; }
     state.foodForm = blankFoodForm(o.meal); state.foodResults = null; bumpFood(); setStatus((f.editId ? 'Changes saved: ' : 'Added: ') + o.name + ', ' + fmtNum(o.kcal) + ' kcal.', 'ok'); return;
   }
   if (act === 'food-find') {
     const q = String(f.name || '').trim(); if (!q) { setStatus('Type a food name or a barcode number, then tap Find food.', 'warn'); focusEl('#ff-name'); return; }
-    const items = foodSearch(q); state.foodResults = { q: q, items: items, online: false, msg: '' };
-    if (!items.length || /^\d[\d\s]{7,15}$/.test(q)) { await foodOnline(q); return; }
-    bumpFood(); return;
+    if (!state.foodDb) await loadFoodDb();
+    const hit = barcodeResults(q); if (hit) { state.foodResults = hit; paintFoodResults(); return; } /* a barcode saved in the app needs no network */
+    state.foodResults = localResults(q, false); paintFoodResults();
+    const found = state.foodCat === 'all' ? state.foodResults.items.length : foodSearch(q, 3, 'all').items.length; /* whether to look online does not depend on the filter pill */
+    if (found < 3 || /^\d[\d\s]{7,15}$/.test(q)) await foodOnline(q);
+    return;
+  }
+  if (act === 'food-cat') { /* a filter pill: only the results box is redrawn, so the keyboard stays up */
+    state.foodCat = FOOD_CATS.includes(b.dataset.cat) ? b.dataset.cat : 'all';
+    const res = state.foodResults; if (res && !res.barcode) state.foodResults = res.online ? onlineResults(res.q, res.more, res.net || [], res.note) : localResults(res.q, res.more);
+    paintFoodResults(); return;
+  }
+  if (act === 'food-salt') { /* sodium in mg or salt in g: saved like the other settings, then everything is redrawn in the new unit */
+    const u = b.dataset.unit === 'salt' ? 'salt' : 'sodium'; if (u === (saltMode() ? 'salt' : 'sodium')) return;
+    try { await store.saveSettings(Object.assign({}, state.settings, { saltUnit: u })); } catch (e) { setStatus('Could not save: ' + (e && e.message || e), 'warn'); return; }
+    const sel = $('#setSalt'); if (sel) sel.value = u; return;
   }
   if (act === 'food-online') { if (state.foodResults) await foodOnline(state.foodResults.q); return; }
-  if (act === 'food-clear') { state.foodResults = null; bumpFood(); return; }
+  if (act === 'food-more') { if (state.foodResults) { state.foodResults = localResults(state.foodResults.q, true); paintFoodResults(); } return; }
+  if (act === 'food-clear') { state.foodResults = null; paintFoodResults(); return; }
+  if (act === 'food-recent') {
+    const r = recentFoods()[Number(b.dataset.i)]; if (!r) return;
+    const o = entryFromForm(Object.assign(blankFoodForm(f.meal), { name: r.name, kcal: r.kcal, protein: r.protein, carbs: r.carbs, fat: r.fat, serving: r.serving || '', source: 'recent' }, foodExtras(r)));
+    addFoodEntry(o); try { saveFood(); } catch (e) { setStatus('Could not save: ' + (e && e.message || e), 'warn'); return; }
+    bumpFood(); setStatus('Added: ' + o.name + ', ' + fmtNum(o.kcal) + ' kcal.', 'ok'); return;
+  }
   if (act === 'food-use' || act === 'food-addnow') {
     const it = state.foodResults && state.foodResults.items[Number(b.dataset.i)]; if (!it) return;
     const nf = formFromItem(it, f);
@@ -959,7 +1316,7 @@ async function foodAction(act, b){
   }
   if (act === 'food-quick') {
     const s = state.food.saved.find(x => x.id === id); if (!s) return;
-    const o = entryFromForm(Object.assign(blankFoodForm(f.meal), { name: s.name, kcal: s.kcal, protein: s.protein, carbs: s.carbs, fat: s.fat, serving: s.serving || '', source: 'favourite' }));
+    const o = entryFromForm(Object.assign(blankFoodForm(f.meal), { name: s.name, kcal: s.kcal, protein: s.protein, carbs: s.carbs, fat: s.fat, serving: s.serving || '', source: 'favourite' }, foodExtras(s)));
     addFoodEntry(o); s.uses = (s.uses || 0) + 1; s.lastUsed = Date.now(); try { saveFood(); } catch (e) { setStatus('Could not save: ' + (e && e.message || e), 'warn'); return; }
     bumpFood(); setStatus('Added: ' + o.name + ', ' + fmtNum(o.kcal) + ' kcal.', 'ok'); return;
   }
@@ -967,13 +1324,13 @@ async function foodAction(act, b){
     const e = state.food.entries.find(x => x.id === id); if (!e || e.status === 'pending') return;
     if (state.food.saved.some(s => norm(s.name) === norm(e.name))) { setStatus('“' + e.name + '” is already a favourite.', 'ok'); return; }
     const q = Number(e.qty) > 0 ? Number(e.qty) : 1;
-    state.food.saved.push({ id: uid(), name: e.name, serving: e.serving || '', kcal: Math.round((Number(e.kcal) || 0) / q), protein: num1((Number(e.protein) || 0) / q), carbs: num1((Number(e.carbs) || 0) / q), fat: num1((Number(e.fat) || 0) / q), uses: 1, lastUsed: Date.now() });
-    saveFood(); fillFoodNames(); bumpFood(); setStatus('Saved “' + e.name + '” as a favourite. Tap it under Favourites to log it again.', 'ok'); return;
+    state.food.saved.push(Object.assign({ id: uid(), name: e.name, serving: e.serving || '', kcal: Math.round((Number(e.kcal) || 0) / q), protein: num1((Number(e.protein) || 0) / q), carbs: num1((Number(e.carbs) || 0) / q), fat: num1((Number(e.fat) || 0) / q) }, foodExtras(e, q), { uses: 1, lastUsed: Date.now() })); /* a favourite keeps one serving, with the same optional detail as the entry */
+    saveFood(); bumpFood(); setStatus('Saved “' + e.name + '” as a favourite. Tap it under Favourites to log it again.', 'ok'); return;
   }
-  if (act === 'food-unfav') { state.food.saved = state.food.saved.filter(s => s.id !== id); saveFood(); fillFoodNames(); bumpFood(); return; }
+  if (act === 'food-unfav') { state.food.saved = state.food.saved.filter(s => s.id !== id); saveFood(); bumpFood(); return; }
   if (act === 'food-edit') {
     const e = state.food.entries.find(x => x.id === id); if (!e) return; const q = Number(e.qty) > 0 ? Number(e.qty) : 1, pend = e.status === 'pending';
-    state.foodForm = { name: e.name || '', qty: q, kcal: pend || e.kcal == null ? '' : num1(e.kcal / q), protein: pend ? '' : num1((Number(e.protein) || 0) / q), carbs: pend ? '' : num1((Number(e.carbs) || 0) / q), fat: pend ? '' : num1((Number(e.fat) || 0) / q), serving: e.serving || '', meal: MEALS.includes(e.meal) ? e.meal : mealNow(), editId: e.id, source: e.source || 'manual' };
+    state.foodForm = Object.assign(blankFoodForm(e.meal), { name: e.name || '', qty: q, kcal: pend || e.kcal == null ? '' : num1(e.kcal / q), protein: pend ? '' : num1((Number(e.protein) || 0) / q), carbs: pend ? '' : num1((Number(e.carbs) || 0) / q), fat: pend ? '' : num1((Number(e.fat) || 0) / q), serving: e.serving || '', meal: MEALS.includes(e.meal) ? e.meal : mealNow(), editId: e.id, source: e.source || 'manual' }, pend ? {} : foodExtras(e, q));
     state.foodResults = null; state.foodConfirmDel = null; bumpFood(); window.scrollTo({ top: 0 }); return;
   }
   if (act === 'food-cancel') { state.foodForm = blankFoodForm(f.meal); state.foodResults = null; bumpFood(); return; }
@@ -1130,15 +1487,37 @@ view.addEventListener('keydown', ev => {
   else if (f === 'set-weight') { ev.preventDefault(); t.dispatchEvent(new Event('change', { bubbles: true })); const btn = view.querySelector('[data-action="add-set"][data-ex="' + t.dataset.ex + '"]'); if (btn) btn.click(); }
   else if (f === 'ex-name') { ev.preventDefault(); t.dispatchEvent(new Event('change', { bubbles: true })); const e = activeExercise(Number(t.dataset.ex)); focusEl(e && e.kind === 'cardio' ? '#f-dist-' + t.dataset.ex : '#f-reps-' + t.dataset.ex + '-0'); }
 });
+let liveT = null;
+view.addEventListener('input', ev => { /* results follow the typing; the form is not redrawn, so the keyboard stays up */
+  const t = ev.target; if (t.id !== 'ff-name') return;
+  state.foodForm.name = t.value; clearTimeout(liveT);
+  liveT = setTimeout(() => {
+    if (state.foodBusy || state.tab !== 'food') return; const q = t.value.trim();
+    if (!state.foodDb && q.length >= 2) loadFoodDb();
+    const res = liveResults(q, false); /* a barcode saved in the app, or the foods matching the words; nothing for one letter or an unknown number */
+    if (!res) { if (state.foodResults) { state.foodResults = null; paintFoodResults(); } return; }
+    state.foodResults = res; paintFoodResults();
+  }, 130);
+});
+view.addEventListener('mousedown', ev => { if (ev.target.closest && ev.target.closest('.fcat')) ev.preventDefault(); }); /* pressing a filter pill must not take the focus, and with it the keyboard, away from the food field */
+view.addEventListener('error', ev => { const t = ev.target; if (t && t.classList && t.classList.contains('fthumb-img')) { badThumbs.add(t.getAttribute('src')); t.remove(); } }, true); /* a picture that does not load leaves the category icon under it showing */
+view.addEventListener('toggle', ev => { if (ev.target && ev.target.id === 'ff-more') state.foodMoreOpen = ev.target.open; }, true);
+window.addEventListener('online', () => { badThumbs.clear(); });
+view.addEventListener('keydown', ev => { if (ev.key === 'Enter' && ev.target.id === 'ff-name') { ev.preventDefault(); clearTimeout(liveT); const b = view.querySelector('[data-action="food-find"]'); if (b && !b.disabled) b.click(); } });
 view.addEventListener('change', ev => {
   const t = ev.target;
   if (t.id === 'progEx') { state.progEx = t.value; lsSet('progEx', t.value); render(); return; }
   if (t.id === 'progMetric') { state.progMetric = t.value; lsSet('progMetric', t.value); render(); return; }
   if (t.dataset.ff) {
-    const ff = state.foodForm, key = t.dataset.ff; ff[key] = t.value;
-    if (key === 'kcal' || key === 'protein' || key === 'carbs' || key === 'fat') ff.auto = false; /* numbers typed by hand are never replaced or cleared */
+    const ff = state.foodForm, key = t.dataset.ff;
+    if (key === 'pi') { applyPortion(ff, Number(t.value) || 0); ff.auto = true; paintFoodForm(); return; }
+    if (key === 'sodium') { ff.sodium = sodiumFromField(t.value); ff.auto = false; const mn = view.querySelector('#ff-more-n'); if (mn) mn.textContent = moreNoteText(ff); return; } /* typed as sodium in mg or salt in g, kept as sodium in mg */
+    ff[key] = t.value;
+    if (key === 'kcal' || key === 'protein' || key === 'carbs' || key === 'fat' || NUTRI_X.includes(key)) ff.auto = false; /* numbers typed by hand are never replaced or cleared */
+    if (NUTRI_X.includes(key)) { const mn = view.querySelector('#ff-more-n'); if (mn) mn.textContent = moreNoteText(ff); }
     if (key === 'name') {
-      const k = norm(t.value), fav = state.food.saved.find(s => norm(s.name) === k), lib = fav ? [] : state.foodLib.filter(i => norm(i.name) === k), it = fav ? Object.assign({ fav: true }, fav) : (lib.length === 1 ? lib[0] : null);
+      const k = norm(t.value), fav = state.food.saved.find(s => norm(s.name) === k), db = state.foodDb, ci = fav || !db ? undefined : db.exact.get(plainTxt(t.value)), hide = db && db.hide.size ? db.hide : null; /* your favourite first, then the curated bundle row of that exact name, then the one library item of that name */
+      const lib = fav || ci >= 0 ? [] : state.foodLib.filter(i => norm(i.name) === k && !(hide && hide.has(plainOf(i).n))), it = fav ? Object.assign({ fav: true }, fav) : ci >= 0 ? dbItem(db.items[ci]) : (lib.length === 1 ? lib[0] : null);
       const empty = ff.kcal === '' || ff.kcal == null;
       if (it && (empty || ff.auto || (ff.source && ff.source !== 'manual'))) { state.foodForm = Object.assign(formFromItem(it, ff), { auto: true }); paintFoodForm(); setStatus(''); }
       else if (!it && ff.auto) { state.foodForm = Object.assign(blankFoodForm(ff.meal), { name: t.value, editId: ff.editId || null }); paintFoodForm(); } /* the numbers belonged to the previous food */
@@ -1198,7 +1577,7 @@ async function finishWorkout(){
 /* ---------- tabs & settings ---------- */
 $('#tabs').addEventListener('click', ev => { const b = ev.target.closest('button[data-tab]'); if (!b) return; if (state.tab !== b.dataset.tab) setStatus(''); state.tab = b.dataset.tab; lsSet('tab', state.tab); render(); window.scrollTo({ top: 0 }); });
 $('#tabs').addEventListener('click', () => { if (state.tab === 'food' && Date.now() - (lsGet('estCheckedAt', 0) || 0) > 10 * 60000) checkEstimates(false); });
-function openSettings(open){ const p = $('#settingsPanel'); p.hidden = !open; $('#settingsBtn').setAttribute('aria-expanded', String(open)); if (open) { $('#setTarget').value = state.settings.weeklyTarget; $('#setRest').value = state.settings.restSec || 90; $('#setWeight').value = state.settings.weightUnit; $('#setDist').value = state.settings.distUnit; const th = $('#setTheme'); if (th) th.value = state.settings.theme || 'system'; $('#setKcal').value = state.settings.kcalTarget || ''; $('#setProtein').value = state.settings.proteinTarget || ''; renderBackupInfo(); const sc = lsGet('sync', null); $('#syncRepo').value = sc && sc.repo || SYNC_DEFAULT_REPO; $('#syncToken').value = ''; $('#syncToken').placeholder = sc && sc.token ? 'saved on this phone (leave blank to keep)' : 'github_pat_...'; renderSyncInfo(); } }
+function openSettings(open){ const p = $('#settingsPanel'); p.hidden = !open; $('#settingsBtn').setAttribute('aria-expanded', String(open)); if (open) { $('#setTarget').value = state.settings.weeklyTarget; $('#setRest').value = state.settings.restSec || 90; $('#setWeight').value = state.settings.weightUnit; $('#setDist').value = state.settings.distUnit; const th = $('#setTheme'); if (th) th.value = state.settings.theme || 'system'; $('#setKcal').value = state.settings.kcalTarget || ''; $('#setProtein').value = state.settings.proteinTarget || ''; const ss = $('#setSalt'); if (ss) ss.value = saltMode() ? 'salt' : 'sodium'; $('#setFdc').value = ''; $('#setFdc').placeholder = lsGet('fdcKey', '') ? 'saved on this phone (type none to remove)' : 'none'; renderBackupInfo(); const sc = lsGet('sync', null); $('#syncRepo').value = sc && sc.repo || SYNC_DEFAULT_REPO; $('#syncToken').value = ''; $('#syncToken').placeholder = sc && sc.token ? 'saved on this phone (leave blank to keep)' : 'github_pat_...'; renderSyncInfo(); } }
 $('#settingsBtn').addEventListener('click', () => openSettings($('#settingsPanel').hidden));
 $('#shareBackup').addEventListener('click', shareBackup);
 $('#downloadBackup').addEventListener('click', downloadBackup);
@@ -1219,9 +1598,10 @@ document.addEventListener('visibilitychange', () => { if (!lsGet('syncDirty', fa
 if ('serviceWorker' in navigator) { window.addEventListener('load', () => { navigator.serviceWorker.register('./sw.js').catch(() => {}); }); }
 $('#closeSettings').addEventListener('click', () => openSettings(false));
 $('#saveSettings').addEventListener('click', async () => {
-  const th = $('#setTheme');
-  const s = { kcalTarget: Math.min(10000, Math.max(0, Math.round(Number($('#setKcal').value) || 0))), proteinTarget: Math.min(500, Math.max(0, Math.round(Number($('#setProtein').value) || 0))), weeklyTarget: Math.min(14, Math.max(1, Math.round(Number($('#setTarget').value) || 4))), restSec: Math.min(600, Math.max(15, Math.round(Number($('#setRest').value) || 90))), weightUnit: $('#setWeight').value === 'kg' ? 'kg' : 'lb', distUnit: $('#setDist').value === 'km' ? 'km' : 'mi', theme: th && ['light', 'dark'].includes(th.value) ? th.value : 'system' };
-  try { await store.saveSettings(s); openSettings(false); setStatus('Settings saved.', 'ok'); } catch (e) { setStatus('Could not save settings: ' + (e && e.message || e), 'warn'); }
+  const th = $('#setTheme'), ss = $('#setSalt');
+  const s = { saltUnit: ss && ss.value === 'salt' ? 'salt' : 'sodium', kcalTarget: Math.min(10000, Math.max(0, Math.round(Number($('#setKcal').value) || 0))), proteinTarget: Math.min(500, Math.max(0, Math.round(Number($('#setProtein').value) || 0))), weeklyTarget: Math.min(14, Math.max(1, Math.round(Number($('#setTarget').value) || 4))), restSec: Math.min(600, Math.max(15, Math.round(Number($('#setRest').value) || 90))), weightUnit: $('#setWeight').value === 'kg' ? 'kg' : 'lb', distUnit: $('#setDist').value === 'km' ? 'km' : 'mi', theme: th && ['light', 'dark'].includes(th.value) ? th.value : 'system' };
+  const fk = $('#setFdc').value.trim(); if (fk) lsSet('fdcKey', /^none$/i.test(fk) ? null : fk);
+  try { await store.saveSettings(Object.assign({}, state.settings, s)); openSettings(false); setStatus('Settings saved.', 'ok'); } catch (e) { setStatus('Could not save settings: ' + (e && e.message || e), 'warn'); }
 });
 let resizeT = null; window.addEventListener('resize', () => { clearTimeout(resizeT); resizeT = setTimeout(() => { if (state.tab === 'progress') { lastKey = ''; render(); } }, 150); });
 
@@ -1231,7 +1611,7 @@ state.tab = TABS.includes(hash) ? hash : (TABS.includes(savedTab) ? savedTab : '
 state.foodDate = todayStr(); state.foodForm = blankFoodForm();
 state.progEx = lsGet('progEx', null); state.progMetric = ['e1rm', 'top', 'vol'].includes(lsGet('progMetric', 'e1rm')) ? lsGet('progMetric', 'e1rm') : 'e1rm';
 render();
-store.init().then(() => { if (lsGet('syncDirty', false)) queueSync(2500); loadFoodLib(); setTimeout(() => { checkEstimates(false); }, 3500); });
+store.init().then(() => { if (lsGet('syncDirty', false)) queueSync(2500); loadFoodLib(); setTimeout(loadFoodDb, 1500); setTimeout(() => { checkEstimates(false); }, 3500); });
 })();
 </script>
 </body>

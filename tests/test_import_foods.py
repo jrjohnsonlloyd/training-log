@@ -1,0 +1,2251 @@
+"""Contract tests for the food database: scripts/food_schema.py and scripts/import_foods.py.
+
+Run from the repository root:
+
+    python -m unittest discover -s tests -p "test_*.py" -v
+
+How these tests are built
+- Every expected value was worked out by hand from the data contract and from the
+  small synthetic fixtures in tests/fixtures/. Nothing was copied from importer output.
+- food_schema is imported directly for the pure helper and migration tests.
+- The importer is treated as a black box: it is started with subprocess from the
+  repository root and only its exit code, its stdout summary, the SQLite file and
+  the exported app bundle are looked at.
+- The main import (curated + flat USDA file + Open Food Facts file) runs once and is
+  shared by all read-only test classes. Everything is written to a temporary folder.
+
+What the main import must end up with (hand count)
+  curated  11 read: 8 kept, 3 skipped as invalid (bad category, bad region, no calories)
+  usda     13 read: 1 invalid (no calories), 1 loses to a curated row -> 11 kept
+  off      32 read: 2 filtered by region, 6 invalid, 7 lose a de-duplication -> 17 kept
+  duplicates 8: barcode C3/A1, U2/A3, Choco Pie pair, Meiji pair;
+                name+brand Chippy pair, Skippy, SkyFlakes, Pork Adobo
+  total_rows 36
+"""
+import csv
+import gzip
+import json
+import os
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(HERE)
+SCRIPTS = os.path.join(REPO, "scripts")
+FIXTURES = os.path.join(HERE, "fixtures")
+IMPORTER = os.path.join("scripts", "import_foods.py")   # relative: the importer is started from REPO
+
+OFF_TSV = os.path.join(FIXTURES, "sample_off.csv")
+USDA_FLAT = os.path.join(FIXTURES, "sample_usda.csv")
+USDA_FOLDER = os.path.join(FIXTURES, "usda_fdc_mini")
+CURATED = os.path.join(FIXTURES, "local_ph_curated.json")
+
+if SCRIPTS not in sys.path:
+    sys.path.insert(0, SCRIPTS)
+
+try:
+    import food_schema
+    _SCHEMA_IMPORT_ERROR = None
+except Exception as exc:   # not written yet, or broken: schema tests then fail with a clear message
+    food_schema = None
+    _SCHEMA_IMPORT_ERROR = exc
+
+BUILT = "2026-11-22"
+THUMB_BASE = "https://images.openfoodfacts.org/images/products/"
+REGION_ORDER = ("PH", "US", "UK", "JP", "KR")
+MACROS = ("protein_g", "carbs_g", "sugars_g", "fat_g", "saturates_g", "fibre_g")
+
+BUNDLE_FIELDS = ["name", "brand", "group", "category", "regions", "barcode", "thumb", "per",
+                 "kcal", "protein", "carbs", "sugars", "fat", "saturates", "fibre", "sodium",
+                 "portions", "source", "aka", "basis"]
+
+V1_COLUMNS = ["id", "name", "group_label", "kcal", "protein", "carbs", "fat", "portions",
+              "source", "source_ref"]
+V2_COLUMNS = ["id", "name", "brand", "group_label", "category", "region_tags", "barcode",
+              "thumbnail_url", "per_unit", "calories_kcal", "protein_g", "carbs_g", "sugars_g",
+              "fat_g", "saturates_g", "fibre_g", "sodium_mg", "portions", "aka", "basis",
+              "source", "source_priority", "source_ref", "popularity", "name_key"]
+
+OFF_COLUMNS = ["code", "product_name", "product_name_en", "brands", "countries_tags",
+               "image_front_small_url", "serving_size", "serving_quantity", "unique_scans_n",
+               "energy-kcal_100g", "energy-kj_100g", "energy_100g", "proteins_100g",
+               "carbohydrates_100g", "sugars_100g", "fat_100g", "saturated-fat_100g",
+               "fiber_100g", "sodium_100g", "salt_100g"]
+USDA_FLAT_COLUMNS = ["fdc_id", "data_type", "description", "brand_owner", "gtin_upc",
+                     "food_category", "serving_size_g", "household_serving", "energy_kcal",
+                     "energy_kj", "protein_g", "carbohydrate_g", "sugars_g", "fat_g",
+                     "saturated_fat_g", "fiber_g", "sodium_mg"]
+
+SUMMARY_KEYS = {"read", "kept", "filtered_region", "invalid", "duplicates", "total_rows"}
+
+# Open Food Facts rows that survive the main import, in the order the app bundle must
+# list them: PH-tagged rows first, then by popularity (unique_scans_n), highest first.
+OFF_EXPORT_ORDER = [
+    "Kikkoman Soy Sauce",            # PH,UK,JP  260 scans
+    "Chippy BBQ",                    # PH,US      80
+    "Milo Activ-Go Powder",          # PH         55
+    "Snickers",                      # 950
+    "Shin Ramyun",                   # 640
+    "Weetabix Original",             # 420
+    "Pocky Chocolate",               # 310
+    "Kewpie Mayonnaise",             # 130
+    "Oi Ocha Green Tea",             # 90
+    "Banana Flavored Milk",          # 75
+    "Baked Beans in Tomato Sauce",   # 33
+    "Meiji Milk Chocolate",          # 20
+    "Deli Roast Chicken Slices",     # 15
+    "Choco Pie Original",            # 10
+    "Bamboo Salt Seasoning",         # 5
+    "Corner Shop Flapjack",          # 3
+    "Calpis Water",                  # blank -> 0
+]
+
+
+# --------------------------------------------------------------------------------------
+# shared plumbing
+# --------------------------------------------------------------------------------------
+
+_CACHE = {}
+
+
+def _workdir():
+    tmp = _CACHE.get("tmp")
+    if tmp is None:
+        tmp = tempfile.TemporaryDirectory(prefix="tl_food_tests_", ignore_cleanup_errors=True)
+        _CACHE["tmp"] = tmp
+    return tmp.name
+
+
+def tearDownModule():
+    tmp = _CACHE.pop("tmp", None)
+    _CACHE.clear()
+    if tmp is not None:
+        tmp.cleanup()
+
+
+def new_dir(label):
+    return tempfile.mkdtemp(prefix=label + "_", dir=_workdir())
+
+
+def cached(name, build):
+    """Run an expensive importer scenario once per session. Failures are remembered too."""
+    if name not in _CACHE:
+        try:
+            _CACHE[name] = build()
+        except Exception as exc:
+            _CACHE[name] = exc
+    value = _CACHE[name]
+    if isinstance(value, Exception):
+        raise AssertionError("importer scenario %r failed: %s" % (name, value))
+    return value
+
+
+def run_importer(args, isolated=False):
+    """Start the importer from the repository root. Returns (exit code, stdout, stderr)."""
+    if not os.path.isfile(os.path.join(REPO, IMPORTER)):
+        raise AssertionError("scripts/import_foods.py does not exist (yet)")
+    cmd = [sys.executable]
+    if isolated:
+        cmd.append("-I")
+    cmd.append(IMPORTER)
+    cmd.extend(args)
+    proc = subprocess.run(cmd, cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          timeout=300)
+    return (proc.returncode,
+            proc.stdout.decode("utf-8", "replace"),
+            proc.stderr.decode("utf-8", "replace"))
+
+
+def parse_summary(stdout):
+    """The last line printed to stdout must be one JSON object."""
+    lines = [line for line in stdout.splitlines() if line.strip()]
+    if not lines:
+        raise AssertionError("the importer printed nothing on stdout")
+    try:
+        doc = json.loads(lines[-1])
+    except ValueError:
+        raise AssertionError("the last stdout line is not JSON: %r" % lines[-1][:300])
+    if not isinstance(doc, dict):
+        raise AssertionError("the last stdout line is not a JSON object: %r" % lines[-1][:300])
+    return doc
+
+
+def import_ok(args, isolated=False):
+    code, out, err = run_importer(args, isolated=isolated)
+    if code != 0:
+        raise AssertionError("the importer exited with code %d\narguments: %s\nstderr (tail):\n%s"
+                             % (code, " ".join(args), err[-3000:]))
+    return {"summary": parse_summary(out), "stdout": out, "stderr": err}
+
+
+def open_db(path):
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def snapshot(path):
+    """Every food_items row without its id, in a stable order."""
+    conn = open_db(path)
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info('food_items')") if r[1] != "id"]
+        rows = conn.execute("SELECT %s FROM food_items" % ", ".join(cols)).fetchall()
+        return sorted((tuple(zip(cols, tuple(r))) for r in rows), key=repr)
+    finally:
+        conn.close()
+
+
+def read_json(path):
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def full_args(db, bundle=None, extra=()):
+    args = ["--db", db, "--curated-json", CURATED, "--usda-path", USDA_FLAT,
+            "--off-path", OFF_TSV]
+    if bundle:
+        args += ["--export-app", bundle]
+    return args + list(extra)
+
+
+def full_import():
+    """Curated + flat USDA + Open Food Facts in one run, with the app bundle exported."""
+    def build():
+        d = new_dir("full")
+        db = os.path.join(d, "foods.sqlite")
+        bundle = os.path.join(d, "food-db.json")
+        imp = import_ok(full_args(db, bundle, ["--built", BUILT]))
+        imp.update(db=db, bundle=bundle)
+        return imp
+    return cached("full", build)
+
+
+def off_only_import():
+    def build():
+        d = new_dir("off_only")
+        db = os.path.join(d, "foods.sqlite")
+        imp = import_ok(["--db", db, "--off-path", OFF_TSV, "--quiet"])
+        imp.update(db=db)
+        return imp
+    return cached("off_only", build)
+
+
+def off_gzip_import():
+    def build():
+        d = new_dir("off_gzip")
+        db = os.path.join(d, "foods.sqlite")
+        gz = os.path.join(d, "sample_off.csv.gz")
+        with open(OFF_TSV, "rb") as src, gzip.open(gz, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        imp = import_ok(["--db", db, "--off-path", gz, "--quiet"])
+        imp.update(db=db)
+        return imp
+    return cached("off_gzip", build)
+
+
+def off_comma_import():
+    """A comma-separated Open Food Facts file that only has a few of the columns."""
+    def build():
+        d = new_dir("off_comma")
+        db = os.path.join(d, "foods.sqlite")
+        path = os.path.join(d, "off_commas.csv")
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["code", "product_name", "countries_tags", "energy-kcal_100g",
+                        "sodium_100g"])
+            w.writerow(["5012345678900", "Oat Biscuits, plain", "en:united-kingdom", "450", "0.3"])
+            w.writerow(["5012345678917", "Negative Sodium Soup", "en:united-kingdom", "40", "-0.5"])
+            w.writerow(["3012345678901", "French Only Jam", "en:france", "250", "0"])
+        imp = import_ok(["--db", db, "--off-path", path, "--quiet"])
+        imp.update(db=db)
+        return imp
+    return cached("off_comma", build)
+
+
+def usda_folder_import():
+    def build():
+        d = new_dir("usda_folder")
+        db = os.path.join(d, "foods.sqlite")
+        imp = import_ok(["--db", db, "--usda-path", USDA_FOLDER, "--quiet"])
+        imp.update(db=db)
+        return imp
+    return cached("usda_folder", build)
+
+
+def rerun_import():
+    """The same full command twice on the same database."""
+    def build():
+        d = new_dir("rerun")
+        db = os.path.join(d, "foods.sqlite")
+        bundle = os.path.join(d, "food-db.json")
+        args = full_args(db, bundle, ["--built", BUILT, "--quiet"])
+        first = import_ok(args)
+        rows1, bundle1 = snapshot(db), read_json(bundle)
+        second = import_ok(args)
+        rows2, bundle2 = snapshot(db), read_json(bundle)
+        return {"first": first["summary"], "second": second["summary"],
+                "rows1": rows1, "rows2": rows2, "bundle1": bundle1, "bundle2": bundle2}
+    return cached("rerun", build)
+
+
+def reversed_runs_import():
+    """Lowest priority first, in three separate runs: Open Food Facts, then USDA, then curated."""
+    def build():
+        d = new_dir("reversed")
+        db = os.path.join(d, "foods.sqlite")
+        import_ok(["--db", db, "--off-path", OFF_TSV, "--quiet"])
+        import_ok(["--db", db, "--usda-path", USDA_FLAT, "--quiet"])
+        last = import_ok(["--db", db, "--curated-json", CURATED, "--quiet"])
+        last.update(db=db, rows=snapshot(db))
+        return last
+    return cached("reversed", build)
+
+
+def max_off_import():
+    def build():
+        d = new_dir("max_off")
+        db = os.path.join(d, "foods.sqlite")
+        bundle = os.path.join(d, "food-db.json")
+        imp = import_ok(full_args(db, bundle, ["--max-off", "1", "--quiet"]))
+        imp.update(db=db, bundle=bundle, doc=read_json(bundle))
+        return imp
+    return cached("max_off", build)
+
+
+class DbCase(unittest.TestCase):
+    """Read-only access to the database written by one shared importer scenario."""
+
+    @classmethod
+    def load(cls):
+        raise NotImplementedError
+
+    @classmethod
+    def setUpClass(cls):
+        cls.imp = cls.load()
+        cls.summary = cls.imp["summary"]
+        cls.db = open_db(cls.imp["db"])
+
+    @classmethod
+    def tearDownClass(cls):
+        db = getattr(cls, "db", None)
+        if db is not None:
+            db.close()
+            cls.db = None
+
+    def q(self, sql, params=()):
+        return self.db.execute(sql, params).fetchall()
+
+    def n_rows(self, where="1 = 1", params=()):
+        return self.db.execute("SELECT COUNT(*) FROM food_items WHERE " + where, params).fetchone()[0]
+
+    def one_row(self, where, params=()):
+        found = self.q("SELECT * FROM food_items WHERE " + where, params)
+        self.assertEqual(len(found), 1, "expected exactly one food_items row WHERE %s with %r, found %d"
+                         % (where, params, len(found)))
+        return found[0]
+
+    def off_row(self, source_ref):
+        return self.one_row("source = 'off' AND source_ref = ?", (source_ref,))
+
+    def usda_row(self, source_ref):
+        return self.one_row("source = 'usda' AND source_ref = ?", (source_ref,))
+
+    def curated_row(self, name):
+        return self.one_row("source = 'curated' AND name = ?", (name,))
+
+    def near(self, actual, expected, places=1):
+        self.assertIsNotNone(actual, "expected about %s but the stored value is NULL" % expected)
+        self.assertAlmostEqual(float(actual), float(expected), places=places)
+
+    def portions_of(self, row):
+        return json.loads(row["portions"])
+
+    def absent(self, name=None, codes=()):
+        if name is not None:
+            self.assertEqual(self.n_rows("name = ?", (name,)), 0,
+                             "%r must not be in food_items" % name)
+        for code in codes:
+            self.assertEqual(self.n_rows("barcode = ? OR source_ref = ?", (code, code)), 0,
+                             "no row may carry the code %r" % code)
+
+
+class FullImportCase(DbCase):
+    @classmethod
+    def load(cls):
+        return full_import()
+
+
+# --------------------------------------------------------------------------------------
+# the fixtures themselves
+# --------------------------------------------------------------------------------------
+
+class FixtureFileTests(unittest.TestCase):
+    """The fixtures parse and hold the rows every other test counts on."""
+
+    def off_rows(self):
+        with open(OFF_TSV, encoding="utf-8", newline="") as f:
+            return list(csv.DictReader(f, delimiter="\t"))
+
+    def usda_rows(self):
+        with open(USDA_FLAT, encoding="utf-8", newline="") as f:
+            return list(csv.DictReader(f))
+
+    def curated_items(self):
+        return read_json(CURATED)["items"]
+
+    def test_off_fixture_is_tab_separated_with_every_contract_column(self):
+        with open(OFF_TSV, encoding="utf-8", newline="") as f:
+            header = f.readline().rstrip("\r\n").split("\t")
+        for col in OFF_COLUMNS:
+            self.assertIn(col, header)
+
+    def test_off_fixture_has_32_complete_rows(self):
+        rows = self.off_rows()
+        self.assertEqual(len(rows), 32)
+        for row in rows:
+            self.assertNotIn(None, row, "a row has more cells than the header")
+            self.assertNotIn(None, row.values(), "a row has fewer cells than the header")
+
+    def test_off_fixture_holds_the_six_anchor_rows(self):
+        by_code = {}
+        for row in self.off_rows():
+            by_code.setdefault(row["code"], row)
+        expected = {"4807770270123": ("Pancit Canton Kalamansi", "Lucky Me!,Monde Nissin", "en:philippines"),
+                    "5000159407236": ("Snickers", "Mars", "en:united-kingdom"),
+                    "016000275287": ("Cheerios", "General Mills", "en:united-states"),
+                    "8801043014830": ("Shin Ramyun", "Nongshim", "en:south-korea,en:united-states"),
+                    "4901330502881": ("Pocky Chocolate", "Glico", "en:japan"),
+                    "3017620422003": ("Nutella", "Ferrero", "en:france")}
+        for code, (name, brands, countries) in expected.items():
+            with self.subTest(code=code):
+                row = by_code[code]
+                self.assertEqual((row["product_name"], row["brands"], row["countries_tags"]),
+                                 (name, brands, countries))
+
+    def test_off_anchor_a2_has_kilojoules_and_salt_only(self):
+        row = [r for r in self.off_rows() if r["code"] == "5000159407236"][0]
+        self.assertEqual((row["energy-kcal_100g"], row["energy_100g"], row["sodium_100g"], row["salt_100g"]),
+                         ("", "2029", "", "0.63"))
+
+    def test_usda_fixture_has_the_contract_header_and_13_rows(self):
+        with open(USDA_FLAT, encoding="utf-8", newline="") as f:
+            header = next(csv.reader(f))
+        self.assertEqual(header, USDA_FLAT_COLUMNS)
+        self.assertEqual(len(self.usda_rows()), 13)
+
+    def test_usda_fixture_holds_the_anchor_rows(self):
+        by_id = {r["fdc_id"]: r for r in self.usda_rows()}
+        self.assertEqual((by_id["2709224"]["description"], by_id["2709224"]["data_type"]),
+                         ("Banana, raw", "survey_fndds_food"))
+        self.assertEqual((by_id["2499999"]["data_type"], by_id["2499999"]["gtin_upc"]),
+                         ("branded_food", "00016000275287"))
+        self.assertEqual((by_id["2706000"]["description"], by_id["2706000"]["food_category"]),
+                         ("Big Mac (McDonalds)", "Burgers"))
+        self.assertEqual((by_id["171688"]["energy_kcal"], by_id["171688"]["energy_kj"]), ("", "1590"))
+
+    def test_curated_fixture_is_json_with_11_items(self):
+        doc = read_json(CURATED)
+        self.assertEqual(doc["version"], 1)
+        self.assertEqual(len(doc["items"]), 11)
+
+    def test_curated_fixture_holds_the_four_anchor_rows(self):
+        by_name = {i["name"]: i for i in self.curated_items()}
+        c1 = by_name["Chickenjoy 1 pc (thigh)"]
+        self.assertEqual((c1["brand"], c1["category"], c1["serving"], c1["nutrition_per"], c1["calories_kcal"]),
+                         ("Jollibee", "dining_out", {"label": "1 thigh", "grams": 125}, "serving", 380))
+        c2 = by_name["Chicken adobo"]
+        self.assertEqual((c2["brand"], c2["group"], c2["nutrition_per"], c2["calories_kcal"]),
+                         (None, "Home dish", "100g", 141))
+        c3 = by_name["Lucky Me! Pancit Canton Kalamansi"]
+        self.assertEqual((c3["barcode"], c3["thumbnail_url"], c3["calories_kcal"], c3["sodium_mg"]),
+                         ("4807770270123", None, 280, 900))
+        c4 = by_name["Flat White (tall)"]
+        self.assertEqual((c4["region_tags"], c4["serving"]["grams"], c4["nutrition_per"]),
+                         (["PH", "US"], None, "serving"))
+
+    def test_usda_folder_fixture_has_the_four_files_and_five_foods(self):
+        for name in ("food.csv", "food_nutrient.csv", "food_portion.csv", "food_category.csv"):
+            self.assertTrue(os.path.isfile(os.path.join(USDA_FOLDER, name)), name)
+        with open(os.path.join(USDA_FOLDER, "food.csv"), encoding="utf-8", newline="") as f:
+            self.assertEqual(len(list(csv.DictReader(f))), 5)
+
+
+# --------------------------------------------------------------------------------------
+# food_schema: constants and pure helpers
+# --------------------------------------------------------------------------------------
+
+class SchemaModuleCase(unittest.TestCase):
+    def setUp(self):
+        if food_schema is None:
+            self.fail("scripts/food_schema.py could not be imported: %r" % (_SCHEMA_IMPORT_ERROR,))
+
+
+class SchemaConstantsTests(SchemaModuleCase):
+    def test_latest_version_is_2(self):
+        self.assertEqual(food_schema.LATEST_VERSION, 2)
+
+    def test_categories(self):
+        self.assertEqual(tuple(food_schema.CATEGORIES), ("supermarket", "dining_out", "whole_food"))
+
+    def test_regions_in_fixed_order(self):
+        self.assertEqual(tuple(food_schema.REGIONS), REGION_ORDER)
+
+    def test_source_priority(self):
+        self.assertEqual(dict(food_schema.SOURCE_PRIORITY), {"curated": 1, "usda": 2, "off": 3})
+
+
+class NormalizeBarcodeTests(SchemaModuleCase):
+    def test_upc_a_12_digits_is_padded_to_13(self):
+        self.assertEqual(food_schema.normalize_barcode("016000275287"), "0016000275287")
+
+    def test_13_digit_form_of_the_same_upc_is_unchanged(self):
+        self.assertEqual(food_schema.normalize_barcode("0016000275287"), "0016000275287")
+
+    def test_gtin_14_form_of_the_same_upc_gives_the_same_value(self):
+        self.assertEqual(food_schema.normalize_barcode("00016000275287"), "0016000275287")
+
+    def test_ean_13_is_unchanged(self):
+        self.assertEqual(food_schema.normalize_barcode("4807770270123"), "4807770270123")
+
+    def test_only_digits_are_kept(self):
+        self.assertEqual(food_schema.normalize_barcode(" 4807-7702 70123\t"), "4807770270123")
+
+    def test_ean_8_is_left_padded_to_13(self):
+        self.assertEqual(food_schema.normalize_barcode("12345678"), "0000012345678")
+
+    def test_fewer_than_8_digits_is_none(self):
+        self.assertIsNone(food_schema.normalize_barcode("1234567"))
+
+    def test_more_than_14_digits_is_none(self):
+        self.assertIsNone(food_schema.normalize_barcode("123456789012345"))
+
+    def test_all_zeros_is_none(self):
+        self.assertIsNone(food_schema.normalize_barcode("00000000"))
+        self.assertIsNone(food_schema.normalize_barcode("0000000000000"))
+
+    def test_empty_text_is_none(self):
+        self.assertIsNone(food_schema.normalize_barcode(""))
+        self.assertIsNone(food_schema.normalize_barcode("n/a"))
+
+    def test_none_is_none(self):
+        self.assertIsNone(food_schema.normalize_barcode(None))
+
+    def test_14_digits_without_leading_zero_stay_14(self):
+        self.assertEqual(food_schema.normalize_barcode("10012345678902"), "10012345678902")
+
+    def test_14_digits_with_one_leading_zero_become_13(self):
+        self.assertEqual(food_schema.normalize_barcode("04807770270123"), "4807770270123")
+
+    def test_in_store_code_starting_with_2_is_none(self):
+        self.assertIsNone(food_schema.normalize_barcode("2000000012345"))
+
+    def test_in_store_code_starting_with_02_is_none(self):
+        self.assertIsNone(food_schema.normalize_barcode("0200123456789"))
+
+    def test_12_digit_code_starting_with_2_is_none(self):
+        # canonical form would be 0200123456789, which starts with "02"
+        self.assertIsNone(food_schema.normalize_barcode("200123456789"))
+
+    def test_result_is_text(self):
+        self.assertIsInstance(food_schema.normalize_barcode("5000159407236"), str)
+
+
+class NameKeyTests(SchemaModuleCase):
+    def test_contract_example_with_the_brand_inside_the_name(self):
+        self.assertEqual(food_schema.name_key("Lucky Me! Pancit Canton", "Lucky Me!"),
+                         "lucky me|pancit canton")
+
+    def test_contract_example_without_the_brand_inside_the_name(self):
+        self.assertEqual(food_schema.name_key("Pancit Canton", "Lucky Me"), "lucky me|pancit canton")
+
+    def test_no_brand_gives_an_empty_brand_part(self):
+        self.assertEqual(food_schema.name_key("Banana, raw"), "|banana raw")
+        self.assertEqual(food_schema.name_key("Banana, raw", None), "|banana raw")
+
+    def test_empty_brand_counts_as_no_brand(self):
+        self.assertEqual(food_schema.name_key("Banana", ""), "|banana")
+
+    def test_case_is_ignored(self):
+        self.assertEqual(food_schema.name_key("PANCIT CANTON", "LUCKY ME"), "lucky me|pancit canton")
+
+    def test_accents_are_removed(self):
+        self.assertEqual(food_schema.name_key("Crème Brûlée", "Nestlé"), "nestle|creme brulee")
+
+    def test_ampersand_becomes_and(self):
+        self.assertEqual(food_schema.name_key("Mac & Cheese"), "|mac and cheese")
+
+    def test_apostrophes_are_deleted(self):
+        self.assertEqual(food_schema.name_key("Wendy's Chili"), "|wendys chili")
+
+    def test_full_stops_are_deleted(self):
+        self.assertEqual(food_schema.name_key("SkyFlakes Crackers", "M.Y. San"),
+                         "my san|skyflakes crackers")
+
+    def test_other_punctuation_runs_become_one_space(self):
+        self.assertEqual(food_schema.name_key("Chickenjoy 1 pc (thigh)", "Jollibee"),
+                         "jollibee|chickenjoy 1 pc thigh")
+        self.assertEqual(food_schema.name_key("Coca-Cola Zero", "Coca-Cola"), "coca cola|zero")
+
+    def test_whitespace_is_trimmed_and_collapsed(self):
+        self.assertEqual(food_schema.name_key("  Chicken   Adobo  "), "|chicken adobo")
+
+    def test_ampersand_and_apostrophe_together(self):
+        self.assertEqual(food_schema.name_key("M&M's Peanut", "M&M's"), "m and ms|peanut")
+
+    def test_brand_prefix_is_removed_when_spelled_differently(self):
+        self.assertEqual(food_schema.name_key("Jack 'n Jill Chippy BBQ", "Jack n Jill"),
+                         "jack n jill|chippy bbq")
+
+    def test_brand_prefix_must_be_followed_by_a_space(self):
+        self.assertEqual(food_schema.name_key("Luckyme Noodles", "Lucky"), "lucky|luckyme noodles")
+
+    def test_name_equal_to_brand_leaves_an_empty_name_part(self):
+        self.assertEqual(food_schema.name_key("Cheerios", "Cheerios"), "cheerios|")
+
+    def test_names_in_other_scripts_stay_distinct(self):
+        # letters of any script are alphanumeric: two Korean product names must not both
+        # collapse to an empty name part
+        first = food_schema.name_key("신라면", "농심")
+        second = food_schema.name_key("너구리", "농심")
+        self.assertNotEqual(first, second)
+        self.assertFalse(first.endswith("|"), first)
+
+
+class UnitHelperTests(SchemaModuleCase):
+    def test_kcal_from_kj(self):
+        self.assertAlmostEqual(food_schema.kcal_from_kj(4184), 1000.0, places=6)
+
+    def test_kcal_from_kj_snickers(self):
+        self.assertAlmostEqual(food_schema.kcal_from_kj(2029), 484.9, places=1)
+
+    def test_sodium_mg_from_salt_g(self):
+        self.assertAlmostEqual(food_schema.sodium_mg_from_salt_g(0.63), 252.0, places=6)
+        self.assertAlmostEqual(food_schema.sodium_mg_from_salt_g(2.5), 1000.0, places=6)
+
+    def test_salt_g_from_sodium_mg(self):
+        self.assertAlmostEqual(food_schema.salt_g_from_sodium_mg(1000), 2.5, places=6)
+        self.assertAlmostEqual(food_schema.salt_g_from_sodium_mg(252), 0.63, places=6)
+
+    def test_salt_and_sodium_round_trip(self):
+        self.assertAlmostEqual(
+            food_schema.salt_g_from_sodium_mg(food_schema.sodium_mg_from_salt_g(3.75)), 3.75, places=6)
+
+
+# --------------------------------------------------------------------------------------
+# food_schema: migrations
+# --------------------------------------------------------------------------------------
+
+V1_ROWS = [
+    (1, "Banana, raw", "Bananas", 97.0, 0.74, 23.0, 0.29, '[["1 banana", 126]]', "usda", "survey:2709224"),
+    (2, "Chicken adobo", "Home dish", 141.0, 15.7, 3.3, 6.5, '[["1 serving with sauce", 152]]', "curated", "chicken-adobo"),
+    (7, "Shin Ramyun", None, 433.0, 9.2, 65.0, None, "[]", "off", "8801043014830"),
+    (12, "Mystery, no macros", None, 250.0, None, None, None, "[]", "usda", None),
+]
+
+
+def dict_rows(conn, sql, params=()):
+    """Rows as dicts, whatever row_factory the connection has."""
+    cur = conn.execute(sql, params)
+    names = [d[0] for d in cur.description]
+    return [dict(zip(names, tuple(r))) for r in cur.fetchall()]
+
+
+def column_names(conn):
+    return [tuple(r)[1] for r in conn.execute("PRAGMA table_info('food_items')").fetchall()]
+
+
+def user_version(conn):
+    return tuple(conn.execute("PRAGMA user_version").fetchone())[0]
+
+
+def schema_sql(conn):
+    return sorted(tuple(r) for r in conn.execute(
+        "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").fetchall())
+
+
+class SchemaCase(SchemaModuleCase):
+    """A fresh database file per test."""
+
+    def setUp(self):
+        super().setUp()
+        tmp = tempfile.TemporaryDirectory(prefix="tl_schema_", ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        self.db_path = os.path.join(tmp.name, "foods.sqlite")
+
+    def connect(self):
+        conn = food_schema.connect(self.db_path)
+        self.addCleanup(conn.close)   # runs before the folder is removed
+        return conn
+
+    def fresh_v2(self):
+        conn = self.connect()
+        food_schema.migrate(conn)
+        return conn
+
+    def v1_with_rows(self):
+        conn = self.connect()
+        food_schema.create_v1(conn)
+        conn.executemany(
+            "INSERT INTO food_items (id, name, group_label, kcal, protein, carbs, fat, portions, source, source_ref)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", V1_ROWS)
+        conn.commit()
+        return conn
+
+    def upgraded(self):
+        conn = self.v1_with_rows()
+        food_schema.migrate(conn)
+        return conn
+
+    def by_id(self, conn):
+        return {r["id"]: r for r in dict_rows(conn, "SELECT * FROM food_items")}
+
+
+class FreshDatabaseMigrationTests(SchemaCase):
+    def test_connect_uses_sqlite_row(self):
+        conn = self.connect()
+        self.assertIs(conn.row_factory, sqlite3.Row)
+
+    def test_fresh_database_reaches_version_2(self):
+        conn = self.connect()
+        self.assertEqual(food_schema.migrate(conn), 2)
+        self.assertEqual(user_version(conn), 2)
+
+    def test_fresh_database_has_every_version_2_column(self):
+        cols = column_names(self.fresh_v2())
+        self.assertEqual(sorted(set(V2_COLUMNS) - set(cols)), [], "missing columns")
+
+    def test_fresh_database_has_no_version_1_nutrient_columns(self):
+        cols = column_names(self.fresh_v2())
+        for old in ("kcal", "protein", "carbs", "fat"):
+            self.assertNotIn(old, cols)
+
+    def test_fresh_database_starts_empty(self):
+        conn = self.fresh_v2()
+        self.assertEqual(dict_rows(conn, "SELECT COUNT(*) AS n FROM food_items")[0]["n"], 0)
+
+    def test_migrating_twice_changes_nothing(self):
+        conn = self.fresh_v2()
+        before = schema_sql(conn)
+        self.assertEqual(food_schema.migrate(conn), 2)
+        self.assertEqual(schema_sql(conn), before)
+        self.assertEqual(user_version(conn), 2)
+
+    def test_version_survives_closing_and_reopening(self):
+        conn = food_schema.connect(self.db_path)
+        food_schema.migrate(conn)
+        conn.close()
+        again = self.connect()
+        self.assertEqual(user_version(again), 2)
+        self.assertIn("calories_kcal", column_names(again))
+
+
+class Version1UpgradeTests(SchemaCase):
+    def test_create_v1_makes_the_old_shape(self):
+        conn = self.connect()
+        food_schema.create_v1(conn)
+        self.assertEqual(column_names(conn), V1_COLUMNS)
+        self.assertEqual(user_version(conn), 1)
+
+    def test_upgrade_returns_and_stores_version_2(self):
+        conn = self.v1_with_rows()
+        self.assertEqual(food_schema.migrate(conn), 2)
+        self.assertEqual(user_version(conn), 2)
+
+    def test_upgrade_keeps_every_row(self):
+        conn = self.upgraded()
+        self.assertEqual(dict_rows(conn, "SELECT COUNT(*) AS n FROM food_items")[0]["n"], len(V1_ROWS))
+
+    def test_upgrade_keeps_ids(self):
+        rows = self.by_id(self.upgraded())
+        self.assertEqual(sorted(rows), [1, 2, 7, 12])
+        self.assertEqual({i: rows[i]["name"] for i in rows},
+                         {1: "Banana, raw", 2: "Chicken adobo", 7: "Shin Ramyun", 12: "Mystery, no macros"})
+
+    def test_upgrade_moves_nutrients_to_the_new_column_names(self):
+        rows = self.by_id(self.upgraded())
+        for rid, _name, _group, kcal, protein, carbs, fat, _p, _s, _ref in V1_ROWS:
+            with self.subTest(id=rid):
+                row = rows[rid]
+                self.assertAlmostEqual(row["calories_kcal"], kcal, places=6)
+                for col, old in (("protein_g", protein), ("carbs_g", carbs), ("fat_g", fat)):
+                    if old is None:
+                        self.assertIsNone(row[col], col)
+                    else:
+                        self.assertAlmostEqual(row[col], old, places=6, msg=col)
+
+    def test_upgrade_drops_the_old_column_names(self):
+        cols = column_names(self.upgraded())
+        for old in ("kcal", "protein", "carbs", "fat"):
+            self.assertNotIn(old, cols)
+
+    def test_upgrade_has_every_version_2_column(self):
+        cols = column_names(self.upgraded())
+        self.assertEqual(sorted(set(V2_COLUMNS) - set(cols)), [], "missing columns")
+
+    def test_upgrade_keeps_group_portions_source_and_source_ref(self):
+        rows = self.by_id(self.upgraded())
+        for rid, _name, group, _k, _p, _c, _f, portions, source, ref in V1_ROWS:
+            with self.subTest(id=rid):
+                row = rows[rid]
+                self.assertEqual(row["group_label"], group)
+                self.assertEqual(json.loads(row["portions"]), json.loads(portions))
+                self.assertEqual(row["source"], source)
+                self.assertEqual(row["source_ref"], ref)
+
+    def test_upgrade_backfills_source_priority(self):
+        rows = self.by_id(self.upgraded())
+        self.assertEqual({i: rows[i]["source_priority"] for i in rows}, {1: 2, 2: 1, 7: 3, 12: 2})
+
+    def test_upgrade_backfills_category_whole_food(self):
+        rows = self.by_id(self.upgraded())
+        self.assertEqual({r["category"] for r in rows.values()}, {"whole_food"})
+
+    def test_upgrade_backfills_region_us_for_usda_rows_only(self):
+        rows = self.by_id(self.upgraded())
+        self.assertEqual({i: rows[i]["region_tags"] for i in rows}, {1: "US", 2: "", 7: "", 12: "US"})
+
+    def test_upgrade_backfills_per_unit_100g(self):
+        rows = self.by_id(self.upgraded())
+        self.assertEqual({r["per_unit"] for r in rows.values()}, {"100g"})
+
+    def test_upgrade_backfills_aka_empty_list(self):
+        rows = self.by_id(self.upgraded())
+        self.assertEqual({r["aka"] for r in rows.values()}, {"[]"})
+
+    def test_upgrade_backfills_name_key(self):
+        rows = self.by_id(self.upgraded())
+        self.assertEqual({i: rows[i]["name_key"] for i in rows},
+                         {1: "|banana raw", 2: "|chicken adobo", 7: "|shin ramyun",
+                          12: "|mystery no macros"})
+
+    def test_upgrade_leaves_the_new_optional_columns_empty(self):
+        rows = self.by_id(self.upgraded())
+        for rid, row in rows.items():
+            with self.subTest(id=rid):
+                for col in ("brand", "barcode", "thumbnail_url", "sugars_g", "saturates_g",
+                            "fibre_g", "sodium_mg"):
+                    self.assertIsNone(row[col], col)
+                self.assertEqual(row["popularity"], 0)
+
+    def test_upgrade_is_idempotent(self):
+        conn = self.upgraded()
+        before_rows = dict_rows(conn, "SELECT * FROM food_items ORDER BY id")
+        before_schema = schema_sql(conn)
+        self.assertEqual(food_schema.migrate(conn), 2)
+        self.assertEqual(dict_rows(conn, "SELECT * FROM food_items ORDER BY id"), before_rows)
+        self.assertEqual(schema_sql(conn), before_schema)
+
+    def test_upgrade_is_committed(self):
+        conn = food_schema.connect(self.db_path)
+        food_schema.create_v1(conn)
+        conn.executemany(
+            "INSERT INTO food_items (id, name, group_label, kcal, protein, carbs, fat, portions, source, source_ref)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", V1_ROWS)
+        conn.commit()
+        food_schema.migrate(conn)
+        conn.close()
+        again = self.connect()
+        self.assertEqual(user_version(again), 2)
+        self.assertEqual(sorted(self.by_id(again)), [1, 2, 7, 12])
+
+    def test_rows_added_after_the_upgrade_get_new_ids(self):
+        conn = self.upgraded()
+        cur = conn.execute("INSERT INTO food_items (name, calories_kcal, source, source_priority)"
+                           " VALUES ('New food', 10, 'curated', 1)")
+        self.assertGreater(cur.lastrowid, 12)
+
+
+class _ConstraintChecks:
+    """Constraints and indexes of version 2. Mixed into one class per way of getting there."""
+
+    def make_db(self):
+        raise NotImplementedError
+
+    def insert(self, conn, **over):
+        row = {"name": "Test food", "category": "whole_food", "calories_kcal": 100.0,
+               "source": "curated", "source_priority": 1}
+        row.update(over)
+        cols = ", ".join(row)
+        marks = ", ".join("?" for _ in row)
+        return conn.execute("INSERT INTO food_items (%s) VALUES (%s)" % (cols, marks),
+                            list(row.values())).lastrowid
+
+    def index_shapes(self, conn):
+        shapes = {}
+        for ix in conn.execute("PRAGMA index_list('food_items')").fetchall():
+            ix = tuple(ix)   # seq, name, unique, origin, partial
+            cols = tuple(tuple(r)[2] for r in
+                         conn.execute("PRAGMA index_info('%s')" % ix[1]).fetchall())
+            shapes[cols] = {"unique": bool(ix[2]), "partial": bool(ix[4])}
+        return shapes
+
+    def test_minimal_row_gets_the_documented_defaults(self):
+        conn = self.make_db()
+        rid = conn.execute("INSERT INTO food_items (name, calories_kcal, source, source_priority)"
+                           " VALUES ('Plain food', 100, 'curated', 1)").lastrowid
+        row = dict_rows(conn, "SELECT * FROM food_items WHERE id = ?", (rid,))[0]
+        self.assertEqual({k: row[k] for k in ("category", "region_tags", "per_unit", "portions",
+                                              "aka", "popularity", "name_key")},
+                         {"category": "whole_food", "region_tags": "", "per_unit": "100g",
+                          "portions": "[]", "aka": "[]", "popularity": 0, "name_key": ""})
+
+    def test_the_three_categories_are_accepted(self):
+        conn = self.make_db()
+        for i, category in enumerate(("supermarket", "dining_out", "whole_food")):
+            self.insert(conn, category=category, source_ref="cat-%d" % i)
+        self.assertEqual(
+            dict_rows(conn, "SELECT COUNT(*) AS n FROM food_items WHERE source_ref LIKE 'cat-%'")[0]["n"], 3)
+
+    def test_category_check_rejects_an_unknown_category(self):
+        conn = self.make_db()
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.insert(conn, category="street_food")
+
+    def test_per_unit_accepts_serving(self):
+        conn = self.make_db()
+        self.insert(conn, per_unit="serving", source_ref="per-serving")
+        self.assertEqual(
+            dict_rows(conn, "SELECT per_unit FROM food_items WHERE source_ref = 'per-serving'")[0]["per_unit"],
+            "serving")
+
+    def test_per_unit_check_rejects_an_unknown_unit(self):
+        conn = self.make_db()
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.insert(conn, per_unit="cup")
+
+    def test_two_rows_cannot_share_a_barcode(self):
+        conn = self.make_db()
+        self.insert(conn, barcode="5000159407236", source_ref="bar-a")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.insert(conn, barcode="5000159407236", source="off", source_priority=3,
+                        source_ref="bar-b")
+
+    def test_many_rows_may_have_no_barcode(self):
+        conn = self.make_db()
+        for i in range(3):
+            self.insert(conn, barcode=None, source_ref="nobar-%d" % i)
+        self.assertEqual(
+            dict_rows(conn, "SELECT COUNT(*) AS n FROM food_items WHERE source_ref LIKE 'nobar-%'")[0]["n"], 3)
+
+    def test_source_and_source_ref_pair_is_unique(self):
+        conn = self.make_db()
+        self.insert(conn, source="off", source_priority=3, source_ref="dup-ref")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.insert(conn, source="off", source_priority=3, source_ref="dup-ref")
+
+    def test_same_source_ref_under_another_source_is_allowed(self):
+        conn = self.make_db()
+        self.insert(conn, source="off", source_priority=3, source_ref="shared-ref")
+        self.insert(conn, source="curated", source_priority=1, source_ref="shared-ref")
+        self.assertEqual(
+            dict_rows(conn, "SELECT COUNT(*) AS n FROM food_items WHERE source_ref = 'shared-ref'")[0]["n"], 2)
+
+    def test_many_rows_may_have_no_source_ref(self):
+        conn = self.make_db()
+        for _ in range(3):
+            self.insert(conn, name="No ref food", source="off", source_priority=3, source_ref=None)
+        self.assertEqual(
+            dict_rows(conn, "SELECT COUNT(*) AS n FROM food_items WHERE name = 'No ref food'")[0]["n"], 3)
+
+    def test_barcode_index_is_unique_and_partial(self):
+        shapes = self.index_shapes(self.make_db())
+        self.assertEqual(shapes.get(("barcode",)), {"unique": True, "partial": True})
+
+    def test_source_ref_index_is_unique_and_partial(self):
+        shapes = self.index_shapes(self.make_db())
+        self.assertEqual(shapes.get(("source", "source_ref")), {"unique": True, "partial": True})
+
+    def test_lookup_indexes_exist(self):
+        shapes = self.index_shapes(self.make_db())
+        for col in ("name_key", "category", "source_priority"):
+            self.assertIn((col,), shapes)
+
+
+class FreshSchemaConstraintTests(_ConstraintChecks, SchemaCase):
+    def make_db(self):
+        return self.fresh_v2()
+
+
+class UpgradedSchemaConstraintTests(_ConstraintChecks, SchemaCase):
+    def make_db(self):
+        return self.upgraded()
+
+
+# --------------------------------------------------------------------------------------
+# importer: summary line
+# --------------------------------------------------------------------------------------
+
+class SummaryTests(FullImportCase):
+    def test_last_stdout_line_has_every_summary_key(self):
+        self.assertEqual(sorted(SUMMARY_KEYS - set(self.summary)), [])
+
+    def test_read_counts_per_source(self):
+        self.assertEqual(self.summary["read"], {"curated": 11, "usda": 13, "off": 32})
+
+    def test_kept_counts_per_source(self):
+        self.assertEqual(self.summary["kept"], {"curated": 8, "usda": 11, "off": 17})
+
+    def test_kept_counts_match_the_database(self):
+        in_db = {r["source"]: r["n"] for r in
+                 self.q("SELECT source, COUNT(*) AS n FROM food_items GROUP BY source")}
+        self.assertEqual(in_db, {"curated": 8, "usda": 11, "off": 17})
+
+    def test_filtered_region_count(self):
+        self.assertEqual(self.summary["filtered_region"], 2)
+
+    def test_invalid_count(self):
+        # 3 curated entries + 1 USDA row + 6 Open Food Facts rows
+        self.assertEqual(self.summary["invalid"], 10)
+
+    def test_duplicates_count(self):
+        self.assertEqual(self.summary["duplicates"], 8)
+
+    def test_total_rows(self):
+        self.assertEqual(self.summary["total_rows"], 36)
+
+    def test_total_rows_matches_the_database(self):
+        self.assertEqual(self.n_rows(), 36)
+
+    def test_database_is_at_version_2(self):
+        self.assertEqual(self.db.execute("PRAGMA user_version").fetchone()[0], 2)
+
+
+# --------------------------------------------------------------------------------------
+# importer: region filter
+# --------------------------------------------------------------------------------------
+
+class RegionFilterTests(FullImportCase):
+    def test_row_whose_only_country_is_unwanted_is_not_imported(self):
+        self.absent(name="Nutella", codes=("3017620422003",))
+
+    def test_row_with_two_unwanted_countries_is_not_imported(self):
+        self.absent(name="Ritter Sport Alpine Milk", codes=("4000417025005",))
+
+    def test_filtered_rows_are_counted_as_filtered_region(self):
+        self.assertEqual(self.summary["filtered_region"], 2)
+
+    def test_two_wanted_countries_come_out_in_the_fixed_order(self):
+        # countries_tags is "en:south-korea,en:united-states"
+        self.assertEqual(self.off_row("8801043014830")["region_tags"], "US,KR")
+
+    def test_unwanted_country_is_dropped_from_a_mixed_row(self):
+        # countries_tags is "en:japan,en:france,en:philippines,en:united-kingdom"
+        self.assertEqual(self.off_row("4901515110504")["region_tags"], "PH,UK,JP")
+
+    def test_single_country_rows_get_their_code(self):
+        expected = {"5000159407236": "UK", "4901330502881": "JP", "8801056038861": "KR",
+                    "4800361413480": "PH"}
+        for ref, tags in expected.items():
+            with self.subTest(code=ref):
+                self.assertEqual(self.off_row(ref)["region_tags"], tags)
+
+    def test_usda_rows_are_tagged_us(self):
+        self.assertEqual(self.usda_row("survey:2709224")["region_tags"], "US")
+
+    def test_every_region_tags_value_is_an_ordered_subset_of_the_regions(self):
+        for row in self.q("SELECT name, region_tags FROM food_items"):
+            tags = row["region_tags"]
+            codes = tags.split(",") if tags else []
+            self.assertEqual(codes, [c for c in REGION_ORDER if c in codes],
+                             "bad region_tags %r on %r" % (tags, row["name"]))
+
+    def test_every_off_row_has_at_least_one_region(self):
+        self.assertEqual(self.n_rows("source = 'off' AND region_tags = ''"), 0)
+
+
+# --------------------------------------------------------------------------------------
+# importer: unit conversions on real rows
+# --------------------------------------------------------------------------------------
+
+class UnitConversionTests(FullImportCase):
+    def test_off_energy_100g_kilojoules_become_kcal(self):
+        self.near(self.off_row("5000159407236")["calories_kcal"], 484.9)    # 2029 / 4.184
+
+    def test_off_energy_kj_100g_kilojoules_become_kcal(self):
+        self.near(self.off_row("5010029000023")["calories_kcal"], 365.9)    # 1531 / 4.184
+
+    def test_usda_kilojoules_become_kcal(self):
+        self.near(self.usda_row("sr:171688")["calories_kcal"], 380.0)       # 1590 / 4.184
+
+    def test_kcal_figure_is_used_as_given_when_present(self):
+        self.near(self.off_row("8801043014830")["calories_kcal"], 433.0)
+
+    def test_off_salt_becomes_sodium_mg(self):
+        self.near(self.off_row("5000159407236")["sodium_mg"], 252.0)        # 0.63 g * 400
+
+    def test_off_salt_becomes_sodium_mg_second_row(self):
+        self.near(self.off_row("5010029000023")["sodium_mg"], 112.0)        # 0.28 g * 400
+
+    def test_off_sodium_grams_become_mg(self):
+        self.near(self.off_row("8801043014830")["sodium_mg"], 1790.0)       # 1.79 g * 1000
+
+    def test_off_row_with_both_sodium_and_salt(self):
+        self.near(self.off_row("4901330502881")["sodium_mg"], 200.0)        # 0.2 g, salt 0.5 g
+
+    def test_usda_sodium_is_already_mg(self):
+        self.near(self.usda_row("survey:2706000")["sodium_mg"], 460.0)
+
+    def test_zero_sodium_is_stored_as_zero_not_null(self):
+        self.near(self.usda_row("survey:2709224")["sodium_mg"], 0.0)
+
+    def test_calories_are_stored_with_one_decimal(self):
+        self.near(self.off_row("5000159407236")["calories_kcal"], 484.9, places=6)   # 484.9426...
+
+    def test_grams_are_stored_with_two_decimals(self):
+        row = self.curated_row("Lucky Me! Pancit Canton Kalamansi")
+        self.near(row["carbs_g"], 58.33, places=6)                                    # 35 * 100 / 60
+
+    def test_sodium_is_stored_with_one_decimal(self):
+        self.near(self.off_row("5000169005743")["sodium_mg"], 245.3, places=6)        # 0.6133 * 400
+
+
+# --------------------------------------------------------------------------------------
+# importer: validation
+# --------------------------------------------------------------------------------------
+
+class ValidationTests(FullImportCase):
+    def test_macro_above_100_discards_the_row(self):
+        self.absent(name="Mega Sugar Syrup", codes=("041220576555", "0041220576555"))
+
+    def test_protein_carbs_fat_above_105_discards_the_row(self):
+        self.absent(name="Impossible Protein Bar", codes=("041220576562", "0041220576562"))
+
+    def test_negative_macro_discards_the_row(self):
+        self.absent(name="Negative Fibre Yogurt", codes=("041220576579", "0041220576579"))
+
+    def test_more_than_950_kcal_discards_the_row(self):
+        self.absent(name="Rocket Fuel Oil", codes=("5000111000017",))
+
+    def test_missing_name_discards_the_row(self):
+        self.absent(codes=("4800011122334",))
+        self.assertEqual(self.n_rows("name IS NULL OR TRIM(name) = ''"), 0)
+
+    def test_missing_energy_discards_the_row(self):
+        self.absent(name="No Energy Crackers", codes=("4800011122341",))
+
+    def test_usda_row_without_calories_is_discarded(self):
+        self.assertEqual(self.n_rows("source_ref = 'branded:2500002'"), 0)
+        self.absent(codes=("0041220999993",))
+
+    def test_discarded_rows_are_counted_as_invalid(self):
+        self.assertEqual(self.summary["invalid"], 10)
+
+    def test_blank_macros_are_stored_as_null(self):
+        row = self.off_row("4901340036512")
+        self.near(row["calories_kcal"], 46.0)
+        for col in MACROS + ("sodium_mg",):
+            self.assertIsNone(row[col], col)
+
+    def test_zero_kcal_row_is_kept(self):
+        row = self.off_row("4514603365511")
+        self.near(row["calories_kcal"], 0.0)
+
+    def test_zero_macros_are_stored_as_zero_not_null(self):
+        row = self.off_row("4514603365511")
+        for col in MACROS:
+            self.near(row[col], 0.0)
+
+    def test_sodium_above_40000_mg_becomes_null_and_the_row_is_kept(self):
+        row = self.off_row("8801007000015")
+        self.assertIsNone(row["sodium_mg"])
+        self.near(row["calories_kcal"], 5.0)
+
+    def test_name_is_trimmed_and_inner_whitespace_collapsed(self):
+        self.assertEqual(self.off_row("4800361413480")["name"], "Milo Activ-Go Powder")
+
+    def test_no_stored_per_100g_row_breaks_the_limits(self):
+        for row in self.q("SELECT * FROM food_items WHERE per_unit = '100g'"):
+            with self.subTest(name=row["name"]):
+                self.assertGreaterEqual(row["calories_kcal"], 0)
+                self.assertLessEqual(row["calories_kcal"], 950)
+                for col in MACROS:
+                    if row[col] is not None:
+                        self.assertGreaterEqual(row[col], 0, col)
+                        self.assertLessEqual(row[col], 100, col)
+                total = sum(row[c] or 0 for c in ("protein_g", "carbs_g", "fat_g"))
+                self.assertLessEqual(total, 105.001)
+                if row["sodium_mg"] is not None:
+                    self.assertGreaterEqual(row["sodium_mg"], 0)
+                    self.assertLessEqual(row["sodium_mg"], 40000)
+
+
+# --------------------------------------------------------------------------------------
+# importer: Open Food Facts mapping
+# --------------------------------------------------------------------------------------
+
+class OffMappingTests(FullImportCase):
+    def test_name_and_brand_of_a_plain_row(self):
+        row = self.off_row("5000159407236")
+        self.assertEqual((row["name"], row["brand"]), ("Snickers", "Mars"))
+
+    def test_name_falls_back_to_product_name_en(self):
+        self.assertEqual(self.off_row("4901577000010")["name"], "Kewpie Mayonnaise")
+
+    def test_product_name_wins_over_product_name_en(self):
+        self.assertEqual(self.off_row("8801056038861")["name"], "Banana Flavored Milk")
+
+    def test_brand_is_the_first_comma_separated_entry(self):
+        # brands is "Nestlé,Milo"; this also proves the file is read as UTF-8
+        self.assertEqual(self.off_row("4800361413480")["brand"], "Nestlé")
+
+    def test_blank_brands_gives_no_brand(self):
+        self.assertIsNone(self.off_row("5000169005743")["brand"])
+
+    def test_every_off_row_is_supermarket(self):
+        self.assertEqual(self.n_rows("source = 'off' AND category <> 'supermarket'"), 0)
+
+    def test_every_off_row_has_priority_3(self):
+        self.assertEqual(self.n_rows("source = 'off' AND source_priority <> 3"), 0)
+
+    def test_every_off_row_has_basis_database(self):
+        self.assertEqual(self.n_rows("source = 'off' AND (basis IS NULL OR basis <> 'database')"), 0)
+
+    def test_every_off_row_is_per_100g(self):
+        self.assertEqual(self.n_rows("source = 'off' AND per_unit <> '100g'"), 0)
+
+    def test_barcode_is_the_canonical_code(self):
+        self.assertEqual(self.off_row("5000159407236")["barcode"], "5000159407236")
+
+    def test_in_store_code_has_no_barcode_and_keeps_the_raw_code_as_source_ref(self):
+        row = self.off_row("2000000012345")
+        self.assertIsNone(row["barcode"])
+        self.assertEqual(row["name"], "Deli Roast Chicken Slices")
+
+    def test_too_short_code_has_no_barcode_and_keeps_the_raw_code_as_source_ref(self):
+        row = self.off_row("12345")
+        self.assertIsNone(row["barcode"])
+        self.assertEqual(row["name"], "Corner Shop Flapjack")
+
+    def test_popularity_is_unique_scans_n(self):
+        self.assertEqual(self.off_row("5000159407236")["popularity"], 950)
+
+    def test_blank_unique_scans_n_gives_popularity_zero(self):
+        self.assertEqual(self.off_row("4901340036512")["popularity"], 0)
+
+    def test_portion_comes_from_serving_size_and_quantity(self):
+        self.assertEqual(self.portions_of(self.off_row("5000159407236")), [["48 g", 48]])
+
+    def test_fractional_serving_quantity_is_kept(self):
+        self.assertEqual(self.portions_of(self.off_row("5010029000023")),
+                         [["2 biscuits (37.5 g)", 37.5]])
+
+    def test_blank_serving_quantity_gives_no_portions(self):
+        self.assertEqual(self.portions_of(self.off_row("4800361413480")), [])
+
+    def test_blank_serving_size_gives_no_portions(self):
+        self.assertEqual(self.portions_of(self.off_row("4514603365511")), [])
+
+    def test_each_macro_column_is_mapped(self):
+        row = self.off_row("8801043014830")   # Shin Ramyun
+        expected = {"protein_g": 9.2, "carbs_g": 65.0, "sugars_g": 3.3, "fat_g": 15.0,
+                    "saturates_g": 7.5, "fibre_g": 2.5}
+        for col, value in expected.items():
+            with self.subTest(col=col):
+                self.near(row[col], value)
+
+    def test_name_key_is_stored(self):
+        self.assertEqual(self.off_row("5000159407236")["name_key"], "mars|snickers")
+
+    def test_name_key_drops_the_brand_prefix_of_the_name(self):
+        self.assertEqual(self.off_row("4901515110504")["name_key"], "kikkoman|soy sauce")
+
+
+class ThumbnailTests(FullImportCase):
+    def test_https_url_is_stored_in_full(self):
+        self.assertEqual(self.off_row("5000159407236")["thumbnail_url"],
+                         THUMB_BASE + "500/015/940/7236/front_en.4.200.jpg")
+
+    def test_url_that_does_not_start_with_http_becomes_null(self):
+        # image_front_small_url is "/images/products/880/105/603/8861/front_ko.3.200.jpg"
+        self.assertIsNone(self.off_row("8801056038861")["thumbnail_url"])
+
+    def test_blank_url_is_null(self):
+        self.assertIsNone(self.off_row("4901340036512")["thumbnail_url"])
+
+    def test_every_stored_thumbnail_starts_with_http(self):
+        self.assertEqual(self.n_rows("thumbnail_url IS NOT NULL AND thumbnail_url NOT LIKE 'http://%'"
+                                     " AND thumbnail_url NOT LIKE 'https://%'"), 0)
+
+
+# --------------------------------------------------------------------------------------
+# importer: priority de-duplication
+# --------------------------------------------------------------------------------------
+
+class DedupCuratedOverOffBarcodeTests(FullImportCase):
+    """Anchor C3 (curated) and anchor A1 (Open Food Facts) share barcode 4807770270123."""
+
+    def survivor(self):
+        return self.one_row("barcode = ?", ("4807770270123",))
+
+    def test_the_two_rows_collapse_to_one(self):
+        self.assertEqual(self.n_rows("barcode = ?", ("4807770270123",)), 1)
+
+    def test_the_curated_row_survives(self):
+        row = self.survivor()
+        self.assertEqual((row["source"], row["source_priority"]), ("curated", 1))
+
+    def test_the_off_row_is_gone(self):
+        self.assertEqual(self.n_rows("source = 'off' AND source_ref = ?", ("4807770270123",)), 0)
+        self.assertEqual(self.n_rows("name = ?", ("Pancit Canton Kalamansi",)), 0)
+
+    def test_the_survivor_keeps_the_curated_name(self):
+        self.assertEqual(self.survivor()["name"], "Lucky Me! Pancit Canton Kalamansi")
+
+    def test_the_survivor_keeps_the_curated_numbers(self):
+        row = self.survivor()
+        # per pack of 60 g: 280 kcal, 6 P, 35 C, 3 sugars, 12 F, 6 sat, 2 fibre, 900 mg sodium
+        expected = {"calories_kcal": 466.7, "protein_g": 10.0, "carbs_g": 58.33, "sugars_g": 5.0,
+                    "fat_g": 20.0, "saturates_g": 10.0, "fibre_g": 3.33, "sodium_mg": 1500.0}
+        for col, value in expected.items():
+            with self.subTest(col=col):
+                self.near(row[col], value)
+
+    def test_the_survivor_inherits_the_off_thumbnail(self):
+        self.assertEqual(self.survivor()["thumbnail_url"],
+                         THUMB_BASE + "480/777/027/0123/front_en.3.200.jpg")
+
+    def test_the_survivor_keeps_region_ph(self):
+        self.assertEqual(self.survivor()["region_tags"], "PH")
+
+
+class DedupUsdaOverOffBarcodeTests(FullImportCase):
+    """Anchor U2 (USDA branded, GTIN-14 00016000275287) and anchor A3 (OFF, UPC-A 016000275287)."""
+
+    def survivor(self):
+        return self.one_row("barcode = ?", ("0016000275287",))
+
+    def test_upc_a_and_gtin_14_meet_on_one_canonical_barcode(self):
+        self.assertEqual(self.n_rows("barcode = ?", ("0016000275287",)), 1)
+        self.assertEqual(self.n_rows("barcode IN ('016000275287', '00016000275287')"), 0)
+
+    def test_the_usda_row_survives(self):
+        row = self.survivor()
+        self.assertEqual((row["source"], row["source_ref"]), ("usda", "branded:2499999"))
+
+    def test_the_off_row_is_gone(self):
+        self.assertEqual(self.n_rows("source = 'off' AND source_ref IN ('0016000275287', '016000275287')"), 0)
+
+    def test_only_one_cheerios_row_is_left(self):
+        self.assertEqual(self.n_rows("LOWER(name) = 'cheerios'"), 1)
+
+    def test_the_survivor_keeps_the_usda_numbers(self):
+        row = self.survivor()
+        self.near(row["calories_kcal"], 359.0)    # the Open Food Facts row says 367
+        self.near(row["protein_g"], 12.82)
+
+    def test_the_survivor_inherits_the_off_thumbnail(self):
+        self.assertEqual(self.survivor()["thumbnail_url"],
+                         THUMB_BASE + "001/600/027/5287/front_en.5.200.jpg")
+
+    def test_the_survivor_region_is_us(self):
+        self.assertEqual(self.survivor()["region_tags"], "US")
+
+
+class DedupSameSourceBarcodeTests(FullImportCase):
+    """Two Open Food Facts rows with the same barcode: the more complete row wins.
+
+    Choco Pie (8801117760007): the complete row comes first in the file, the sparse row
+    second with more scans. Meiji (4902777000015): the other way round.
+    """
+
+    def test_complete_row_listed_first_survives(self):
+        row = self.one_row("barcode = ?", ("8801117760007",))
+        self.assertEqual(row["name"], "Choco Pie Original")
+        self.near(row["calories_kcal"], 432.0)
+        self.near(row["carbs_g"], 66.0)
+
+    def test_complete_row_listed_second_survives(self):
+        row = self.one_row("barcode = ?", ("4902777000015",))
+        self.assertEqual(row["name"], "Meiji Milk Chocolate")
+        self.near(row["calories_kcal"], 558.0)
+        self.near(row["carbs_g"], 53.0)
+
+    def test_sparse_duplicates_are_gone(self):
+        self.assertEqual(self.n_rows("name IN ('Choco Pie', 'Meiji Milk Choco')"), 0)
+
+    def test_survivor_inherits_the_thumbnail_of_the_dropped_duplicate(self):
+        row = self.one_row("barcode = ?", ("8801117760007",))
+        self.assertEqual(row["thumbnail_url"], THUMB_BASE + "880/111/776/0007/front_ko.3.200.jpg")
+
+    def test_survivor_keeps_its_own_popularity(self):
+        self.assertEqual(self.one_row("barcode = ?", ("8801117760007",))["popularity"], 10)
+        self.assertEqual(self.one_row("barcode = ?", ("4902777000015",))["popularity"], 20)
+
+
+class DedupNameBrandTests(FullImportCase):
+    def test_off_rows_with_the_same_name_and_brand_collapse_to_the_more_complete_one(self):
+        # "Jack 'n Jill Chippy BBQ" / "Jack n Jill" and "Chippy BBQ" / "Jack 'n Jill"
+        row = self.one_row("name_key = ?", ("jack n jill|chippy bbq",))
+        self.assertEqual(row["name"], "Chippy BBQ")
+        self.near(row["calories_kcal"], 510.0)
+
+    def test_name_survivor_keeps_its_own_barcode(self):
+        row = self.one_row("name_key = ?", ("jack n jill|chippy bbq",))
+        self.assertEqual(row["barcode"], "4800016644504")
+        self.assertEqual(self.n_rows("barcode = ? OR source_ref = ?",
+                                     ("4800016644511", "4800016644511")), 0)
+
+    def test_name_survivor_region_tags_are_the_union(self):
+        # survivor is tagged PH, the dropped row PH and US
+        self.assertEqual(self.one_row("name_key = ?", ("jack n jill|chippy bbq",))["region_tags"],
+                         "PH,US")
+
+    def test_usda_beats_off_on_name_and_brand(self):
+        row = self.one_row("name_key = ?", ("skippy|creamy peanut butter",))
+        self.assertEqual((row["source"], row["source_ref"]), ("usda", "branded:2500001"))
+        self.near(row["carbs_g"], 18.8)    # the Open Food Facts row says 21.9
+
+    def test_usda_name_survivor_keeps_its_own_barcode(self):
+        row = self.one_row("name_key = ?", ("skippy|creamy peanut butter",))
+        self.assertEqual(row["barcode"], "0037600110754")
+        self.assertEqual(self.n_rows("barcode = ? OR source_ref = ?",
+                                     ("0037600105002", "0037600105002")), 0)
+
+    def test_usda_name_survivor_inherits_the_off_thumbnail(self):
+        row = self.one_row("name_key = ?", ("skippy|creamy peanut butter",))
+        self.assertEqual(row["thumbnail_url"], THUMB_BASE + "003/760/010/5002/front_en.6.200.jpg")
+
+    def test_usda_name_survivor_region_tags_are_the_union(self):
+        # USDA row is US, the dropped Open Food Facts row US and PH
+        self.assertEqual(self.one_row("name_key = ?", ("skippy|creamy peanut butter",))["region_tags"],
+                         "PH,US")
+
+    def test_curated_beats_off_on_name_and_brand(self):
+        row = self.one_row("name_key = ?", ("my san|skyflakes crackers",))
+        self.assertEqual((row["source"], row["name"]), ("curated", "Skyflakes Crackers"))
+        self.near(row["calories_kcal"], 476.0)    # the Open Food Facts row says 480
+
+    def test_survivor_without_a_barcode_takes_the_dropped_rows_barcode(self):
+        row = self.one_row("name_key = ?", ("my san|skyflakes crackers",))
+        self.assertEqual(row["barcode"], "4800092110016")
+
+    def test_survivor_without_a_thumbnail_takes_the_dropped_rows_thumbnail(self):
+        row = self.one_row("name_key = ?", ("my san|skyflakes crackers",))
+        self.assertEqual(row["thumbnail_url"], THUMB_BASE + "480/009/211/0016/front_en.8.200.jpg")
+
+    def test_curated_beats_usda_on_name(self):
+        row = self.one_row("name_key = ?", ("|pork adobo",))
+        self.assertEqual((row["source"], row["name"]), ("curated", "Pork Adobo"))
+        self.near(row["calories_kcal"], 228.0)    # the USDA row says 236
+        self.assertEqual(self.n_rows("source_ref = 'survey:2706555'"), 0)
+
+    def test_curated_over_usda_survivor_region_tags_are_the_union(self):
+        self.assertEqual(self.one_row("name_key = ?", ("|pork adobo",))["region_tags"], "PH,US")
+
+    def test_no_two_rows_share_a_barcode(self):
+        dupes = self.q("SELECT barcode, COUNT(*) AS n FROM food_items WHERE barcode IS NOT NULL"
+                       " GROUP BY barcode HAVING n > 1")
+        self.assertEqual([tuple(r) for r in dupes], [])
+
+    def test_no_two_rows_share_a_name_key(self):
+        dupes = self.q("SELECT name_key, COUNT(*) AS n FROM food_items GROUP BY name_key HAVING n > 1")
+        self.assertEqual([tuple(r) for r in dupes], [])
+
+    def test_removed_rows_are_counted_as_duplicates(self):
+        self.assertEqual(self.summary["duplicates"], 8)
+
+
+# --------------------------------------------------------------------------------------
+# importer: curated list
+# --------------------------------------------------------------------------------------
+
+class CuratedTests(FullImportCase):
+    def test_per_serving_numbers_are_converted_to_per_100g(self):
+        row = self.curated_row("Chickenjoy 1 pc (thigh)")    # 380 kcal, 27 P, 5 C, 28 F per 125 g
+        self.assertEqual(row["per_unit"], "100g")
+        self.near(row["calories_kcal"], 304.0)
+        self.near(row["protein_g"], 21.6)
+        self.near(row["carbs_g"], 4.0)
+        self.near(row["fat_g"], 22.4)
+
+    def test_converted_row_has_the_serving_as_first_portion(self):
+        self.assertEqual(self.portions_of(self.curated_row("Chickenjoy 1 pc (thigh)"))[0],
+                         ["1 thigh", 125])
+
+    def test_null_nutrients_stay_null_after_conversion(self):
+        row = self.curated_row("Chickenjoy 1 pc (thigh)")
+        for col in ("sugars_g", "saturates_g", "fibre_g", "sodium_mg"):
+            self.assertIsNone(row[col], col)
+
+    def test_sodium_is_converted_with_the_other_nutrients(self):
+        row = self.curated_row("Sinangag (garlic fried rice)")   # 288 kcal, 400 mg per 160 g
+        self.near(row["calories_kcal"], 180.0)
+        self.near(row["sodium_mg"], 250.0)
+
+    def test_serving_without_grams_is_stored_per_serving(self):
+        row = self.curated_row("Flat White (tall)")
+        self.assertEqual(row["per_unit"], "serving")
+        expected = {"calories_kcal": 170, "protein_g": 9, "carbs_g": 14, "sugars_g": 13,
+                    "fat_g": 9, "saturates_g": 5, "sodium_mg": 115}
+        for col, value in expected.items():
+            with self.subTest(col=col):
+                self.near(row[col], value)
+
+    def test_per_serving_row_has_one_portion_without_grams(self):
+        self.assertEqual(self.portions_of(self.curated_row("Flat White (tall)")),
+                         [["1 tall (12 fl oz)", None]])
+
+    def test_only_the_gramless_entry_is_stored_per_serving(self):
+        rows = self.q("SELECT name FROM food_items WHERE per_unit = 'serving'")
+        self.assertEqual([r["name"] for r in rows], ["Flat White (tall)"])
+
+    def test_per_100g_entry_is_stored_as_given(self):
+        row = self.curated_row("Chicken adobo")
+        self.assertEqual(row["per_unit"], "100g")
+        self.near(row["calories_kcal"], 141.0)
+        self.near(row["protein_g"], 15.7)
+        self.near(row["carbs_g"], 3.3)
+        self.near(row["fat_g"], 6.5)
+
+    def test_per_100g_entry_gets_its_serving_as_a_portion(self):
+        self.assertEqual(self.portions_of(self.curated_row("Chicken adobo")),
+                         [["1 serving with sauce", 152]])
+
+    def test_extra_portions_follow_the_serving(self):
+        self.assertEqual(self.portions_of(self.curated_row("Sinangag (garlic fried rice)")),
+                         [["1 cup", 160], ["1/2 cup", 80], ["1 platter", 320]])
+
+    def test_categories_are_stored_as_given(self):
+        expected = {"Chickenjoy 1 pc (thigh)": "dining_out", "Chicken adobo": "whole_food",
+                    "Lucky Me! Pancit Canton Kalamansi": "supermarket",
+                    "Flat White (tall)": "dining_out", "Spam Classic": "supermarket",
+                    "Sinangag (garlic fried rice)": "whole_food"}
+        for name, category in expected.items():
+            with self.subTest(name=name):
+                self.assertEqual(self.curated_row(name)["category"], category)
+
+    def test_region_tags_are_stored_as_a_comma_list(self):
+        self.assertEqual(self.curated_row("Chickenjoy 1 pc (thigh)")["region_tags"], "PH")
+        self.assertEqual(self.curated_row("Flat White (tall)")["region_tags"], "PH,US")
+
+    def test_region_tags_given_out_of_order_are_stored_in_the_fixed_order(self):
+        # the fixture says ["US", "PH"]
+        self.assertEqual(self.curated_row("Spam Classic")["region_tags"], "PH,US")
+
+    def test_barcode_is_stored_in_canonical_form(self):
+        # the fixture gives the 12-digit UPC-A 037600138727
+        self.assertEqual(self.curated_row("Spam Classic")["barcode"], "0037600138727")
+
+    def test_own_thumbnail_is_kept(self):
+        self.assertEqual(self.curated_row("Spam Classic")["thumbnail_url"],
+                         "https://example.org/img/spam-classic.jpg")
+
+    def test_brand_is_stored(self):
+        self.assertEqual(self.curated_row("Chickenjoy 1 pc (thigh)")["brand"], "Jollibee")
+
+    def test_generic_dish_has_no_brand(self):
+        self.assertIsNone(self.curated_row("Chicken adobo")["brand"])
+
+    def test_explicit_group_is_kept(self):
+        self.assertEqual(self.curated_row("Chicken adobo")["group_label"], "Home dish")
+        self.assertEqual(self.curated_row("Spam Classic")["group_label"], "Canned meat")
+
+    def test_group_defaults_to_the_brand(self):
+        self.assertEqual(self.curated_row("Lucky Me! Pancit Canton Kalamansi")["group_label"], "Lucky Me!")
+        self.assertEqual(self.curated_row("Flat White (tall)")["group_label"], "Starbucks")
+
+    def test_aka_is_a_json_list(self):
+        self.assertEqual(json.loads(self.curated_row("Chickenjoy 1 pc (thigh)")["aka"]), ["chicken joy"])
+        self.assertEqual(json.loads(self.curated_row("Flat White (tall)")["aka"]), [])
+
+    def test_basis_is_stored(self):
+        self.assertEqual(self.curated_row("Chickenjoy 1 pc (thigh)")["basis"], "official")
+        self.assertEqual(self.curated_row("Pork Adobo")["basis"], "estimate")
+
+    def test_every_curated_row_has_priority_1(self):
+        self.assertEqual(self.n_rows("source = 'curated' AND source_priority <> 1"), 0)
+
+    def test_every_curated_row_has_its_own_source_ref(self):
+        refs = [r["source_ref"] for r in self.q("SELECT source_ref FROM food_items WHERE source = 'curated'")]
+        self.assertEqual(len(refs), 8)
+        self.assertTrue(all(refs), refs)
+        self.assertEqual(len(set(refs)), 8, refs)
+
+    def test_name_key_is_brand_then_name_without_the_brand(self):
+        self.assertEqual(self.curated_row("Lucky Me! Pancit Canton Kalamansi")["name_key"],
+                         "lucky me|pancit canton kalamansi")
+        self.assertEqual(self.curated_row("Chicken adobo")["name_key"], "|chicken adobo")
+
+    def test_entry_with_an_invalid_category_is_skipped(self):
+        self.absent(name="Mystery Street Snack")
+        self.assertEqual(self.n_rows("category NOT IN ('supermarket', 'dining_out', 'whole_food')"), 0)
+
+    def test_entry_with_an_unknown_region_is_skipped(self):
+        self.absent(name="Poutine")
+
+    def test_entry_without_calories_is_skipped(self):
+        self.absent(name="Taho")
+
+    def test_skipped_entries_produce_a_warning_on_stderr(self):
+        self.assertTrue(self.imp["stderr"].strip(), "nothing was written to stderr")
+
+    def test_eight_curated_rows_are_kept(self):
+        self.assertEqual(self.n_rows("source = 'curated'"), 8)
+
+
+# --------------------------------------------------------------------------------------
+# importer: USDA flat file
+# --------------------------------------------------------------------------------------
+
+class UsdaFlatFileTests(FullImportCase):
+    def test_plain_survey_food_is_whole_food(self):
+        self.assertEqual(self.usda_row("survey:2709224")["category"], "whole_food")
+
+    def test_plain_sr_legacy_food_is_whole_food(self):
+        self.assertEqual(self.usda_row("sr:171688")["category"], "whole_food")
+
+    def test_foundation_food_is_whole_food_with_fdc_prefix(self):
+        self.assertEqual(self.usda_row("fdc:321358")["category"], "whole_food")
+
+    def test_restaurant_chain_in_the_description_is_dining_out(self):
+        # anchor U3: "Big Mac (McDonalds)", food category "Burgers"
+        self.assertEqual(self.usda_row("survey:2706000")["category"], "dining_out")
+
+    def test_chain_name_matches_without_apostrophe_and_case(self):
+        # "WENDY'S, Classic Single Hamburger, no cheese", food category "Beef Products"
+        self.assertEqual(self.usda_row("sr:170310")["category"], "dining_out")
+
+    def test_fast_food_in_the_description_is_dining_out(self):
+        # "Fast foods, cheeseburger, single patty, plain", food category "Sandwiches"
+        self.assertEqual(self.usda_row("sr:170720")["category"], "dining_out")
+
+    def test_restaurant_in_the_description_is_dining_out(self):
+        # "Chicken fried steak, from restaurant", food category "Meat Mixed Dishes"
+        self.assertEqual(self.usda_row("survey:2706100")["category"], "dining_out")
+
+    def test_restaurant_foods_category_is_dining_out(self):
+        # "Fried rice with egg, family style", food category "Restaurant Foods"
+        self.assertEqual(self.usda_row("sr:167650")["category"], "dining_out")
+
+    def test_branded_food_is_supermarket(self):
+        self.assertEqual(self.usda_row("branded:2499999")["category"], "supermarket")
+
+    def test_branded_food_takes_the_brand_owner_as_brand(self):
+        self.assertEqual(self.usda_row("branded:2499999")["brand"], "General Mills")
+
+    def test_branded_food_barcode_is_the_normalised_gtin(self):
+        self.assertEqual(self.usda_row("branded:2500003")["barcode"], "0012000001291")
+
+    def test_branded_food_naming_a_chain_is_still_supermarket(self):
+        # "STARBUCKS FRAPPUCCINO COFFEE DRINK": the branded rule comes before the chain rule
+        self.assertEqual(self.usda_row("branded:2500003")["category"], "supermarket")
+
+    def test_source_ref_prefix_follows_the_data_type(self):
+        refs = {r["source_ref"] for r in self.q("SELECT source_ref FROM food_items WHERE source = 'usda'")}
+        self.assertEqual(refs, {"survey:2709224", "survey:2706000", "survey:2706100",
+                                "sr:171688", "sr:170720", "sr:167650", "sr:170310",
+                                "fdc:321358",
+                                "branded:2499999", "branded:2500001", "branded:2500003"})
+
+    def test_group_label_is_the_food_category(self):
+        self.assertEqual(self.usda_row("survey:2709224")["group_label"], "Bananas")
+        self.assertEqual(self.usda_row("survey:2706000")["group_label"], "Burgers")
+
+    def test_portion_comes_from_household_serving_and_grams(self):
+        self.assertEqual(self.portions_of(self.usda_row("survey:2709224")), [["1 banana", 126]])
+
+    def test_per_100g_values_are_stored_as_given(self):
+        row = self.usda_row("survey:2709224")    # anchor U1
+        self.assertEqual(row["name"], "Banana, raw")
+        expected = {"calories_kcal": 97.0, "protein_g": 0.74, "carbs_g": 23.0, "sugars_g": 15.8,
+                    "fat_g": 0.29, "saturates_g": 0.1, "fibre_g": 1.7}
+        for col, value in expected.items():
+            with self.subTest(col=col):
+                self.near(row[col], value)
+
+    def test_every_usda_row_has_priority_2(self):
+        self.assertEqual(self.n_rows("source = 'usda' AND source_priority <> 2"), 0)
+
+    def test_every_usda_row_has_basis_database(self):
+        self.assertEqual(self.n_rows("source = 'usda' AND (basis IS NULL OR basis <> 'database')"), 0)
+
+    def test_every_usda_row_is_per_100g(self):
+        self.assertEqual(self.n_rows("source = 'usda' AND per_unit <> '100g'"), 0)
+
+    def test_every_usda_row_is_tagged_us(self):
+        for row in self.q("SELECT source_ref, region_tags FROM food_items WHERE source = 'usda'"):
+            self.assertIn("US", row["region_tags"].split(","), row["source_ref"])
+
+
+# --------------------------------------------------------------------------------------
+# importer: USDA FoodData Central folder (SR Legacy layout)
+# --------------------------------------------------------------------------------------
+
+class UsdaFolderTests(DbCase):
+    @classmethod
+    def load(cls):
+        return usda_folder_import()
+
+    def test_four_of_the_five_foods_are_imported(self):
+        self.assertEqual(self.n_rows(), 4)
+        self.assertEqual(self.summary["total_rows"], 4)
+        self.assertEqual(self.summary["kept"]["usda"], 4)
+
+    def test_baby_food_is_skipped(self):
+        self.assertEqual(self.n_rows("source_ref LIKE '%900002'"), 0)
+        self.assertEqual(self.n_rows("LOWER(name) LIKE '%babyfood%'"), 0)
+
+    def test_source_ref_uses_the_sr_prefix(self):
+        refs = {r["source_ref"] for r in self.q("SELECT source_ref FROM food_items")}
+        self.assertEqual(refs, {"sr:900001", "sr:900003", "sr:900004", "sr:900005"})
+
+    def test_fast_foods_row_is_dining_out(self):
+        self.assertEqual(self.usda_row("sr:900003")["category"], "dining_out")
+
+    def test_other_rows_are_whole_food(self):
+        for ref in ("sr:900001", "sr:900004", "sr:900005"):
+            with self.subTest(ref=ref):
+                self.assertEqual(self.usda_row(ref)["category"], "whole_food")
+
+    def test_shouted_brand_name_is_tidied_like_the_old_builder(self):
+        # food.csv says "McDONALD'S, BIG MAC"
+        self.assertEqual(self.usda_row("sr:900003")["name"], "McDonald's, Big Mac")
+
+    def test_distribution_program_note_is_removed_from_the_name(self):
+        self.assertEqual(self.usda_row("sr:900001")["name"], "Apples, raw, with skin")
+
+    def test_group_label_is_the_food_category_description(self):
+        self.assertEqual(self.usda_row("sr:900003")["group_label"], "Fast Foods")
+        self.assertEqual(self.usda_row("sr:900001")["group_label"], "Fruits and Fruit Juices")
+
+    def test_nutrients_are_read_by_nutrient_id(self):
+        row = self.usda_row("sr:900001")    # apple
+        expected = {"calories_kcal": 52.0, "protein_g": 0.3, "fat_g": 0.2, "carbs_g": 13.8,
+                    "sugars_g": 10.4, "fibre_g": 2.4, "sodium_mg": 1.0}
+        for col, value in expected.items():
+            with self.subTest(col=col):
+                self.near(row[col], value)
+
+    def test_saturated_fat_and_sodium_are_read(self):
+        row = self.usda_row("sr:900003")    # Big Mac
+        self.near(row["calories_kcal"], 257.0)
+        self.near(row["saturates_g"], 3.8)
+        self.near(row["sodium_mg"], 460.0)
+
+    def test_calorie_fallback_uses_the_atwater_energy(self):
+        # rice has a blank 1008 amount and 130 under nutrient 2047
+        self.near(self.usda_row("sr:900004")["calories_kcal"], 130.0)
+
+    def test_portions_are_amount_plus_modifier_in_sequence_order(self):
+        self.assertEqual(self.portions_of(self.usda_row("sr:900001")),
+                         [["1 cup, quartered or chopped", 125], ["1 medium", 182],
+                          ["1/2 cup slices", 54.5]])
+
+    def test_default_portion_is_the_first_that_is_not_a_bare_ounce(self):
+        # sequence order is "1 oz", "1 cup, diced", "1 cubic inch"
+        self.assertEqual(self.portions_of(self.usda_row("sr:900005")),
+                         [["1 cup, diced", 132], ["1 oz", 28.4], ["1 cubic inch", 17]])
+
+    def test_portions_without_modifier_or_weight_are_ignored(self):
+        self.assertEqual(self.portions_of(self.usda_row("sr:900004")), [["1 cup", 158]])
+
+    def test_rows_are_usda_priority_2_tagged_us(self):
+        self.assertEqual(self.n_rows("source = 'usda' AND source_priority = 2 AND region_tags = 'US'"
+                                     " AND per_unit = '100g' AND basis = 'database'"), 4)
+
+
+# --------------------------------------------------------------------------------------
+# importer: Open Food Facts file variants
+# --------------------------------------------------------------------------------------
+
+class OffOnlyImportTests(DbCase):
+    """Only the Open Food Facts file: nothing outranks anchors A1 and A3 here."""
+
+    @classmethod
+    def load(cls):
+        return off_only_import()
+
+    def test_summary_lists_all_three_sources_even_when_unused(self):
+        self.assertEqual(self.summary["read"], {"curated": 0, "usda": 0, "off": 32})
+
+    def test_kept_count(self):
+        # 32 read - 2 filtered - 6 invalid - 3 duplicates (Choco Pie, Meiji, Chippy)
+        self.assertEqual(self.summary["kept"], {"curated": 0, "usda": 0, "off": 21})
+        self.assertEqual(self.n_rows(), 21)
+
+    def test_filtered_invalid_and_duplicate_counts(self):
+        self.assertEqual((self.summary["filtered_region"], self.summary["invalid"],
+                          self.summary["duplicates"]), (2, 6, 3))
+
+    def test_anchor_a1_brand_is_the_first_of_two(self):
+        row = self.off_row("4807770270123")
+        self.assertEqual((row["name"], row["brand"]), ("Pancit Canton Kalamansi", "Lucky Me!"))
+
+    def test_anchor_a1_sodium_grams_become_mg(self):
+        self.near(self.off_row("4807770270123")["sodium_mg"], 1500.0)
+
+    def test_anchor_a1_numbers(self):
+        row = self.off_row("4807770270123")
+        expected = {"calories_kcal": 467.0, "protein_g": 11.7, "carbs_g": 56.7, "sugars_g": 5.0,
+                    "fat_g": 21.7, "saturates_g": 10.0, "fibre_g": 3.3}
+        for col, value in expected.items():
+            with self.subTest(col=col):
+                self.near(row[col], value)
+
+    def test_twelve_digit_upc_a_is_stored_as_13_digits(self):
+        row = self.off_row("0016000275287")
+        self.assertEqual((row["name"], row["barcode"]), ("Cheerios", "0016000275287"))
+
+
+class OffGzipTests(unittest.TestCase):
+    def test_gzip_file_gives_the_same_summary(self):
+        self.assertEqual(off_gzip_import()["summary"], off_only_import()["summary"])
+
+    def test_gzip_file_gives_the_same_rows(self):
+        self.assertEqual(snapshot(off_gzip_import()["db"]), snapshot(off_only_import()["db"]))
+
+
+class OffCommaSeparatedTests(DbCase):
+    """Comma-separated file with only code, product_name, countries_tags, kcal and sodium."""
+
+    @classmethod
+    def load(cls):
+        return off_comma_import()
+
+    def test_comma_separated_file_is_accepted(self):
+        self.assertEqual(self.summary["read"]["off"], 3)
+        self.assertEqual(self.summary["kept"]["off"], 2)
+        self.assertEqual(self.summary["filtered_region"], 1)
+
+    def test_quoted_comma_stays_inside_the_name(self):
+        self.assertEqual(self.off_row("5012345678900")["name"], "Oat Biscuits, plain")
+
+    def test_values_are_read_from_the_right_columns(self):
+        row = self.off_row("5012345678900")
+        self.near(row["calories_kcal"], 450.0)
+        self.near(row["sodium_mg"], 300.0)
+        self.assertEqual(row["region_tags"], "UK")
+
+    def test_missing_columns_count_as_blank(self):
+        row = self.off_row("5012345678900")
+        for col in ("brand", "thumbnail_url") + MACROS:
+            self.assertIsNone(row[col], col)
+        self.assertEqual(row["popularity"], 0)
+        self.assertEqual(self.portions_of(row), [])
+
+    def test_negative_sodium_becomes_null_and_the_row_is_kept(self):
+        row = self.off_row("5012345678917")
+        self.assertIsNone(row["sodium_mg"])
+        self.near(row["calories_kcal"], 40.0)
+
+    def test_negative_sodium_is_not_counted_as_invalid(self):
+        self.assertEqual(self.summary["invalid"], 0)
+
+
+# --------------------------------------------------------------------------------------
+# importer: re-runs
+# --------------------------------------------------------------------------------------
+
+class IdempotentRerunTests(unittest.TestCase):
+    """The same full command run twice on the same database."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.r = rerun_import()
+
+    def test_first_run_has_36_rows(self):
+        self.assertEqual(self.r["first"]["total_rows"], 36)
+
+    def test_second_run_reports_the_same_total_rows(self):
+        self.assertEqual(self.r["second"]["total_rows"], 36)
+
+    def test_second_run_reports_the_same_kept_counts(self):
+        self.assertEqual(self.r["second"]["kept"], {"curated": 8, "usda": 11, "off": 17})
+
+    def test_second_run_reads_the_same_inputs(self):
+        self.assertEqual(self.r["second"]["read"], {"curated": 11, "usda": 13, "off": 32})
+
+    def test_second_run_reports_the_same_filtered_and_invalid_counts(self):
+        self.assertEqual((self.r["second"]["filtered_region"], self.r["second"]["invalid"]), (2, 10))
+
+    def test_row_count_is_unchanged_in_the_database(self):
+        self.assertEqual(len(self.r["rows2"]), 36)
+
+    def test_rows_are_identical_after_the_second_run(self):
+        self.assertEqual(self.r["rows2"], self.r["rows1"])
+
+    def test_exported_bundle_is_identical_after_the_second_run(self):
+        self.assertEqual(self.r["bundle2"], self.r["bundle1"])
+
+
+class SeparateRunsTests(unittest.TestCase):
+    """Three runs on one database, lowest priority first: OFF, then USDA, then curated.
+
+    De-duplication covers everything in the database after each run, so the result must
+    be the same rows as the single combined run.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.r = reversed_runs_import()
+
+    def test_last_run_only_read_the_curated_file(self):
+        self.assertEqual(self.r["summary"]["read"], {"curated": 11, "usda": 0, "off": 0})
+
+    def test_final_counts_match_the_combined_run(self):
+        self.assertEqual(self.r["summary"]["kept"], {"curated": 8, "usda": 11, "off": 17})
+        self.assertEqual(self.r["summary"]["total_rows"], 36)
+
+    def test_later_curated_row_replaces_the_off_row_already_stored(self):
+        conn = open_db(self.r["db"])
+        try:
+            rows = conn.execute("SELECT source, name FROM food_items WHERE barcode = '4807770270123'").fetchall()
+        finally:
+            conn.close()
+        self.assertEqual([tuple(r) for r in rows], [("curated", "Lucky Me! Pancit Canton Kalamansi")])
+
+    def test_final_rows_match_the_combined_run(self):
+        self.assertEqual(self.r["rows"], snapshot(full_import()["db"]))
+
+
+# --------------------------------------------------------------------------------------
+# importer: exported app bundle
+# --------------------------------------------------------------------------------------
+
+class BundleCase(unittest.TestCase):
+    doc = None
+
+    def recs(self):
+        fields = self.doc["fields"]
+        return [dict(zip(fields, row)) for row in self.doc["items"]]
+
+    def rec(self, **match):
+        found = [r for r in self.recs() if all(r.get(k) == v for k, v in match.items())]
+        self.assertEqual(len(found), 1, "expected exactly one bundle row with %r, found %d"
+                         % (match, len(found)))
+        return found[0]
+
+    def brand_of(self, rec):
+        return None if rec["brand"] == -1 else self.doc["brands"][rec["brand"]]
+
+    def group_of(self, rec):
+        return None if rec["group"] == -1 else self.doc["groups"][rec["group"]]
+
+
+class BundleTests(BundleCase):
+    @classmethod
+    def setUpClass(cls):
+        imp = full_import()
+        with open(imp["bundle"], "rb") as f:
+            cls.raw = f.read()
+        cls.doc = json.loads(cls.raw.decode("utf-8"))
+
+    # ---- envelope
+    def test_version_is_2(self):
+        self.assertEqual(self.doc["version"], 2)
+
+    def test_built_is_the_date_given_on_the_command_line(self):
+        self.assertEqual(self.doc["built"], BUILT)
+
+    def test_note_is_a_sentence(self):
+        self.assertIsInstance(self.doc["note"], str)
+        self.assertTrue(self.doc["note"].strip())
+
+    def test_fields_list_is_exact(self):
+        self.assertEqual(self.doc["fields"], BUNDLE_FIELDS)
+
+    def test_thumb_base(self):
+        self.assertEqual(self.doc["thumbBase"], THUMB_BASE)
+
+    def test_counts(self):
+        self.assertEqual(self.doc["counts"], {"curated": 8, "usda": 11, "off": 17})
+
+    def test_items_hold_every_row(self):
+        self.assertEqual(len(self.doc["items"]), 36)
+
+    def test_every_row_has_one_value_per_field(self):
+        for row in self.doc["items"]:
+            self.assertEqual(len(row), len(self.doc["fields"]), row[:1])
+
+    def test_file_is_utf8_with_unescaped_characters(self):
+        self.assertIn("Nestlé".encode("utf-8"), self.raw)
+        self.assertNotIn(b"\\u00e9", self.raw)
+
+    def test_file_is_compact_json(self):
+        compact = json.dumps(self.doc, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        # a line break per row would still be fine; padded separators would not
+        self.assertLessEqual(len(self.raw), len(compact) + len(self.doc["items"]) + 16)
+
+    # ---- string tables
+    def test_brands_table_holds_each_brand_once(self):
+        brands = self.doc["brands"]
+        self.assertTrue(all(isinstance(b, str) and b for b in brands))
+        self.assertEqual(len(brands), len(set(brands)))
+        for expected in ("Jollibee", "Lucky Me!", "Starbucks", "General Mills", "Mars", "Nestlé"):
+            self.assertIn(expected, brands)
+
+    def test_groups_table_holds_each_group_once(self):
+        groups = self.doc["groups"]
+        self.assertTrue(all(isinstance(g, str) and g for g in groups))
+        self.assertEqual(len(groups), len(set(groups)))
+        for expected in ("Home dish", "Jollibee", "Bananas", "Burgers"):
+            self.assertIn(expected, groups)
+
+    def test_brand_and_group_indexes_are_in_range(self):
+        for r in self.recs():
+            self.assertIsInstance(r["brand"], int)
+            self.assertIsInstance(r["group"], int)
+            self.assertTrue(-1 <= r["brand"] < len(self.doc["brands"]), r["name"])
+            self.assertTrue(-1 <= r["group"] < len(self.doc["groups"]), r["name"])
+
+    def test_brand_index_points_at_the_brand(self):
+        self.assertEqual(self.brand_of(self.rec(name="Chickenjoy 1 pc (thigh)")), "Jollibee")
+        self.assertEqual(self.brand_of(self.rec(name="Snickers")), "Mars")
+        self.assertEqual(self.brand_of(self.rec(barcode="0016000275287")), "General Mills")
+
+    def test_row_without_brand_has_minus_one(self):
+        self.assertEqual(self.rec(name="Chicken adobo")["brand"], -1)
+        self.assertEqual(self.rec(name="Baked Beans in Tomato Sauce")["brand"], -1)
+
+    def test_group_index_points_at_the_group(self):
+        self.assertEqual(self.group_of(self.rec(name="Chicken adobo")), "Home dish")
+        self.assertEqual(self.group_of(self.rec(name="Banana, raw")), "Bananas")
+        self.assertEqual(self.group_of(self.rec(name="Lucky Me! Pancit Canton Kalamansi")), "Lucky Me!")
+
+    # ---- codes
+    def test_category_codes(self):
+        expected = {"Lucky Me! Pancit Canton Kalamansi": 0, "Snickers": 0,       # supermarket
+                    "Chickenjoy 1 pc (thigh)": 1, "Big Mac (McDonalds)": 1,      # dining_out
+                    "Chicken adobo": 2, "Banana, raw": 2}                        # whole_food
+        for name, code in expected.items():
+            with self.subTest(name=name):
+                self.assertEqual(self.rec(name=name)["category"], code)
+
+    def test_source_codes(self):
+        self.assertEqual(self.rec(name="Chickenjoy 1 pc (thigh)")["source"], 0)   # curated
+        self.assertEqual(self.rec(name="Banana, raw")["source"], 1)               # usda survey
+        self.assertEqual(self.rec(name="Oats, rolled, dry")["source"], 2)         # usda sr legacy
+        self.assertEqual(self.rec(name="Hummus, commercial")["source"], 2)        # usda foundation
+        self.assertEqual(self.rec(barcode="0016000275287")["source"], 2)          # usda branded
+        self.assertEqual(self.rec(name="Snickers")["source"], 3)                  # open food facts
+
+    def test_per_flag_is_1_only_for_the_per_serving_row(self):
+        self.assertEqual(self.rec(name="Flat White (tall)")["per"], 1)
+        self.assertEqual([r["name"] for r in self.recs() if r["per"] != 0], ["Flat White (tall)"])
+
+    def test_per_flag_is_0_for_a_converted_row(self):
+        self.assertEqual(self.rec(name="Chickenjoy 1 pc (thigh)")["per"], 0)
+
+    def test_regions_are_a_comma_string(self):
+        self.assertEqual(self.rec(name="Flat White (tall)")["regions"], "PH,US")
+        self.assertEqual(self.rec(name="Shin Ramyun")["regions"], "US,KR")
+        self.assertEqual(self.rec(name="Banana, raw")["regions"], "US")
+
+    # ---- barcode and thumbnail
+    def test_barcode_is_the_canonical_string(self):
+        self.assertEqual(self.rec(name="Lucky Me! Pancit Canton Kalamansi")["barcode"], "4807770270123")
+        self.assertEqual(self.rec(name="Snickers")["barcode"], "5000159407236")
+
+    def test_missing_barcode_is_zero(self):
+        self.assertEqual(self.rec(name="Chickenjoy 1 pc (thigh)")["barcode"], 0)
+        self.assertEqual(self.rec(name="Deli Roast Chicken Slices")["barcode"], 0)
+
+    def test_thumb_has_the_base_prefix_removed(self):
+        self.assertEqual(self.rec(name="Snickers")["thumb"], "500/015/940/7236/front_en.4.200.jpg")
+
+    def test_inherited_thumb_is_exported_for_the_curated_row(self):
+        self.assertEqual(self.rec(name="Lucky Me! Pancit Canton Kalamansi")["thumb"],
+                         "480/777/027/0123/front_en.3.200.jpg")
+
+    def test_thumb_on_another_host_is_exported_in_full(self):
+        self.assertEqual(self.rec(name="Spam Classic")["thumb"],
+                         "https://example.org/img/spam-classic.jpg")
+
+    def test_missing_thumb_is_zero(self):
+        self.assertEqual(self.rec(name="Chickenjoy 1 pc (thigh)")["thumb"], 0)
+        self.assertEqual(self.rec(name="Banana Flavored Milk")["thumb"], 0)
+
+    def test_no_thumb_still_carries_the_base_prefix(self):
+        for r in self.recs():
+            if r["thumb"] != 0:
+                self.assertIsInstance(r["thumb"], str)
+                self.assertFalse(r["thumb"].startswith(THUMB_BASE), r["name"])
+
+    # ---- numbers
+    def test_kcal_is_an_integer_on_every_row(self):
+        for r in self.recs():
+            self.assertIs(type(r["kcal"]), int, r["name"])
+
+    def test_kcal_values(self):
+        expected = {"Chickenjoy 1 pc (thigh)": 304, "Lucky Me! Pancit Canton Kalamansi": 467,
+                    "Flat White (tall)": 170, "Snickers": 485, "Banana, raw": 97,
+                    "Weetabix Original": 366, "Oi Ocha Green Tea": 0}
+        for name, kcal in expected.items():
+            with self.subTest(name=name):
+                self.assertEqual(self.rec(name=name)["kcal"], kcal)
+
+    def test_macros_have_at_most_one_decimal(self):
+        for r in self.recs():
+            for f in ("protein", "carbs", "sugars", "fat", "saturates", "fibre"):
+                v = r[f]
+                if v is not None:
+                    self.assertNotIsInstance(v, bool)
+                    self.assertAlmostEqual(v, round(v, 1), places=9, msg="%s of %s" % (f, r["name"]))
+
+    def test_macro_values_of_a_converted_curated_row(self):
+        r = self.rec(name="Lucky Me! Pancit Canton Kalamansi")
+        got = [r[f] for f in ("protein", "carbs", "sugars", "fat", "saturates", "fibre")]
+        for value, expected in zip(got, [10, 58.3, 5, 20, 10, 3.3]):
+            self.assertAlmostEqual(value, expected, places=6)
+
+    def test_macro_values_of_a_usda_row(self):
+        r = self.rec(name="Banana, raw")
+        got = [r[f] for f in ("protein", "carbs", "sugars", "fat", "saturates", "fibre")]
+        for value, expected in zip(got, [0.7, 23, 15.8, 0.3, 0.1, 1.7]):
+            self.assertAlmostEqual(value, expected, places=6)
+
+    def test_unknown_macros_are_null(self):
+        r = self.rec(name="Chickenjoy 1 pc (thigh)")
+        self.assertEqual([r[f] for f in ("sugars", "saturates", "fibre", "sodium")], [None] * 4)
+
+    def test_sodium_is_an_integer_or_null_on_every_row(self):
+        for r in self.recs():
+            if r["sodium"] is not None:
+                self.assertIs(type(r["sodium"]), int, r["name"])
+
+    def test_sodium_values(self):
+        expected = {"Snickers": 252, "Lucky Me! Pancit Canton Kalamansi": 1500, "Shin Ramyun": 1790,
+                    "Flat White (tall)": 115, "Banana, raw": 0, "Baked Beans in Tomato Sauce": 245}
+        for name, sodium in expected.items():
+            with self.subTest(name=name):
+                self.assertEqual(self.rec(name=name)["sodium"], sodium)
+
+    # ---- portions and other names
+    def test_portions_have_the_default_first(self):
+        self.assertEqual(self.rec(name="Chickenjoy 1 pc (thigh)")["portions"], [["1 thigh", 125]])
+        self.assertEqual(self.rec(name="Sinangag (garlic fried rice)")["portions"],
+                         [["1 cup", 160], ["1/2 cup", 80], ["1 platter", 320]])
+        self.assertEqual(self.rec(name="Banana, raw")["portions"], [["1 banana", 126]])
+
+    def test_portion_without_grams_has_null(self):
+        self.assertEqual(self.rec(name="Flat White (tall)")["portions"], [["1 tall (12 fl oz)", None]])
+
+    def test_row_without_portions_has_an_empty_list(self):
+        self.assertEqual(self.rec(name="Milo Activ-Go Powder")["portions"], [])
+
+    def test_aka_is_a_list_when_there_are_other_names(self):
+        self.assertEqual(self.rec(name="Chickenjoy 1 pc (thigh)")["aka"], ["chicken joy"])
+
+    def test_aka_is_zero_when_empty(self):
+        self.assertEqual(self.rec(name="Flat White (tall)")["aka"], 0)
+        self.assertEqual(self.rec(name="Banana, raw")["aka"], 0)
+        self.assertEqual(self.rec(name="Snickers")["aka"], 0)
+
+    # ---- order
+    def test_rows_are_grouped_curated_survey_other_usda_off(self):
+        self.assertEqual([r["source"] for r in self.recs()], [0] * 8 + [1] * 3 + [2] * 8 + [3] * 17)
+
+    def test_off_rows_are_ph_first_then_by_popularity(self):
+        self.assertEqual([r["name"] for r in self.recs() if r["source"] == 3], OFF_EXPORT_ORDER)
+
+    def test_dropped_duplicates_are_not_exported(self):
+        names = [r["name"] for r in self.recs()]
+        for gone in ("Pancit Canton Kalamansi", "Choco Pie", "Meiji Milk Choco",
+                     "Jack 'n Jill Chippy BBQ", "Skippy Creamy Peanut Butter", "SkyFlakes Crackers"):
+            self.assertNotIn(gone, names)
+
+
+class BundleMaxOffTests(BundleCase):
+    """--max-off 1 and no --built."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.imp = max_off_import()
+        cls.doc = cls.imp["doc"]
+
+    def test_every_ph_tagged_off_row_is_still_exported(self):
+        names = [r["name"] for r in self.recs() if r["source"] == 3]
+        for ph in OFF_EXPORT_ORDER[:3]:
+            self.assertIn(ph, names)
+
+    def test_only_the_most_popular_other_off_row_is_exported(self):
+        names = [r["name"] for r in self.recs() if r["source"] == 3]
+        self.assertEqual(names, OFF_EXPORT_ORDER[:3] + ["Snickers"])
+
+    def test_curated_and_usda_rows_are_not_limited(self):
+        sources = [r["source"] for r in self.recs()]
+        self.assertEqual((sources.count(0), sources.count(1), sources.count(2)), (8, 3, 8))
+
+    def test_the_database_still_holds_every_off_row(self):
+        self.assertEqual(self.imp["summary"]["kept"]["off"], 17)
+        self.assertEqual(self.imp["summary"]["total_rows"], 36)
+
+    def test_built_defaults_to_an_empty_string(self):
+        self.assertEqual(self.doc["built"], "")
+
+
+# --------------------------------------------------------------------------------------
+# importer: command line behaviour
+# --------------------------------------------------------------------------------------
+
+class CommandLineTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = new_dir("cli")
+        self.db = os.path.join(self.dir, "foods.sqlite")
+
+    def test_runs_in_isolated_mode(self):
+        imp = import_ok(["--db", self.db, "--curated-json", CURATED, "--quiet"], isolated=True)
+        self.assertEqual(imp["summary"]["kept"]["curated"], 8)
+
+    def test_creates_the_database_at_version_2(self):
+        self.assertFalse(os.path.exists(self.db))
+        import_ok(["--db", self.db, "--curated-json", CURATED, "--quiet"])
+        conn = open_db(self.db)
+        try:
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM food_items").fetchone()[0], 8)
+        finally:
+            conn.close()
+
+    def test_curated_only_summary(self):
+        summary = import_ok(["--db", self.db, "--curated-json", CURATED, "--quiet"])["summary"]
+        self.assertEqual(summary["read"], {"curated": 11, "usda": 0, "off": 0})
+        self.assertEqual((summary["invalid"], summary["duplicates"], summary["total_rows"]), (3, 0, 8))
+
+    def test_upgrades_an_existing_version_1_database_and_keeps_its_rows(self):
+        if food_schema is None:
+            self.fail("scripts/food_schema.py could not be imported: %r" % (_SCHEMA_IMPORT_ERROR,))
+        conn = food_schema.connect(self.db)
+        food_schema.create_v1(conn)
+        conn.execute("INSERT INTO food_items (id, name, group_label, kcal, protein, carbs, fat, portions, source, source_ref)"
+                     " VALUES (5, 'Old survey plantain', 'Plantains', 122, 1.3, 31.9, 0.4, '[]', 'usda', 'survey:1')")
+        conn.commit()
+        conn.close()
+        summary = import_ok(["--db", self.db, "--curated-json", CURATED, "--quiet"])["summary"]
+        conn = open_db(self.db)
+        try:
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 2)
+            old = conn.execute("SELECT name, calories_kcal, source_ref FROM food_items WHERE id = 5").fetchone()
+        finally:
+            conn.close()
+        self.assertIsNotNone(old, "the version 1 row was lost")
+        self.assertEqual((old["name"], old["source_ref"]), ("Old survey plantain", "survey:1"))
+        self.assertAlmostEqual(old["calories_kcal"], 122.0, places=1)
+        self.assertEqual(summary["kept"], {"curated": 8, "usda": 1, "off": 0})
+        self.assertEqual(summary["total_rows"], 9)
+
+    def test_missing_input_file_exits_non_zero_with_a_message(self):
+        missing = os.path.join(self.dir, "does_not_exist")
+        for flag in ("--off-path", "--usda-path", "--curated-json"):
+            with self.subTest(flag=flag):
+                code, _out, err = run_importer(["--db", self.db, flag, missing, "--quiet"])
+                self.assertNotEqual(code, 0)
+                self.assertTrue(err.strip(), "no message on stderr")
+
+    def test_missing_db_argument_exits_non_zero_with_a_message(self):
+        code, _out, err = run_importer(["--curated-json", CURATED])
+        self.assertNotEqual(code, 0)
+        self.assertTrue(err.strip(), "no message on stderr")
+
+    def test_non_numeric_max_off_exits_non_zero(self):
+        code, _out, _err = run_importer(["--db", self.db, "--curated-json", CURATED,
+                                         "--max-off", "many"])
+        self.assertNotEqual(code, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

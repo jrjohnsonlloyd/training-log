@@ -1,0 +1,7 @@
+# Build-time food database: recreate it with scripts/import_foods.py
+data/*.sqlite
+data/*.sqlite-*
+
+# Python caches
+__pycache__/
+*.pyc
