@@ -1,0 +1,1059 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Training Log UI smoke tests</title>
+<style>
+body{font:13px/1.45 system-ui,sans-serif;margin:0;color:#111;background:#fff}
+#app{display:block;border:0;width:390px;height:844px}
+#status{margin:6px 8px}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:6px 8px}
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<p id="status">starting</p>
+<pre id="result"></pre>
+<script>
+/*
+  UI smoke tests for Training Log. Run with:  python tests/run_ui_smoke.py [--suite NAME] [--db-file PATH]
+
+  How it works: this page is served from the same origin as the app. It fills localStorage with data in the
+  shape a real phone already holds, loads ../index.html in a 390 x 844 iframe, drives the app through its DOM
+  and writes the outcome as JSON, after the marker word RESULT, into the pre element with id "result".
+  Headless Chrome prints the final DOM and run_ui_smoke.py reads the JSON back.
+
+  Adding a suite: write "async function suiteSomething(){ ... }" below using the shared helpers, add a row to
+  SUITES at the bottom, and run  python tests/run_ui_smoke.py --suite something.
+  Each "await step(name, fn)" records one check {name, ok, detail}: ok when fn returns (its return value is the
+  detail), failed when it throws (use expect(condition, message)). A step never stops the ones after it.
+
+  Rules for every suite: no real network, and never seed "tl.sync". "Find food", Enter with fewer than three local
+  matches, a barcode that is not in the served bundle and "Search brands online" all go online, so a suite may only
+  use them while stubFetch() is answering for the two lookup services (the "v2" suite does that once).
+
+  Suites: "baseline" runs against the repository's own food-db.json (the old version 1 bundle, so it also proves that
+  old bundles still load). "v2" needs a version 2 bundle served as /food-db.json; run_ui_smoke.py --suite v2 builds one
+  from the fixtures with scripts/import_foods.py, or serves tests/fixtures/food-db.v2.sample.json (see --bundle).
+  The v2 checks only rely on the anchor rows that both bundles contain.
+*/
+(function(){
+'use strict';
+const params = new URLSearchParams(location.search);
+const suiteName = params.get('suite') || 'baseline';
+const APP_URL = '../index.html';
+const checks = [];
+const appErrors = [];
+let frame = null;
+
+/* ---------- reporting ---------- */
+function publish(done){
+  document.getElementById('result').textContent = 'RESULT ' + JSON.stringify({ suite: suiteName, done: !!done, checks: checks });
+  document.getElementById('status').textContent = (done ? 'finished: ' : 'running: ') + checks.filter(c => c.ok).length + ' of ' + checks.length + ' checks passed (suite ' + suiteName + ')';
+}
+/* opts.xfail = true marks a failure that is expected because of a known bug in the app; the runner prints XFAIL and does not count it. */
+function check(name, ok, detail, opts){
+  const c = { name: String(name), ok: !!ok, detail: detail == null ? '' : String(detail) };
+  if (opts && opts.xfail) c.xfail = true;
+  checks.push(c); publish(false); return c.ok;
+}
+function expect(cond, msg){ if (!cond) throw new Error(msg || 'expectation failed'); }
+async function step(name, fn, opts){
+  try { const d = await fn(); check(name, true, d, opts); return true; }
+  catch (e) { check(name, false, e && e.message || String(e), opts); return false; }
+}
+
+/* ---------- shared helpers: time ---------- */
+const wait = ms => new Promise(res => setTimeout(res, ms));
+/* Polls fn every 25 ms until it returns something truthy, and returns that; throws after about ms milliseconds. */
+async function waitFor(fn, ms, label){
+  const tries = Math.max(1, Math.ceil((ms == null ? 4000 : ms) / 25));
+  for (let i = 0; i <= tries; i++) {
+    let v = null; try { v = fn(); } catch (e) { v = null; }
+    if (v) return v;
+    await wait(25);
+  }
+  throw new Error('timed out waiting for ' + (label || 'a condition'));
+}
+
+/* ---------- shared helpers: the app's DOM (inside the iframe) ---------- */
+const win = () => frame.contentWindow;
+const doc = () => frame.contentDocument;
+const q = sel => doc().querySelector(sel);
+const qa = sel => Array.from(doc().querySelectorAll(sel));
+const txt = el => el ? el.textContent.replace(/\s+/g, ' ').trim() : '';
+/* Whole number shown on screen, whatever the thousands separator: "1,310 kcal so far" -> 1310. Not for decimals. */
+const num = s => { const d = String(s == null ? '' : s).replace(/[^0-9]/g, ''); return d ? Number(d) : NaN; };
+const visible = el => !!el && el.getClientRects().length > 0;
+/* Stricter: also false inside a folded <details>, whose content keeps its boxes but is not drawn. */
+const shown = el => visible(el) && (typeof el.checkVisibility !== 'function' || el.checkVisibility());
+function fire(el, type){ el.dispatchEvent(new (win().Event)(type, { bubbles: true })); }
+/* Types into a text field the way the keyboard does: sets .value and sends a bubbling input event. */
+function type(sel, text){ const el = q(sel); expect(el, 'no element ' + sel); el.focus(); el.value = text; fire(el, 'input'); return el; }
+/* For number fields and other inputs that the app reads on change. */
+function setValue(sel, value){ const el = q(sel); expect(el, 'no element ' + sel); el.value = String(value); fire(el, 'input'); fire(el, 'change'); return el; }
+function optionTexts(sel){ const el = q(sel); return el ? Array.from(el.options).map(txt) : []; }
+function selectOption(sel, label){
+  const el = q(sel); expect(el, 'no element ' + sel);
+  const o = Array.from(el.options).find(x => txt(x) === label);
+  expect(o, 'no option "' + label + '" in ' + sel + ' (it has: ' + (optionTexts(sel).join(' | ') || 'nothing') + ')');
+  el.value = o.value; fire(el, 'change'); return el;
+}
+function actionSel(action, attrs){ let s = '[data-action="' + action + '"]'; Object.keys(attrs || {}).forEach(k => { s += '[data-' + k + '="' + attrs[k] + '"]'; }); return s; }
+/* Clicks the app button with that data-action, optionally narrowed by data attributes: click('food-edit', { id: 'abc' }). */
+function click(action, attrs){ const s = actionSel(action, attrs), el = q(s); expect(el, 'no button ' + s); expect(!el.disabled, 'button is disabled: ' + s); el.click(); return el; }
+function clickSel(sel){ const el = q(sel); expect(el, 'no element ' + sel); el.click(); return el; }
+
+/* ---------- shared helpers: stored data ---------- */
+function readKey(k){ const v = localStorage.getItem('tl.' + k); return v == null ? null : JSON.parse(v); }
+function readStore(){ const fd = readKey('food') || {}; return { entries: Array.isArray(fd.entries) ? fd.entries : [], saved: Array.isArray(fd.saved) ? fd.saved : [] }; }
+function newEntries(knownIds){ return readStore().entries.filter(e => !knownIds.has(e.id)); }
+function storeDayTotal(date){ return readStore().entries.filter(e => e.date === date && e.status !== 'pending').reduce((s, e) => s + (Number(e.kcal) || 0), 0); }
+const copy = o => JSON.parse(JSON.stringify(o));
+function same(a, b){
+  if (a === b) return true;
+  if (a == null || b == null || typeof a !== 'object' || typeof b !== 'object' || Array.isArray(a) !== Array.isArray(b)) return false;
+  const ka = Object.keys(a), kb = Object.keys(b);
+  return ka.length === kb.length && ka.every(k => Object.prototype.hasOwnProperty.call(b, k) && same(a[k], b[k]));
+}
+function diffKeys(a, b){
+  const keys = Array.from(new Set(Object.keys(a || {}).concat(Object.keys(b || {}))));
+  return keys.filter(k => !same((a || {})[k], (b || {})[k])).map(k => k + ' ' + JSON.stringify((a || {})[k]) + ' -> ' + JSON.stringify((b || {})[k])).join(', ');
+}
+/* SAFETY: this page wipes the app's stored data to seed test data. It shares its storage with the app when both are served from the same address, so it must never run anywhere but a local test server. */
+function isLocalTestHost(){ return ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname); }
+/* Clears localStorage and writes the given keys as the app stores them (JSON under "tl." + key). */
+function seedStorage(data){
+  if (!isLocalTestHost()) throw new Error('refusing to clear stored data: this test page only runs on a local test server');
+  localStorage.clear();
+  Object.keys(data).forEach(k => localStorage.setItem('tl.' + k, JSON.stringify(data[k])));
+}
+async function loadJson(url){ const r = await fetch(url, { cache: 'no-store' }); expect(r.ok, url + ' answered ' + r.status); return r.json(); }
+
+/* ---------- shared helpers: dates ---------- */
+const pad = n => String(n).padStart(2, '0');
+const dateStr = d => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+function dayOffset(n){ const d = new Date(); d.setDate(d.getDate() + n); return d; }
+const round1 = v => Math.round((Number(v) || 0) * 10) / 10;
+
+/* ---------- shared helpers: the app's screens ---------- */
+function onAppError(ev){ appErrors.push('error: ' + (ev && ev.message || 'unknown') + (ev && ev.lineno ? ' (line ' + ev.lineno + ')' : '')); }
+function onAppRejection(ev){ const r = ev && ev.reason; appErrors.push('unhandled promise rejection: ' + (r && r.message || r)); }
+/* Safe to call many times: the same listener is only ever registered once per window. */
+function hookErrors(){
+  let w = null; try { w = frame && frame.contentWindow; } catch (e) { return; }
+  if (!w) return;
+  w.addEventListener('error', onAppError); w.addEventListener('unhandledrejection', onAppRejection);
+}
+/* Loads the app in a 390 x 844 iframe on the given tab and waits for readySel (default: the food form). Seed localStorage first. */
+async function openApp(hash, readySel){
+  const stage = document.getElementById('stage'); stage.textContent = '';
+  frame = document.createElement('iframe'); frame.id = 'app'; frame.title = 'Training Log under test';
+  frame.setAttribute('width', '390'); frame.setAttribute('height', '844');
+  stage.appendChild(frame);
+  hookErrors(); frame.addEventListener('load', hookErrors);
+  const poll = setInterval(hookErrors, 4);
+  frame.src = APP_URL + '#' + (hash || 'food');
+  const sel = readySel || '#ff-name';
+  try { await waitFor(() => { const d = frame.contentDocument; return d && d.querySelector(sel); }, 15000, sel + ' to appear in the app'); }
+  finally { clearInterval(poll); hookErrors(); }
+}
+/* Rows of the live search results under the food field. cat is the muted label under the name: the brand, else the display group (a restaurant, "Home dish", a USDA group), or "Favourite" / "Recent" for your own foods.
+   tag is "Favourite" or "Recent" on your own foods and empty otherwise. thumb is the picture address the row carries (null when the food has none), dcat its category, img the picture element while it is in the page, icon the category icon drawn under it. */
+function resultRows(){
+  return qa('#food-res .food-item').map((it, i) => {
+    const th = it.querySelector('.fthumb');
+    return { i: i, el: it, name: txt(it.querySelector('.pickbtn b')), cat: txt(it.querySelector('.pickbtn .fr-brand') || it.querySelector('.pickbtn .pill')), tag: txt(it.querySelector('.pickbtn .pill')), sub: txt(it.querySelector('.pickbtn .s')), kcal: num(txt(it.querySelector('.k'))),
+      thumbEl: th, thumb: th ? th.getAttribute('data-thumb') : null, dcat: th ? th.getAttribute('data-cat') : null, img: th ? th.querySelector('img') : null, icon: th ? th.querySelector('svg') : null };
+  });
+}
+/* Types a query into the food field and waits until the results list is showing and until(rows) is true (default: at least one row). Local search only. */
+async function search(text, until, ms){
+  const old = q('#food-res'), before = visible(old) ? old.innerHTML : '';
+  type('#ff-name', text);
+  let n = 0;
+  try {
+    return await waitFor(() => {
+      if (++n % 40 === 0) type('#ff-name', text);   /* typed again about once a second in case a food list was still loading */
+      const box = q('#food-res'); if (!visible(box)) return null;
+      if (n < 16 && box.innerHTML === before) return null;   /* still the list of the query before: allow 400 ms for the redraw */
+      const rows = resultRows();
+      return (until ? until(rows) : rows.length > 0) ? rows : null;
+    }, ms || 6000);
+  } catch (e) {
+    const rows = resultRows(), box = q('#food-res');
+    throw new Error('typing "' + text + '" did not give the expected results; the list ' + (visible(box) ? 'shows: ' + (rows.map(r => r.name).slice(0, 5).join(' | ') || txt(box).slice(0, 160)) : 'is hidden'));
+  }
+}
+/* One entry in the day's log, found by its stored id. */
+function logRow(id){
+  const b = q(actionSel('food-edit', { id: id })); if (!b) return null;
+  const it = b.closest('.food-item'); if (!it) return null;
+  const k = it.querySelector('.k');
+  return { el: it, name: txt(it.querySelector('.n > b')), kcal: num(txt(k)), pending: /pending/i.test(txt(k)), text: txt(it) };
+}
+/* The big calorie figure at the top of the Food tab. */
+function dayTotal(){ return num(txt(q('.hero h2'))); }
+
+/* ---------- seed data: what a phone holds from the version before the food-database change ---------- */
+function baselineData(){
+  const now = new Date(), yd = dayOffset(-1), today = dateStr(now), yesterday = dateStr(yd);
+  const at = (d, h, m) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), h, m || 0).getTime();
+  return {
+    today: today, yesterday: yesterday,
+    store: {
+      food: {
+        entries: [
+          { id: 'seedtoday1', date: today, at: at(now, 7, 40), name: 'Smoke test oatmeal bowl', qty: 1, serving: '', kcal: 310, protein: 11.5, carbs: 52, fat: 6.2, meal: 'Breakfast', source: 'manual' },
+          { id: 'seedtoday2', date: today, at: at(now, 12, 15), name: 'Smoke test tapsilog plate', qty: 2, serving: '1 plate (300 g)', kcal: 860, protein: 48.4, carbs: 96, fat: 30.6, meal: 'Lunch', source: 'library' },
+          { id: 'seedpending', date: today, at: at(now, 13, 5), name: 'Smoke test mystery stew', note: 'Smoke test mystery stew', qty: 1, serving: '', kcal: null, protein: null, carbs: null, fat: null, meal: 'Lunch', source: 'claude', status: 'pending' },
+          { id: 'seedvictim', date: today, at: at(now, 15, 30), name: 'Smoke test cracker pack', qty: 1, serving: '1 pack (30 g)', kcal: 140, protein: 2, carbs: 20, fat: 6, meal: 'Snack', source: 'packaged' },
+          { id: 'seedyday1', date: yesterday, at: at(yd, 19, 0), name: 'Smoke test sinigang dinner', qty: 1.5, serving: '1 bowl (350 g)', kcal: 525, protein: 39, carbs: 21, fat: 31.5, meal: 'Dinner', source: 'recent' },
+          { id: 'seedyday2', date: yesterday, at: at(yd, 8, 10), name: 'Smoke test estimated pandesal', note: 'two pandesal with butter', qty: 1, serving: '2 pieces', kcal: 290, protein: 7, carbs: 44, fat: 9.5, meal: 'Breakfast', source: 'claude', status: 'estimated', est: { confidence: 'medium', notes: 'Typical bakery size assumed.', at: '2026-11-20T04:00:00Z' } }
+        ],
+        saved: [
+          { id: 'seedfav1', name: 'Smoke test protein shake', serving: '1 scoop with water', kcal: 120, protein: 24, carbs: 3, fat: 1.5, uses: 5, lastUsed: at(yd, 9, 0) },
+          { id: 'seedfav2', name: 'Smoke test boiled egg', serving: '1 large', kcal: 78, protein: 6.3, carbs: 0.6, fat: 5.3, uses: 2, lastUsed: at(yd, 7, 0) }
+        ]
+      },
+      settings: { kcalTarget: 2100, proteinTarget: 120, weeklyTarget: 5, restSec: 120, weightUnit: 'kg', distUnit: 'km', theme: 'light' },
+      workouts: [
+        { id: 'seedworkout1', date: yesterday, startedAt: at(yd, 17, 0), durationMin: 45, type: 'Strength', exercises: [{ name: 'Squat', kind: 'lift', sets: [{ reps: 5, weight: 100 }, { reps: 5, weight: 100 }] }, { name: 'Run', kind: 'cardio', distance: 3, minutes: 18 }], avgHr: 128, maxHr: 161, rpe: 7, notes: 'Smoke test workout', weightUnit: 'kg', distUnit: 'km', prs: [], createdAt: at(yd, 17, 50) }
+      ],
+      tab: 'food'
+    }
+  };
+}
+
+/* ---------- suite: baseline (everything the app did before the food-database change) ---------- */
+async function suiteBaseline(){
+  const seed = baselineData(); seedStorage(seed.store);
+  const kept = copy(seed.store);   /* what was seeded, for the data-preservation check at the end */
+  const entries = seed.store.food.entries, favs = seed.store.food.saved;
+  const E = id => entries.find(e => e.id === id);
+  const todays = entries.filter(e => e.date === seed.today), counted = todays.filter(e => e.status !== 'pending'), ydays = entries.filter(e => e.date === seed.yesterday);
+  const sumKcal = list => list.reduce((s, e) => s + (e.status === 'pending' ? 0 : Number(e.kcal) || 0), 0);
+  const deleted = [];   /* ids of seeded entries this suite removes on purpose */
+
+  const booted = await step('app boots on the Food tab without throwing', async () => {
+    await openApp('food');
+    await wait(2500);   /* food-library.json loads at start, food-db.json 1.5 s later */
+    expect(q('#ff-name'), 'the food form is gone after loading');
+    const tab = q('#tabs button[aria-selected="true"]'); expect(tab && tab.dataset.tab === 'food', 'the Food tab is not the selected tab');
+    expect(!appErrors.length, appErrors.join(' | '));
+    return 'food form rendered, no error events';
+  });
+  if (!booted) { check('remaining checks were skipped because the app did not boot', false, ''); return; }
+
+  await step('seeded entries for today are listed with names and calories', async () => {
+    counted.forEach(e => {
+      const r = logRow(e.id); expect(r, 'not listed: ' + e.name);
+      expect(r.name === e.name, 'entry ' + e.id + ' shows the name "' + r.name + '"');
+      expect(r.kcal === Math.round(e.kcal), e.name + ' shows ' + r.kcal + ' kcal, stored ' + e.kcal);
+    });
+    const two = E('seedtoday2'), r2 = logRow(two.id);
+    expect(r2.text.indexOf('2 × ' + two.serving) >= 0, 'the 2-serving entry does not show its servings: ' + r2.text);
+    ydays.forEach(e => expect(!logRow(e.id), 'an entry from yesterday is listed under today: ' + e.name));
+    return counted.length + ' entries listed';
+  });
+
+  await step('day total equals the sum of today\'s counted entries', async () => {
+    const want = Math.round(sumKcal(todays)), got = dayTotal();
+    expect(got === want, 'the header shows ' + got + ' kcal, the entries add up to ' + want);
+    return got + ' kcal';
+  });
+
+  await step('pending Ask Claude entry shows as pending and is not counted', async () => {
+    const p = E('seedpending'), r = logRow(p.id); expect(r, 'the pending entry is not listed');
+    expect(r.name === p.name, 'the pending entry shows the name "' + r.name + '"');
+    expect(r.pending, 'no Pending marker: ' + r.text);
+    expect(/waiting for/i.test(r.text), 'no waiting note: ' + r.text);
+    const lede = txt(q('.hero .lede')); expect(/1 entry is waiting for an estimate/.test(lede), 'the summary does not mention the waiting entry: ' + lede);
+    return r.text.slice(0, 80);
+  });
+
+  await step('favourites chips are present', async () => {
+    favs.forEach(s => {
+      const c = q(actionSel('food-quick', { id: s.id })); expect(c, 'no chip for the favourite ' + s.name);
+      const t = txt(c); expect(t.indexOf(s.name) === 0 && num(t.slice(s.name.length)) === Math.round(s.kcal), 'the chip reads "' + t + '"');
+    });
+    return favs.length + ' chips';
+  });
+
+  await step('Recent chips are present', async () => {
+    const chips = qa('[data-action="food-recent"]').map(txt); expect(chips.length > 0, 'no Recent chips');
+    const favNames = new Set(favs.map(s => s.name.toLowerCase()));
+    entries.forEach(e => {
+      const t = chips.find(x => x.indexOf(e.name) === 0);
+      if (e.status === 'pending') { expect(!t, 'a pending entry is offered as Recent: ' + t); return; }
+      if (favNames.has(e.name.toLowerCase())) return;
+      expect(t, 'no Recent chip for ' + e.name);
+      expect(num(t.slice(e.name.length)) === Math.round(e.kcal), 'the chip reads "' + t + '", stored ' + e.kcal + ' kcal');
+    });
+    return chips.length + ' chips';
+  });
+
+  await step('typing "banana raw" lists "Banana, raw" first', async () => {
+    const rows = await search('banana raw', r => r.length > 0 && r[0].name === 'Banana, raw');
+    return rows.length + ' rows, first: ' + rows[0].name + ' (' + rows[0].cat + ')';
+  });
+
+  await step('typing "chickenjoy" lists Jollibee items from the curated library', async () => {
+    const lib = await loadJson('../food-library.json');
+    const rows = await search('chickenjoy', r => r.some(x => x.cat === 'Jollibee'));
+    const jb = rows.filter(r => r.cat === 'Jollibee' && /chickenjoy/i.test(r.name));
+    expect(jb.length >= 2, 'only ' + jb.length + ' Jollibee Chickenjoy rows: ' + rows.map(r => r.name).join(' | '));
+    jb.forEach(r => {
+      const it = (lib.items || []).find(x => x.name === r.name && x.cat === 'Jollibee'); expect(it, 'not in food-library.json: ' + r.name);
+      expect(Math.round(it.kcal) === r.kcal, r.name + ' shows ' + r.kcal + ' kcal, the library says ' + it.kcal);
+    });
+    return jb.length + ' Jollibee rows, first: ' + rows[0].name;
+  });
+
+  await step('a two-character query lists results', async () => {
+    const rows = await search('ri');
+    expect(rows.some(r => /ri/i.test(r.name)), 'no row has "ri" in its name: ' + rows.map(r => r.name).slice(0, 5).join(' | '));
+    return rows.length + ' rows, first: ' + rows[0].name;
+  });
+
+  await step('a one-character query hides the list', async () => {
+    await search('ri');
+    type('#ff-name', 'r');
+    await waitFor(() => !visible(q('#food-res')), 3000, 'the list to hide after one character');
+    return 'hidden';
+  });
+
+  await step('tapping the first result fills the form, shows serving sizes and hides the list', async () => {
+    const rows = await search('banana raw', r => r.length > 0 && r[0].name === 'Banana, raw');
+    click('food-use', { i: 0 });
+    await waitFor(() => q('#ff-name') && q('#ff-name').value === rows[0].name, 3000, 'the food name in the form');
+    expect(Number(q('#ff-kcal').value) > 0, 'no calories were filled in');
+    expect(visible(q('#ff-pi-wrap')), 'the serving-size select is not showing');
+    const opts = optionTexts('[data-ff="pi"]');
+    expect(opts.indexOf('100 g') >= 0 && opts.indexOf('1 g') >= 0, 'serving sizes offered: ' + opts.join(' | '));
+    expect(!visible(q('#food-res')), 'the results list is still showing');
+    return 'serving sizes: ' + opts.join(' | ');
+  });
+
+  await step('choosing "1 g" and 150 servings logs 1.5 times the per-100 g calories', async () => {
+    const known = new Set(readStore().entries.map(e => e.id)), name = q('#ff-name').value;
+    selectOption('[data-ff="pi"]', '100 g');
+    const per100 = Number(q('#ff-kcal').value); expect(per100 > 0, 'no calories shown for the 100 g serving');
+    selectOption('[data-ff="pi"]', '1 g');
+    setValue('#ff-qty', 150);
+    click('food-add');
+    const added = await waitFor(() => { const a = newEntries(known); return a.length ? a : null; }, 3000, 'a new entry in localStorage');
+    expect(added.length === 1, added.length + ' entries were added instead of 1');
+    const e = added[0];
+    expect(e.name === name && name === 'Banana, raw', 'stored name "' + e.name + '", form had "' + name + '"');
+    expect(e.date === seed.today, 'stored under ' + e.date + ', not today');
+    expect(Number(e.qty) === 150, 'stored servings: ' + e.qty);
+    expect(typeof e.kcal === 'number' && Math.abs(e.kcal - 1.5 * per100) <= 1, 'stored ' + e.kcal + ' kcal; 1.5 x ' + per100 + ' = ' + (1.5 * per100));
+    const r = await waitFor(() => logRow(e.id), 3000, 'the new entry in today\'s list');
+    expect(r.kcal === e.kcal, 'listed with ' + r.kcal + ' kcal, stored ' + e.kcal);
+    expect(dayTotal() === Math.round(storeDayTotal(seed.today)), 'the header shows ' + dayTotal() + ' kcal, the stored entries add up to ' + storeDayTotal(seed.today));
+    return e.kcal + ' kcal stored for 150 x 1 g; per 100 g: ' + per100;
+  });
+
+  await step('the quick Add button on a result logs one serving', async () => {
+    const rows = await search('chickenjoy', r => r.some(x => x.cat === 'Jollibee'));
+    const first = rows[0], known = new Set(readStore().entries.map(e => e.id));
+    click('food-addnow', { i: 0 });
+    const added = await waitFor(() => { const a = newEntries(known); return a.length ? a : null; }, 3000, 'a new entry in localStorage');
+    expect(added.length === 1, added.length + ' entries were added instead of 1');
+    const e = added[0];
+    expect(e.name === first.name, 'stored "' + e.name + '", tapped "' + first.name + '"');
+    expect(Number(e.qty) === 1, 'stored servings: ' + e.qty);
+    expect(e.kcal === first.kcal, 'stored ' + e.kcal + ' kcal, the row showed ' + first.kcal);
+    expect(e.date === seed.today, 'stored under ' + e.date + ', not today');
+    await waitFor(() => logRow(e.id), 3000, 'the new entry in today\'s list');
+    expect(!visible(q('#food-res')), 'the results list stayed open');
+    expect(q('#ff-name').value === '', 'the form was not cleared');
+    expect(dayTotal() === Math.round(storeDayTotal(seed.today)), 'the header shows ' + dayTotal() + ' kcal, the stored entries add up to ' + storeDayTotal(seed.today));
+    return e.name + ', ' + e.kcal + ' kcal';
+  });
+
+  await step('Edit loads the entry into the form and Cancel restores the blank form', async () => {
+    const e = E('seedtoday2'), before = localStorage.getItem('tl.food');
+    click('food-edit', { id: e.id });
+    await waitFor(() => q('[data-action="food-cancel"]'), 3000, 'the edit form');
+    expect(q('#ff-name').value === e.name, 'the form name is "' + q('#ff-name').value + '"');
+    expect(Number(q('#ff-kcal').value) === round1(e.kcal / e.qty), 'the form shows ' + q('#ff-kcal').value + ' kcal per serving, expected ' + round1(e.kcal / e.qty));
+    expect(Number(q('#ff-qty').value) === e.qty, 'the form shows ' + q('#ff-qty').value + ' servings');
+    expect(txt(q('[data-action="food-add"]')) === 'Save changes', 'the main button reads "' + txt(q('[data-action="food-add"]')) + '"');
+    click('food-cancel');
+    await waitFor(() => !q('[data-action="food-cancel"]'), 3000, 'the edit form to close');
+    expect(q('#ff-name').value === '' && q('#ff-kcal').value === '', 'the form still holds "' + q('#ff-name').value + '" / "' + q('#ff-kcal').value + '"');
+    expect(txt(q('[data-action="food-add"]')) === 'Add to log', 'the main button reads "' + txt(q('[data-action="food-add"]')) + '"');
+    expect(localStorage.getItem('tl.food') === before, 'Edit followed by Cancel changed what is stored');
+    return 'form showed ' + e.name + ', ' + round1(e.kcal / e.qty) + ' kcal x ' + e.qty;
+  });
+
+  await step('Delete asks for confirmation and removes only that entry', async () => {
+    const v = E('seedvictim'), before = readStore(), has = () => readStore().entries.some(x => x.id === v.id), yes = actionSel('food-del-yes', { id: v.id });
+    click('food-del', { id: v.id });
+    await waitFor(() => q(yes), 3000, 'the delete confirmation');
+    expect(/Delete this entry/.test(txt(q(yes).closest('.confirm'))), 'the confirmation does not ask the question');
+    expect(has(), 'the entry was removed before confirming');
+    click('food-del-no');
+    await waitFor(() => !q(yes), 3000, 'the confirmation to close after Keep');
+    expect(has() && logRow(v.id), 'Keep removed the entry');
+    click('food-del', { id: v.id });
+    await waitFor(() => q(yes), 3000, 'the delete confirmation');
+    deleted.push(v.id);
+    click('food-del-yes', { id: v.id });
+    await waitFor(() => !has(), 3000, 'the entry to leave localStorage');
+    const after = readStore();
+    expect(after.entries.length === before.entries.length - 1, 'entries went from ' + before.entries.length + ' to ' + after.entries.length);
+    before.entries.filter(x => x.id !== v.id).forEach(x => expect(same(x, after.entries.find(y => y.id === x.id)), 'another entry changed or vanished: ' + x.id));
+    expect(same(before.saved, after.saved), 'the favourites changed');
+    expect(!logRow(v.id), 'the deleted entry is still listed');
+    expect(dayTotal() === Math.round(storeDayTotal(seed.today)), 'the header shows ' + dayTotal() + ' kcal, the stored entries add up to ' + storeDayTotal(seed.today));
+    return 'removed ' + v.name + ', ' + after.entries.length + ' entries remain';
+  });
+
+  await step('Earlier shows yesterday\'s entries and Today returns', async () => {
+    click('food-prev');
+    await waitFor(() => logRow(ydays[0].id), 3000, 'yesterday\'s entries');
+    expect(txt(q('.daynav b')) === 'Yesterday', 'the day label reads "' + txt(q('.daynav b')) + '"');
+    ydays.forEach(e => { const r = logRow(e.id); expect(r && r.name === e.name && r.kcal === Math.round(e.kcal), 'yesterday\'s entry is wrong or missing: ' + e.name); });
+    expect(!logRow('seedtoday1'), 'an entry from today is listed under yesterday');
+    const want = Math.round(sumKcal(ydays)); expect(dayTotal() === want, 'the header shows ' + dayTotal() + ' kcal, yesterday adds up to ' + want);
+    click('food-today');
+    await waitFor(() => logRow('seedtoday1'), 3000, 'today\'s entries');
+    expect(!logRow(ydays[0].id), 'yesterday\'s entry is listed under today');
+    return 'yesterday: ' + want + ' kcal in ' + ydays.length + ' entries';
+  });
+
+  await step('Settings opens and Save settings keeps the calorie target', async () => {
+    const want = seed.store.settings;
+    clickSel('#settingsBtn');
+    expect(visible(q('#settingsPanel')), 'the Settings panel did not open');
+    expect(Number(q('#setKcal').value) === want.kcalTarget, 'the panel shows a calorie target of "' + q('#setKcal').value + '"');
+    clickSel('#saveSettings');
+    await waitFor(() => !visible(q('#settingsPanel')), 3000, 'the Settings panel to close');
+    const s = readKey('settings'); expect(s, 'no settings are stored');
+    expect(s.kcalTarget === want.kcalTarget, 'the stored calorie target is ' + s.kcalTarget);
+    Object.keys(want).forEach(k => expect(s[k] === want[k], 'setting ' + k + ' changed from ' + want[k] + ' to ' + s[k]));
+    const m = /Target\s+(.+?)\s*kcal/.exec(txt(q('.hero .lede'))); expect(m && num(m[1]) === want.kcalTarget, 'the Food tab does not show the target: ' + txt(q('.hero .lede')));
+    return 'target ' + s.kcalTarget + ' kcal';
+  });
+
+  /* Added with the food-database change: the old version 1 bundle has no categories of its own, so the app derives them (USDA "Fast Foods" and "Restaurant Foods" are eating out, the rest whole foods).
+     It can only be proved while a version 1 file is being served. Once the repository's food-db.json is a version 2 bundle, this line is reported as XFAIL (not run) unless an old bundle is served with --db-file. */
+  const served = await loadJson('../food-db.json').catch(() => null), V1_CHECK = 'the old version 1 bundle works with the category filter';
+  if (!served || served.version !== 1 || !Array.isArray(served.cats)) check(V1_CHECK, false, 'not run: the served food-db.json is version ' + (served ? served.version : 'unknown') + ', not 1; serve an old bundle with --db-file to prove that it still loads', { xfail: true });
+  else await step(V1_CHECK, async () => {
+    await search('big mac', r => r.length > 0);
+    let rows = await pressPill('dining_out');
+    expect(rows.length > 0, 'nothing is listed for "big mac" under Dining Out');
+    rows.forEach(r => expect(r.dcat === 'dining_out' && r.icon && !r.thumb, r.name + ' has data-cat ' + r.dcat + ' and data-thumb ' + r.thumb));
+    const fast = rows.find(r => r.cat === 'Fast Foods'); expect(fast, 'no USDA "Fast Foods" row under Dining Out: ' + names(rows));
+    rows = await pressPill('whole_food');
+    rows.forEach(r => expect(r.dcat === 'whole_food', r.name + ' has data-cat ' + r.dcat + ' under Whole Foods'));
+    expect(!rows.some(r => r.cat === 'Fast Foods'), 'a "Fast Foods" row is listed under Whole Foods');
+    rows = await search('banana raw', r => r.length > 0 && r[0].name === 'Banana, raw');
+    expect(rows.every(r => r.dcat === 'whole_food'), 'a row that is not a whole food is listed under Whole Foods');
+    await pressPill('all');
+    type('#ff-name', ''); await waitFor(() => !visible(q('#food-res')), 3000, 'the list to hide');
+    return 'Dining Out: ' + fast.name + ' (' + fast.cat + '); Whole Foods: Banana, raw';
+  });
+
+  await step('no script errors were raised during the run', async () => {
+    expect(!appErrors.length, appErrors.join(' | '));
+    return 'none';
+  });
+
+  await step('seeded workout is untouched', async () => {
+    const w = readKey('workouts'); expect(same(w, kept.workouts), 'workouts changed: ' + JSON.stringify(w).slice(0, 200));
+    return kept.workouts.length + ' workout';
+  });
+
+  /* Keep this one LAST: everything the suite did not edit or delete on purpose must be exactly as seeded. */
+  await step('data preservation: seeded entries and favourites are unchanged in localStorage', async () => {
+    const now = readStore(), problems = []; let n = 0;
+    kept.food.entries.forEach(e => {
+      if (deleted.indexOf(e.id) >= 0) return;
+      const cur = now.entries.find(x => x.id === e.id); n++;
+      if (!cur) problems.push('entry ' + e.id + ' is missing'); else if (!same(e, cur)) problems.push('entry ' + e.id + ' changed: ' + diffKeys(e, cur));
+    });
+    kept.food.saved.forEach(s => {
+      const cur = now.saved.find(x => x.id === s.id);
+      if (!cur) problems.push('favourite ' + s.id + ' is missing'); else if (!same(s, cur)) problems.push('favourite ' + s.id + ' changed: ' + diffKeys(s, cur));
+    });
+    expect(!problems.length, problems.join('; '));
+    return n + ' entries and ' + kept.food.saved.length + ' favourites identical; deleted on purpose: ' + (deleted.join(', ') || 'none') + '; ' + now.entries.length + ' entries stored now';
+  });
+}
+
+/* ---------- helpers for the food-database checks ---------- */
+const PANCIT = 'Lucky Me! Pancit Canton Kalamansi', PANCIT_CODE = '4807770270123', PANCIT_THUMB = 'https://images.openfoodfacts.org/images/products/480/777/027/0123/front_en.3.200.jpg';
+const CHICKENJOY = 'Chickenjoy 1 pc (thigh)', ADOBO = 'Chicken adobo', FLAT_WHITE = 'Flat White (tall)';
+const PILLS = [['all', 'All'], ['supermarket', 'Supermarket & Imported'], ['dining_out', 'Dining Out'], ['whole_food', 'Whole Foods']];
+const pillEls = () => qa('#food-res .fcat');
+const pressedPills = () => pillEls().filter(b => b.getAttribute('aria-pressed') === 'true').map(b => b.dataset.cat);
+/* Presses a filter pill and waits until it is the only one pressed. */
+async function pressPill(cat){
+  clickSel('#food-res .fcat[data-cat="' + cat + '"]');
+  await waitFor(() => { const p = pressedPills(); return p.length === 1 && p[0] === cat; }, 2000, 'the pill "' + cat + '" to be the only one pressed');
+  return resultRows();
+}
+const rowNamed = (rows, name) => rows.find(r => r.name === name);
+const names = rows => rows.map(r => r.name).slice(0, 8).join(' | ') || 'no rows';
+/* The number of matches the list header reports: "Top 12 of 57 matches" -> 57, "3 matches" -> 3, "No match yet" -> 0. */
+function headCount(){ const t = txt(q('#food-res-head')), m = /of\s+([\d.,\s]+)\s+match/i.exec(t) || /^([\d.,\s]+)\s+match/i.exec(t); return m ? num(m[1]) : 0; }
+/* Records every fetch() the app makes from now on. other() lists the ones that went to another host. */
+function watchFetch(){
+  const w = win(), orig = w.fetch, log = [];
+  w.fetch = function(input){ log.push(String(input && input.url || input)); return orig.apply(w, arguments); };
+  const host = u => { try { return new URL(u, w.location.href).host; } catch (e) { return '?'; } };
+  return { log: log, stop: () => { w.fetch = orig; }, other: () => log.filter(u => host(u) !== w.location.host) };
+}
+/* Requests of any kind (not only fetch) that the browser made to the two online lookup services. */
+function lookupRequests(){ return win().performance.getEntriesByType('resource').map(e => e.name).filter(u => /\/\/(world\.openfoodfacts\.org|api\.nal\.usda\.gov)\//.test(u)); }
+/* Answers the app's calls to the two lookup services with canned JSON, so the online path runs without a network. Everything else passes through. */
+function stubFetch(offBody, fdcBody){
+  const w = win(), orig = w.fetch, calls = [];
+  const reply = body => Promise.resolve(new w.Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+  w.fetch = function(input){
+    const u = String(input && input.url || input);
+    if (u.indexOf('//world.openfoodfacts.org/') >= 0) { calls.push(u); return reply(offBody); }
+    if (u.indexOf('//api.nal.usda.gov/') >= 0) { calls.push(u); return reply(fdcBody); }
+    return orig.apply(w, arguments);
+  };
+  return { calls: calls, stop: () => { w.fetch = orig; } };
+}
+/* Collects the picture elements the app puts into the results list from now on, as written, before any of them can fail to load. */
+function watchThumbs(){
+  const seen = [], box = q('#food-res');
+  const mo = new (win().MutationObserver)(list => list.forEach(m => m.addedNodes.forEach(n => { if (n.querySelectorAll) n.querySelectorAll('img').forEach(im => seen.push({ src: im.getAttribute('src'), loading: im.getAttribute('loading'), decoding: im.getAttribute('decoding'), referrerpolicy: im.getAttribute('referrerpolicy'), alt: im.getAttribute('alt'), inThumb: !!im.closest('.fthumb') })); })));
+  mo.observe(box, { childList: true, subtree: true });
+  return { seen: seen, stop: () => mo.disconnect() };
+}
+/* Hands a backup file to the app the way "Restore from file" does. */
+function restoreFile(obj){
+  const w = win(), input = q('#restoreFile'); expect(input, 'no restore file input');
+  const dt = new w.DataTransfer(); dt.items.add(new w.File([JSON.stringify(obj)], 'training-log-backup.json', { type: 'application/json' }));
+  input.files = dt.files; fire(input, 'change');
+}
+/* Presses "Download backup" and returns the JSON the app wrote, without letting a real download start. */
+async function captureBackup(){
+  const w = win(), origUrl = w.URL.createObjectURL, origClick = w.HTMLAnchorElement.prototype.click; let blob = null;
+  w.URL.createObjectURL = function(b){ blob = b; return origUrl.call(w.URL, b); };
+  w.HTMLAnchorElement.prototype.click = function(){};
+  try { clickSel('#downloadBackup'); } finally { w.URL.createObjectURL = origUrl; w.HTMLAnchorElement.prototype.click = origClick; }
+  expect(blob, 'Download backup produced no file');
+  return JSON.parse(await blob.text());
+}
+const sodiumBox = () => ({ label: txt(q('#ff-sodium-l')), value: q('#ff-sodium') ? q('#ff-sodium').value : null });
+const dayMore = k => txt(q('#food-daymore [data-nx="' + k + '"]'));
+
+/* ---------- suite: v2 (the food-database upgrade, against a version 2 bundle) ---------- */
+async function suiteV2(){
+  const seed = baselineData(); seedStorage(seed.store);
+  const kept = copy(seed.store), seededFood = localStorage.getItem('tl.food');
+  const todays = seed.store.food.entries.filter(e => e.date === seed.today), countedToday = todays.filter(e => e.status !== 'pending').length;
+  let added = 0;   /* entries this suite logs today */
+  const logged = {};
+
+  const booted = await step('app boots with the version 2 bundle and rewrites nothing while loading', async () => {
+    await openApp('food');
+    await wait(2500);   /* food-library.json loads at start, food-db.json 1.5 s later */
+    expect(q('#ff-name'), 'the food form is gone after loading');
+    expect(!appErrors.length, appErrors.join(' | '));
+    const db = await loadJson('../food-db.json');
+    expect(db.version === 2 && Array.isArray(db.fields) && Array.isArray(db.items), 'the served /food-db.json is not a version 2 bundle (version ' + db.version + '); run with --suite v2 so the runner serves one');
+    expect(localStorage.getItem('tl.food') === seededFood, 'loading the app changed the stored food data');
+    expect(readKey('food').schema === undefined, 'a schema marker was written before anything was saved');
+    return 'bundle with ' + db.items.length + ' rows, built "' + (db.built || '') + '"; stored data byte-for-byte as seeded';
+  });
+  if (!booted) { check('remaining checks were skipped because the app did not boot', false, ''); return; }
+
+  let allChicken = 0;
+  await step('the four filter pills show above the results with the exact labels and "All" pressed', async () => {
+    await search('chicken');
+    const pills = pillEls();
+    expect(pills.length === 4, pills.length + ' pills instead of 4');
+    pills.forEach((b, i) => {
+      expect(b.tagName === 'BUTTON', 'pill ' + i + ' is a ' + b.tagName + ', not a button');
+      expect(txt(b) === PILLS[i][1] && b.dataset.cat === PILLS[i][0], 'pill ' + i + ' reads "' + txt(b) + '" (' + b.dataset.cat + '), expected "' + PILLS[i][1] + '"');
+      expect(b.getAttribute('aria-pressed') === (i === 0 ? 'true' : 'false'), 'pill "' + txt(b) + '" has aria-pressed=' + b.getAttribute('aria-pressed'));
+    });
+    const box = q('#food-res'), first = box.firstElementChild;
+    expect(first && first.contains(pills[0]), 'the pills are not the first thing in the results list');
+    allChicken = headCount(); expect(allChicken > 0, 'the list header gives no count: "' + txt(q('#food-res-head')) + '"');
+    return pills.map(txt).join(' | ') + '; "chicken" under All: ' + allChicken + ' matches';
+  });
+
+  await step('"pancit canton" lists the curated Lucky Me row with its picture address and the supermarket category', async () => {
+    const w = watchThumbs(); let rows;
+    try { rows = await search('pancit canton', r => !!rowNamed(r, PANCIT)); await wait(30); } finally { w.stop(); }
+    const row = rowNamed(rows, PANCIT);
+    expect(row.thumb === PANCIT_THUMB, 'data-thumb is "' + row.thumb + '"');
+    expect(row.dcat === 'supermarket', 'data-cat is "' + row.dcat + '"');
+    expect(row.cat === 'Lucky Me!', 'the muted line starts with "' + row.cat + '", expected the brand');
+    expect(row.sub.indexOf('1 pack') >= 0, 'the serving is not on the muted line: ' + row.sub);
+    expect(row.kcal === 280, 'the row shows ' + row.kcal + ' kcal for the default serving, expected 280');
+    const img = w.seen.find(x => x.src === PANCIT_THUMB);
+    expect(img, 'no picture element was created for that address; created: ' + (w.seen.map(x => x.src).join(', ') || 'none'));
+    expect(img.inThumb && img.loading === 'lazy' && img.decoding === 'async' && img.referrerpolicy === 'no-referrer' && img.alt === '', 'picture attributes: ' + JSON.stringify(img));
+    return 'data-thumb and data-cat as expected; img is lazy, async, no-referrer, alt=""';
+  });
+
+  await step('a picture that cannot load falls back to the category icon and keeps data-thumb', async () => {
+    const find = () => rowNamed(resultRows(), PANCIT);
+    await waitFor(() => { const r = find(); return r && !r.img; }, 5000, 'the failed picture to be taken out (there is no network in this run)');
+    const r = find();
+    expect(r.icon && visible(r.icon), 'no icon is showing in place of the picture');
+    expect(r.thumb === PANCIT_THUMB && r.dcat === 'supermarket', 'data-thumb or data-cat changed: ' + r.thumb + ' / ' + r.dcat);
+    const again = rowNamed(await search('pancit canton kal', rr => !!rowNamed(rr, PANCIT)), PANCIT);
+    expect(!again.img && again.thumb === PANCIT_THUMB, 'the failed picture was asked for again on the next redraw, or data-thumb was dropped');
+    return 'icon shown, data-thumb kept, not retried';
+  });
+
+  await step('a row without a picture shows the category icon in a 44 px tile', async () => {
+    const row = rowNamed(await search('chickenjoy', r => !!rowNamed(r, CHICKENJOY)), CHICKENJOY);
+    expect(row.thumb === null, 'the row carries data-thumb="' + row.thumb + '"');
+    expect(!row.img, 'the row has a picture element although the food has no picture');
+    expect(row.icon && visible(row.icon), 'no icon is showing');
+    expect(row.dcat === 'dining_out', 'data-cat is "' + row.dcat + '"');
+    const b = row.thumbEl.getBoundingClientRect(); expect(Math.round(b.width) === 44 && Math.round(b.height) === 44, 'the tile is ' + b.width + ' x ' + b.height);
+    return 'svg icon in a 44 x 44 tile, data-cat ' + row.dcat;
+  });
+
+  await step('"Dining Out" lists Chickenjoy for "chicken" and not Chicken adobo, without redrawing the form', async () => {
+    await search('chicken', r => r.length > 0);
+    const field = q('#ff-name');
+    const rows = await pressPill('dining_out');
+    expect(rowNamed(rows, CHICKENJOY), CHICKENJOY + ' is not listed: ' + names(rows));
+    expect(!rowNamed(rows, ADOBO), ADOBO + ' is listed under Dining Out');
+    rows.forEach(r => expect(r.dcat === 'dining_out', r.name + ' has data-cat ' + r.dcat));
+    const n = headCount(); expect(n > 0 && n < allChicken, 'the header count is ' + n + ' under Dining Out and ' + allChicken + ' under All');
+    expect(q('#ff-name') === field && field.isConnected, 'the form was redrawn');
+    expect(doc().activeElement === field && field.value === 'chicken', 'the food field lost the focus or its text');
+    return rows.length + ' rows shown of ' + n + ' (All: ' + allChicken + ')';
+  });
+
+  await step('"Whole Foods" lists Chicken adobo for "chicken" and not Chickenjoy', async () => {
+    const rows = await pressPill('whole_food');
+    expect(rowNamed(rows, ADOBO), ADOBO + ' is not listed: ' + names(rows));
+    expect(!rowNamed(rows, CHICKENJOY), CHICKENJOY + ' is listed under Whole Foods');
+    rows.forEach(r => expect(r.dcat === 'whole_food', r.name + ' has data-cat ' + r.dcat));
+    const n = headCount(); expect(n > 0 && n < allChicken, 'the header count is ' + n + ' under Whole Foods and ' + allChicken + ' under All');
+    return rows.length + ' rows shown of ' + n;
+  });
+
+  await step('the chosen filter stays while typing and "All" brings everything back', async () => {
+    let rows = await search('banana', r => r.length > 0);
+    expect(pressedPills().join() === 'whole_food', 'pressed after typing again: ' + pressedPills().join());
+    rows.forEach(r => expect(r.dcat === 'whole_food', r.name + ' has data-cat ' + r.dcat));
+    rows = await pressPill('supermarket');
+    rows.forEach(r => expect(r.dcat === 'supermarket', r.name + ' has data-cat ' + r.dcat + ' under Supermarket & Imported'));
+    await pressPill('all');
+    rows = await search('chicken', r => !!rowNamed(r, ADOBO));
+    expect(headCount() === allChicken, 'All now reports ' + headCount() + ' matches, at first ' + allChicken);
+    return 'filter kept across queries; All: ' + headCount() + ' matches';
+  });
+
+  await step('brand search "jollibee" finds the Chickenjoy row, and a brand-only match works', async () => {
+    let rows = await search('jollibee', r => !!rowNamed(r, CHICKENJOY));
+    const same = rows.filter(r => r.name === CHICKENJOY);
+    expect(same.length === 1, same.length + ' rows named ' + CHICKENJOY);
+    expect(same[0].cat === 'Jollibee', 'the row shows "' + same[0].cat + '" as its brand');
+    expect(same[0].kcal === 380 && same[0].sub.indexOf('1 thigh') >= 0, 'the row shows ' + same[0].kcal + ' kcal for ' + same[0].sub);
+    rows = await search('nongshim', r => !!rowNamed(r, 'Shin Ramyun'));
+    const shin = rowNamed(rows, 'Shin Ramyun');
+    expect(shin.cat === 'Nongshim' && shin.dcat === 'supermarket', 'Shin Ramyun shows brand "' + shin.cat + '" and data-cat ' + shin.dcat);
+    expect(shin.thumb && /^https:\/\/images\.openfoodfacts\.org\/images\/products\//.test(shin.thumb), 'Shin Ramyun data-thumb: ' + shin.thumb);
+    return CHICKENJOY + ' (' + same[0].cat + '), Shin Ramyun (' + shin.cat + ')';
+  });
+
+  await step('a curated bundle row hides the older library item of the same name', async () => {
+    const lib = await loadJson('../food-library.json'), old = (lib.items || []).find(x => x.name === ADOBO);
+    expect(old, 'food-library.json no longer has "' + ADOBO + '", so this check proves nothing');
+    const rows = await search('chicken adobo', r => !!rowNamed(r, ADOBO)), hits = rows.filter(r => r.name === ADOBO);
+    expect(hits.length === 1, hits.length + ' rows named "' + ADOBO + '": ' + names(rows));
+    expect(hits[0].kcal === 214 && hits[0].sub.indexOf('1 serving with sauce (152 g)') >= 0, 'the row left is not the bundle row: ' + hits[0].kcal + ' kcal, ' + hits[0].sub + ' (the library item has ' + old.kcal + ' kcal)');
+    const aka = (await search('adobong manok', r => !!rowNamed(r, ADOBO))).filter(r => r.name === ADOBO);
+    expect(aka.length === 1 && aka[0].kcal === 214, 'searching by the other name "adobong manok" gives ' + aka.length + ' rows');
+    return 'one row, 214 kcal per 152 g (library item: ' + old.kcal + ' kcal, hidden)';
+  });
+
+  await step('typing an exact name and leaving the field fills the form: curated bundle row first, else the library item', async () => {
+    const lib = await loadJson('../food-library.json'), plainOnly = (lib.items || []).filter(x => x.name === 'Pancit canton');
+    expect(plainOnly.length === 1, 'food-library.json has ' + plainOnly.length + ' items named "Pancit canton", so this check proves nothing');
+    const leave = text => fire(type('#ff-name', text), 'change');
+    leave('chicken adobo');
+    await waitFor(() => Number(q('#ff-kcal').value) === 214, 2000, 'the curated row\'s 214 kcal in the form (it shows "' + q('#ff-kcal').value + '")');
+    const sel = q('[data-ff="pi"]'); expect(visible(q('#ff-pi-wrap')) && txt(sel.selectedOptions[0]) === '1 serving with sauce (152 g)', 'the serving picker of the curated row is not showing');
+    leave('Pancit canton');
+    await waitFor(() => Number(q('#ff-kcal').value) === Math.round(plainOnly[0].kcal), 2000, 'the library item\'s ' + plainOnly[0].kcal + ' kcal in the form (it shows "' + q('#ff-kcal').value + '")');
+    expect(!visible(q('#ff-pi-wrap')), 'a serving picker is showing for a library item');
+    leave('zz');
+    await waitFor(() => q('#ff-kcal').value === '', 2000, 'the numbers of the previous food to be cleared');
+    return 'chicken adobo -> 214 kcal (bundle); Pancit canton -> ' + plainOnly[0].kcal + ' kcal (library); unknown name -> cleared';
+  });
+
+  await step('typing the barcode shows the pancit canton row offline, with no request to another host', async () => {
+    const before = lookupRequests().length, f = watchFetch(), tried = [];
+    try {
+      const forms = [PANCIT_CODE, '0' + PANCIT_CODE, '4 807770 270123', '4807770-270123'];
+      for (const code of forms) {
+        type('#ff-name', 'x'); await waitFor(() => !visible(q('#food-res')), 2000, 'the list to hide between barcodes');
+        const rows = await search(code, r => r.length === 1 && r[0].name === PANCIT);
+        expect(rows[0].kcal === 280 && rows[0].thumb === PANCIT_THUMB, code + ' shows ' + rows[0].kcal + ' kcal, data-thumb ' + rows[0].thumb);
+        expect(/barcode/i.test(txt(q('#food-res-head'))), 'the header does not say it is a barcode match: ' + txt(q('#food-res-head')));
+        tried.push(code);
+      }
+      /* the 12-digit UPC-A anchor (Cheerios) is only in the bundle built by the importer */
+      type('#ff-name', 'x'); await waitFor(() => !visible(q('#food-res')), 2000, 'the list to hide');
+      const cheer = await search('cheerios', () => true, 1500).catch(() => []);
+      if (cheer.some(r => /cheerios/i.test(r.name))) {
+        for (const code of ['016000275287', '0016000275287', '00016000275287']) {
+          type('#ff-name', 'x'); await waitFor(() => !visible(q('#food-res')), 2000, 'the list to hide between barcodes');
+          const rows = await search(code, r => r.length === 1 && /cheerios/i.test(r[0].name));
+          expect(rows[0].dcat === 'supermarket', code + ' shows data-cat ' + rows[0].dcat);
+          tried.push(code);
+        }
+      }
+      /* Find food and Enter on a saved barcode stay offline too */
+      await search(PANCIT_CODE, r => r.length === 1 && r[0].name === PANCIT);
+      click('food-find'); await wait(300);
+      let rows = resultRows(); expect(rows.length === 1 && rows[0].name === PANCIT, 'after Find food the list shows: ' + names(rows));
+      q('#ff-name').dispatchEvent(new (win().KeyboardEvent)('keydown', { key: 'Enter', bubbles: true, cancelable: true })); await wait(300);
+      rows = resultRows(); expect(rows.length === 1 && rows[0].name === PANCIT, 'after Enter the list shows: ' + names(rows));
+      expect(!/searching/i.test(txt(q('#food-res'))), 'the list says it is searching online');
+      expect(!f.other().length, 'fetch calls to another host: ' + f.other().join(', '));
+      expect(lookupRequests().length === before, 'requests to the lookup services: ' + lookupRequests().slice(before).join(', '));
+    } finally { f.stop(); }
+    return tried.length + ' spellings found offline (' + tried.join(', ') + '); ' + f.log.length + ' fetch calls, none to another host';
+  });
+
+  await step('choosing the pancit canton row fills 280 kcal for "1 pack" and More nutrition shows sodium 900 mg', async () => {
+    const rows = await search(PANCIT_CODE, r => r.length === 1 && r[0].name === PANCIT);
+    click('food-use', { i: rows[0].i });
+    await waitFor(() => q('#ff-name') && q('#ff-name').value === PANCIT && !visible(q('#food-res')), 3000, 'the food in the form');
+    expect(Number(q('#ff-kcal').value) === 280, 'the form shows ' + q('#ff-kcal').value + ' kcal');
+    const sel = q('[data-ff="pi"]'), chosen = sel && sel.selectedOptions[0] ? txt(sel.selectedOptions[0]) : '';
+    expect(visible(q('#ff-pi-wrap')) && chosen === '1 pack (60 g)', 'the serving size chosen is "' + chosen + '"');
+    const more = q('#ff-more'); expect(more && more.tagName === 'DETAILS', 'no "More nutrition" section');
+    expect(/^More nutrition/.test(txt(more.querySelector('summary'))), 'its heading reads "' + txt(more.querySelector('summary')) + '"');
+    expect(!more.open && !shown(q('#ff-sodium')), 'the section is not collapsed to begin with (open: ' + more.open + ')');
+    more.open = true; await wait(60);
+    expect(shown(q('#ff-sodium')) && shown(q('#ff-sugars')) && shown(q('#ff-saturates')) && shown(q('#ff-fibre')), 'the four boxes are not all showing');
+    const s = sodiumBox(); expect(s.label === 'Sodium (mg)' && s.value === '900', 'the sodium box reads ' + s.label + ' = ' + s.value);
+    expect(q('#ff-sugars').value === '3' && q('#ff-saturates').value === '6' && q('#ff-fibre').value === '2', 'sugars / saturates / fibre: ' + q('#ff-sugars').value + ' / ' + q('#ff-saturates').value + ' / ' + q('#ff-fibre').value);
+    const labels = qa('#ff-more label.f').map(l => txt(l)); expect(labels.join('|') === 'Sugars (g)|Saturates (g)|Fibre (g)|Sodium (mg)', 'labels: ' + labels.join('|'));
+    return '280 kcal, 1 pack (60 g); sugars 3, saturates 6, fibre 2, sodium 900 mg';
+  });
+
+  await step('the serving-size picker recalculates the extra nutrients', async () => {
+    selectOption('[data-ff="pi"]', '100 g');
+    expect(Number(q('#ff-kcal').value) === 467 && q('#ff-sodium').value === '1500' && q('#ff-sugars').value === '5', 'per 100 g the form shows ' + q('#ff-kcal').value + ' kcal, sodium ' + q('#ff-sodium').value + ', sugars ' + q('#ff-sugars').value);
+    selectOption('[data-ff="pi"]', '1 pack (60 g)');
+    expect(Number(q('#ff-kcal').value) === 280 && q('#ff-sodium').value === '900' && q('#ff-sugars').value === '3', 'back on 1 pack the form shows ' + q('#ff-kcal').value + ' kcal, sodium ' + q('#ff-sodium').value + ', sugars ' + q('#ff-sugars').value);
+    return '100 g: 467 kcal, sodium 1500 mg; 1 pack: 280 kcal, sodium 900 mg';
+  });
+
+  await step('the Sodium / Salt toggle shows 2.25 g, saves the setting, and flips back to 900 mg', async () => {
+    const tg = u => '#ff-more [data-action="food-salt"][data-unit="' + u + '"]';
+    expect(q(tg('sodium')).getAttribute('aria-pressed') === 'true' && q(tg('salt')).getAttribute('aria-pressed') === 'false', 'the toggle does not start on Sodium');
+    clickSel(tg('salt'));
+    await waitFor(() => sodiumBox().label === 'Salt (g)', 3000, 'the box to switch to salt');
+    expect(sodiumBox().value === '2.25', 'salt shows ' + sodiumBox().value + ' g');
+    expect(readKey('settings').saltUnit === 'salt', 'the stored setting is ' + readKey('settings').saltUnit);
+    expect(q('#ff-more').open && q('#ff-name').value === PANCIT && Number(q('#ff-kcal').value) === 280, 'the form lost its food or folded the section on redraw');
+    expect(q(tg('salt')).getAttribute('aria-pressed') === 'true' && q(tg('sodium')).getAttribute('aria-pressed') === 'false', 'the toggle does not show Salt as pressed');
+    clickSel(tg('sodium'));
+    await waitFor(() => sodiumBox().label === 'Sodium (mg)', 3000, 'the box to switch back to sodium');
+    expect(sodiumBox().value === '900', 'sodium shows ' + sodiumBox().value + ' mg after flipping back');
+    const st = readKey('settings'); expect(st.saltUnit === 'sodium', 'the stored setting is ' + st.saltUnit);
+    Object.keys(kept.settings).forEach(k => expect(st[k] === kept.settings[k], 'setting ' + k + ' changed from ' + kept.settings[k] + ' to ' + st[k]));
+    return '900 mg -> 2.25 g -> 900 mg; other settings untouched';
+  });
+
+  await step('Settings has "Show as: Sodium (mg) / Salt (g)" and saving it changes the form', async () => {
+    clickSel('#settingsBtn'); expect(visible(q('#settingsPanel')), 'the Settings panel did not open');
+    expect(optionTexts('#setSalt').join('|') === 'Sodium (mg)|Salt (g)', 'options: ' + optionTexts('#setSalt').join('|'));
+    expect(q('#setSalt').value === 'sodium', 'the select shows ' + q('#setSalt').value);
+    expect(/show as/i.test(txt(q('#setSalt').closest('label'))), 'the label reads "' + txt(q('#setSalt').closest('label')).slice(0, 60) + '"');
+    selectOption('#setSalt', 'Salt (g)'); clickSel('#saveSettings');
+    await waitFor(() => !visible(q('#settingsPanel')) && sodiumBox().label === 'Salt (g)', 3000, 'the form to switch to salt');
+    expect(sodiumBox().value === '2.25' && readKey('settings').saltUnit === 'salt', 'salt shows ' + sodiumBox().value + ', stored ' + readKey('settings').saltUnit);
+    clickSel('#settingsBtn'); expect(q('#setSalt').value === 'salt', 'the select shows ' + q('#setSalt').value + ' after saving Salt');
+    selectOption('#setSalt', 'Sodium (mg)'); clickSel('#saveSettings');
+    await waitFor(() => !visible(q('#settingsPanel')) && sodiumBox().label === 'Sodium (mg)', 3000, 'the form to switch back');
+    const st = readKey('settings'); expect(sodiumBox().value === '900' && st.saltUnit === 'sodium' && st.kcalTarget === kept.settings.kcalTarget, 'sodium shows ' + sodiumBox().value + ', stored ' + st.saltUnit);
+    return 'select works both ways';
+  });
+
+  await step('saving stores sodium 900 mg and sugars 3 on the entry, marks the store as schema 2, and the day summary shows them', async () => {
+    const known = new Set(readStore().entries.map(e => e.id));
+    click('food-add');
+    const a = await waitFor(() => { const x = newEntries(known); return x.length ? x : null; }, 3000, 'a new entry in localStorage');
+    expect(a.length === 1, a.length + ' entries were added'); const e = a[0]; added++; logged.pancit = e.id;
+    expect(e.name === PANCIT && e.kcal === 280 && e.qty === 1 && e.serving === '1 pack (60 g)', 'stored: ' + JSON.stringify(e));
+    expect(e.sodium === 900 && e.sugars === 3 && e.saturates === 6 && e.fibre === 2, 'stored sodium / sugars / saturates / fibre: ' + e.sodium + ' / ' + e.sugars + ' / ' + e.saturates + ' / ' + e.fibre);
+    expect(e.protein === 6 && e.carbs === 35 && e.fat === 12, 'stored protein / carbs / fat: ' + e.protein + ' / ' + e.carbs + ' / ' + e.fat);
+    expect(e.category === 'supermarket' && e.brand === 'Lucky Me!' && e.source === 'library', 'stored category / brand / source: ' + e.category + ' / ' + e.brand + ' / ' + e.source);
+    const fd = readKey('food'); expect(fd.schema === 2, 'the stored food object has schema ' + fd.schema);
+    await waitFor(() => logRow(e.id) && q('#food-daymore'), 3000, 'the entry and the extra line in the day summary');
+    expect(/^Sodium 900 mg$/.test(dayMore('sodium')), 'the day summary reads "' + dayMore('sodium') + '"');
+    expect(/^Sugars 3 g$/.test(dayMore('sugars')) && /^Saturates 6 g$/.test(dayMore('saturates')) && /^Fibre 2 g$/.test(dayMore('fibre')), 'the day summary reads "' + dayMore('sugars') + '", "' + dayMore('saturates') + '", "' + dayMore('fibre') + '"');
+    const box = q('#food-daymore'), note = txt(q('#food-daymore-n'));
+    expect(box.dataset.n === '1' && box.dataset.of === String(countedToday + added), 'the summary counts ' + box.dataset.n + ' of ' + box.dataset.of + ' entries');
+    expect(note.indexOf('1 of ' + (countedToday + added)) >= 0, 'the summary does not say how many entries have the detail: "' + note + '"');
+    expect(dayTotal() === Math.round(storeDayTotal(seed.today)), 'the header shows ' + dayTotal() + ' kcal, the stored entries add up to ' + storeDayTotal(seed.today));
+    return 'entry: ' + e.kcal + ' kcal, sodium ' + e.sodium + ' mg, sugars ' + e.sugars + ' g; summary: ' + note;
+  });
+
+  await step('salt typed in grams is stored as sodium in mg, and the day summary flips between the two', async () => {
+    const tg = u => '#food-daymore [data-action="food-salt"][data-unit="' + u + '"]';
+    clickSel(tg('salt'));
+    await waitFor(() => /^Salt 2\.25 g$/.test(dayMore('sodium')), 3000, 'the day summary to show salt');
+    const known = new Set(readStore().entries.map(e => e.id));
+    type('#ff-name', 'Smoke test salted crackers'); setValue('#ff-kcal', 100); setValue('#ff-qty', 2);
+    q('#ff-more').open = true; expect(sodiumBox().label === 'Salt (g)', 'the form box reads ' + sodiumBox().label);
+    setValue('#ff-sodium', 0.5); setValue('#ff-sugars', 1.5);
+    click('food-add');
+    const a = await waitFor(() => { const x = newEntries(known); return x.length ? x : null; }, 3000, 'a new entry in localStorage');
+    const e = a[0]; added++; logged.crackers = e.id;
+    expect(e.kcal === 200 && e.qty === 2 && e.sodium === 400 && e.sugars === 3, 'stored: ' + JSON.stringify(e));
+    expect(!('saturates' in e) && !('fibre' in e) && !('category' in e) && !('brand' in e), 'unknown details were stored: ' + JSON.stringify(e));
+    await waitFor(() => /^Salt 3\.25 g$/.test(dayMore('sodium')), 3000, 'the day summary to add up to 3.25 g of salt');
+    expect(q('#food-daymore').dataset.n === '2', 'the summary counts ' + q('#food-daymore').dataset.n + ' entries with detail');
+    expect(/^Fibre 2 g$/.test(dayMore('fibre')) && /^Sugars 6 g$/.test(dayMore('sugars')), 'fibre / sugars read "' + dayMore('fibre') + '" / "' + dayMore('sugars') + '"');
+    clickSel(tg('sodium'));
+    await waitFor(() => /^Sodium 1[,.\s]?300 mg$/.test(dayMore('sodium')), 3000, 'the day summary to show 1,300 mg of sodium');
+    expect(readKey('settings').saltUnit === 'sodium', 'the stored setting is ' + readKey('settings').saltUnit);
+    return '0.5 g salt x 2 servings -> 400 mg sodium; day: 3.25 g salt = 1,300 mg sodium';
+  });
+
+  await step('the per-serving row "Flat White (tall)" has no serving picker and logs 170 kcal', async () => {
+    const rows = await search('flat white', r => !!rowNamed(r, FLAT_WHITE)), row = rowNamed(rows, FLAT_WHITE);
+    expect(row.kcal === 170 && row.cat === 'Starbucks' && row.dcat === 'dining_out' && row.sub.indexOf('1 tall (12 fl oz)') >= 0, 'the row shows ' + row.kcal + ' kcal, ' + row.cat + ', ' + row.dcat + ', ' + row.sub);
+    click('food-use', { i: row.i });
+    await waitFor(() => q('#ff-name') && q('#ff-name').value === FLAT_WHITE, 3000, 'the food in the form');
+    expect(!visible(q('#ff-pi-wrap')), 'a serving-size picker is offered for a per-serving food');
+    expect(Number(q('#ff-kcal').value) === 170 && q('#ff-sodium').value === '115' && q('#ff-sugars').value === '13' && q('#ff-fibre').value === '', 'the form shows ' + q('#ff-kcal').value + ' kcal, sodium ' + q('#ff-sodium').value + ', sugars ' + q('#ff-sugars').value + ', fibre "' + q('#ff-fibre').value + '"');
+    const known = new Set(readStore().entries.map(e => e.id));
+    click('food-add');
+    const a = await waitFor(() => { const x = newEntries(known); return x.length ? x : null; }, 3000, 'a new entry in localStorage');
+    const e = a[0]; added++; logged.flat = e.id;
+    expect(e.name === FLAT_WHITE && e.kcal === 170 && e.qty === 1 && e.serving === '1 tall (12 fl oz)', 'stored: ' + JSON.stringify(e));
+    expect(e.sodium === 115 && e.sugars === 13 && e.saturates === 5 && !('fibre' in e) && e.category === 'dining_out' && e.brand === 'Starbucks', 'stored details: ' + JSON.stringify(e));
+    await waitFor(() => logRow(e.id), 3000, 'the entry in today\'s list');
+    expect(logRow(e.id).kcal === 170, 'listed with ' + logRow(e.id).kcal + ' kcal');
+    expect(/^Fibre 2 g$/.test(dayMore('fibre')) && /^Sodium 1[,.\s]?415 mg$/.test(dayMore('sodium')), 'the day summary reads "' + dayMore('fibre') + '", "' + dayMore('sodium') + '"');
+    return '170 kcal, sodium 115 mg, sugars 13 g, no fibre stored';
+  });
+
+  await step('"Banana, raw" still offers the serving picker', async () => {
+    const rows = await search('banana raw', r => r.length > 0 && r[0].name === 'Banana, raw');
+    expect(rows[0].dcat === 'whole_food' && rows[0].thumb === null, 'the row has data-cat ' + rows[0].dcat + ' and data-thumb ' + rows[0].thumb);
+    click('food-use', { i: 0 });
+    await waitFor(() => q('#ff-name') && q('#ff-name').value === 'Banana, raw', 3000, 'the food in the form');
+    expect(visible(q('#ff-pi-wrap')), 'the serving-size select is not showing');
+    const opts = optionTexts('[data-ff="pi"]');
+    expect(opts[0] === '1 banana (126 g)' && opts.indexOf('100 g') >= 0 && opts.indexOf('1 g') >= 0, 'serving sizes offered: ' + opts.join(' | '));
+    expect(Number(q('#ff-kcal').value) === 122, 'one banana shows ' + q('#ff-kcal').value + ' kcal, expected 122');
+    selectOption('[data-ff="pi"]', '100 g');
+    expect(Number(q('#ff-kcal').value) === 97 && q('#ff-sugars').value === '15.8', 'per 100 g: ' + q('#ff-kcal').value + ' kcal, sugars ' + q('#ff-sugars').value);
+    return 'serving sizes: ' + opts.join(' | ');
+  });
+
+  await step('favourites keep the per-serving detail, and own foods pass a filter only when they carry a category', async () => {
+    type('#ff-name', ''); await wait(200);
+    const before = readStore().saved.length;
+    click('food-fav', { id: logged.crackers });
+    await waitFor(() => readStore().saved.length === before + 1, 3000, 'the new favourite');
+    click('food-fav', { id: logged.pancit });
+    await waitFor(() => readStore().saved.length === before + 2, 3000, 'the second favourite');
+    const saved = readStore().saved, fc = saved.find(s => s.name === 'Smoke test salted crackers'), fp = saved.find(s => s.name === PANCIT);
+    expect(fc && fc.kcal === 100 && fc.sodium === 200 && fc.sugars === 1.5 && !('category' in fc) && !('fibre' in fc), 'crackers favourite: ' + JSON.stringify(fc));
+    expect(fp && fp.kcal === 280 && fp.sodium === 900 && fp.sugars === 3 && fp.category === 'supermarket' && fp.brand === 'Lucky Me!', 'pancit favourite: ' + JSON.stringify(fp));
+    const isFav = (rows, name) => rows.some(r => r.name === name && r.tag === 'Favourite');
+    let rows = await search('pancit canton', r => !!rowNamed(r, PANCIT));
+    const iFav = rows.findIndex(r => r.name === PANCIT && r.tag === 'Favourite'), iDb = rows.findIndex(r => r.name === PANCIT && r.tag !== 'Favourite');
+    expect(iFav >= 0 && iDb > iFav, 'the favourite is not listed ahead of the bundle row of the same name under All: ' + rows.map(r => r.name + (r.tag ? ' [' + r.tag + ']' : '')).join(' | '));
+    rows = await pressPill('supermarket'); expect(isFav(rows, PANCIT), 'the favourite with a category is missing under Supermarket & Imported: ' + names(rows));
+    rows = await pressPill('dining_out'); expect(!rowNamed(rows, PANCIT), 'the supermarket favourite is listed under Dining Out');
+    await pressPill('all');
+    rows = await search('smoke test protein', r => r.length > 0); expect(isFav(rows, 'Smoke test protein shake'), 'the old favourite is not listed under All: ' + names(rows));
+    expect(rows[0].dcat === 'other' && rows[0].icon && !rows[0].img, 'an old favourite has data-cat ' + rows[0].dcat);
+    rows = await pressPill('whole_food'); expect(!rows.length, 'an old favourite without a category is listed under Whole Foods: ' + names(rows));
+    expect(/All/.test(txt(q('#food-res'))), 'no hint that All has the match: ' + txt(q('#food-res')).slice(0, 200));
+    rows = await pressPill('dining_out');
+    rows = await search('flat white', r => r.length > 0); expect(rows.some(r => r.name === FLAT_WHITE && r.tag === 'Recent'), 'the recent food with a category is missing under Dining Out: ' + names(rows));
+    await pressPill('all');
+    return 'favourites store one serving with detail; categorised own foods follow the filter';
+  });
+
+  await step('online results carry picture, brand, category and the extra nutrients, and follow the filter', async () => {
+    const off = { products: [
+      { code: '9990000000017', product_name: 'Oat Bar', brands: 'Stubco,Other', image_front_small_url: 'https://images.openfoodfacts.org/images/products/999/000/000/0017/front_en.1.200.jpg', serving_size: '40 g', serving_quantity: 40, nutriments: { 'energy-kcal_100g': 400, proteins_100g: 10, carbohydrates_100g: 60, fat_100g: 12, sugars_100g: 25, 'saturated-fat_100g': 5, fiber_100g: 7, sodium_100g: 0.3, salt_100g: 9 } },
+      { code: '9990000000024', product_name: 'Stubco Rice Cakes', brands: 'Stubco', serving_size: '2 cakes (25 g)', serving_quantity: 25, nutriments: { 'energy-kcal_100g': 380, proteins_100g: 8, carbohydrates_100g: 80, fat_100g: 3, sugars_100g: 1, salt_100g: 0.5 } },
+      { code: '9990000000031', product_name: 'Stubco Cup Soup', brands: 'Stubco', serving_size: '1 cup (240 ml)', nutriments: { 'energy-kcal_serving': 90, proteins_serving: 3, carbohydrates_serving: 15, fat_serving: 2, sugars_serving: 4.44, 'saturated-fat_serving': 0.5, salt_serving: 1.2 } }
+    ] };
+    const fdc = { foods: [{ description: 'STUB GRANOLA BAR', brandOwner: 'STUBCO FOODS', gtinUpc: '041220999993', servingSize: 30, servingSizeUnit: 'g', householdServingFullText: '1 bar', foodNutrients: [{ nutrientId: 1008, value: 450 }, { nutrientId: 1003, value: 8 }, { nutrientId: 1005, value: 64 }, { nutrientId: 1004, value: 18 }, { nutrientId: 2000, value: 22 }, { nutrientId: 1258, value: 3 }, { nutrientId: 1079, value: 6 }, { nutrientId: 1093, value: 310 }] }] };
+    const stub = stubFetch(off, fdc);
+    try {
+      type('#ff-name', 'stubco'); await wait(250);
+      click('food-find');
+      let rows = await waitFor(() => { const r = resultRows(); return r.length >= 4 && !/searching/i.test(txt(q('#food-res-head'))) ? r : null; }, 6000, 'the stubbed online results');
+      expect(stub.calls.some(u => u.indexOf('image_front_small_url') >= 0), 'the packaged-food request does not ask for image_front_small_url: ' + stub.calls.join(' '));
+      const bar = rowNamed(rows, 'Stubco Oat Bar'), cakes = rowNamed(rows, 'Stubco Rice Cakes'), gran = rowNamed(rows, 'Stubco Foods Stub Granola Bar');
+      expect(bar && cakes && gran, 'rows: ' + names(rows));
+      expect(bar.thumb === off.products[0].image_front_small_url && bar.dcat === 'supermarket' && bar.cat === 'Stubco' && bar.kcal === 160, 'Oat Bar row: ' + bar.thumb + ', ' + bar.dcat + ', ' + bar.cat + ', ' + bar.kcal);
+      expect(cakes.thumb === null && cakes.icon && cakes.dcat === 'supermarket', 'Rice Cakes row: ' + cakes.thumb + ', ' + cakes.dcat);
+      expect(gran.dcat === 'supermarket' && gran.cat === 'Stubco Foods' && gran.kcal === 135, 'Granola row: ' + gran.dcat + ', ' + gran.cat + ', ' + gran.kcal);
+      expect(headCount() === rows.length, 'the header says ' + headCount() + ' matches for ' + rows.length + ' rows');
+      rows = await pressPill('dining_out'); expect(!rows.length && headCount() === 0, 'online brand rows are listed under Dining Out: ' + names(rows));
+      rows = await pressPill('supermarket'); expect(rows.length === 4 && headCount() === 4, rows.length + ' rows under Supermarket & Imported');
+      rows = await pressPill('all');
+      const form = async (name) => { const r = rowNamed(resultRows(), name); click('food-use', { i: r.i }); await waitFor(() => q('#ff-name') && q('#ff-name').value === name, 3000, name + ' in the form'); return { kcal: q('#ff-kcal').value, sugars: q('#ff-sugars').value, saturates: q('#ff-saturates').value, fibre: q('#ff-fibre').value, sodium: q('#ff-sodium').value }; };
+      const fb = await form('Stubco Oat Bar');
+      expect(same(fb, { kcal: '160', sugars: '10', saturates: '2', fibre: '2.8', sodium: '120' }), 'Oat Bar in the form (sodium_100g is in grams and wins over salt): ' + JSON.stringify(fb));
+      type('#ff-name', 'stubco'); await wait(250); click('food-find');
+      await waitFor(() => { const r = resultRows(); return r.length >= 3 && !/searching/i.test(txt(q('#food-res-head'))); }, 6000, 'the stubbed online results again');
+      const fg = await form('Stubco Foods Stub Granola Bar');
+      expect(same(fg, { kcal: '135', sugars: '6.6', saturates: '0.9', fibre: '1.8', sodium: '93' }), 'Granola Bar in the form (USDA ids 2000, 1258, 1079, 1093): ' + JSON.stringify(fg));
+      type('#ff-name', 'stubco'); await wait(250); click('food-find');
+      await waitFor(() => { const r = resultRows(); return r.length >= 3 && !/searching/i.test(txt(q('#food-res-head'))); }, 6000, 'the stubbed online results a third time');
+      const fc = await form('Stubco Rice Cakes');
+      expect(same(fc, { kcal: '95', sugars: '0.3', saturates: '', fibre: '', sodium: '50' }), 'Rice Cakes in the form (salt 0.5 g per 100 g is 200 mg sodium, so 50 mg in 25 g): ' + JSON.stringify(fc));
+      type('#ff-name', 'stubco'); await wait(250); click('food-find');
+      await waitFor(() => { const r = resultRows(); return r.length >= 4 && !/searching/i.test(txt(q('#food-res-head'))); }, 6000, 'the stubbed online results a fourth time');
+      const fs = await form('Stubco Cup Soup');
+      expect(same(fs, { kcal: '90', sugars: '4.4', saturates: '0.5', fibre: '', sodium: '480' }) && !visible(q('#ff-pi-wrap')), 'Cup Soup in the form (label gives per-serving numbers only; salt 1.2 g is 480 mg sodium): ' + JSON.stringify(fs));
+    } finally { stub.stop(); }
+    return 'Open Food Facts and USDA brand rows: picture, supermarket, sugars, saturates, fibre, sodium';
+  });
+
+  await step('at 375 px wide nothing scrolls sideways, the pills scroll inside their strip and tap targets are at least 40 px', async () => {
+    frame.style.width = '375px'; await wait(100);
+    try {
+      const rows = await search('pancit canton', r => !!rowNamed(r, PANCIT));
+      const de = doc().documentElement, box = q('#food-res'), strip = q('#food-res .fcats'), br = box.getBoundingClientRect();
+      expect(win().innerWidth === 375, 'the app is ' + win().innerWidth + ' px wide');
+      expect(de.scrollWidth <= de.clientWidth, 'the page scrolls sideways: ' + de.scrollWidth + ' > ' + de.clientWidth);
+      expect(box.scrollWidth <= box.clientWidth, 'the results list scrolls sideways: ' + box.scrollWidth + ' > ' + box.clientWidth);
+      const stripSize = strip.scrollWidth + ' px of pills in a ' + strip.clientWidth + ' px strip';
+      expect(strip.scrollWidth > strip.clientWidth && win().getComputedStyle(strip).overflowX === 'auto', 'the pill strip does not scroll: ' + stripSize);
+      pillEls().forEach(b => expect(b.getBoundingClientRect().height >= 40, 'pill "' + txt(b) + '" is ' + b.getBoundingClientRect().height + ' px high'));
+      rows.forEach(r => {
+        const rr = r.el.getBoundingClientRect(), add = r.el.querySelector('[data-action="food-addnow"]').getBoundingClientRect(), k = r.el.querySelector('.k').getBoundingClientRect(), pick = r.el.querySelector('.pickbtn').getBoundingClientRect();
+        expect(rr.left >= br.left - 0.5 && rr.right <= br.right + 0.5 && add.right <= br.right + 0.5, r.name + ' sticks out of the list: ' + rr.left + '..' + add.right + ' in ' + br.left + '..' + br.right);
+        expect(add.height >= 40 && pick.height >= 40, r.name + ': Add is ' + add.height + ' px high, the row button ' + pick.height);
+        expect(pick.right <= k.left + 0.5 && k.right <= add.left + 0.5, r.name + ': name, calories and Add overlap');
+        expect(r.el.querySelector('.fr-txt').getBoundingClientRect().width >= 90, r.name + ': only ' + r.el.querySelector('.fr-txt').getBoundingClientRect().width + ' px left for the name');
+      });
+      strip.scrollLeft = 200; const moved = strip.scrollLeft; expect(moved > 0, 'the pill strip cannot be scrolled');
+      await pressPill('whole_food');
+      /* a shorter list can lose its scrollbar and make the strip a little wider, so the furthest it can scroll may shrink */
+      const now = q('#food-res .fcats'), want = Math.min(moved, now.scrollWidth - now.clientWidth);
+      expect(want > 0 && Math.abs(now.scrollLeft - want) <= 1, 'pressing a pill moved the strip to ' + now.scrollLeft + ' (was ' + moved + ', expected ' + want + ')');
+      expect(pressedPills().join() === 'whole_food' && now.querySelector('[aria-pressed="true"]').getBoundingClientRect().right <= now.getBoundingClientRect().right + 1, 'the pressed pill is not in view');
+      await pressPill('all');
+      return rows.length + ' rows fit in ' + Math.round(br.width) + ' px; ' + stripSize;
+    } finally { frame.style.width = ''; }
+  });
+
+  await step('backups: the new file carries schema 2 and the details; old and new backup files both restore', async () => {
+    type('#ff-name', ''); await wait(200);
+    const b = await captureBackup();
+    expect(b.app === 'training-log' && b.food && b.food.schema === 2, 'backup food schema: ' + (b.food && b.food.schema));
+    kept.food.entries.forEach(e => expect(JSON.stringify(b.food.entries.find(x => x.id === e.id)) === JSON.stringify(e), 'seeded entry ' + e.id + ' differs in the backup'));
+    const bp = b.food.entries.find(x => x.id === logged.pancit); expect(bp && bp.sodium === 900 && bp.sugars === 3 && bp.category === 'supermarket', 'the new entry in the backup: ' + JSON.stringify(bp));
+    const at = Date.now() - 86400000;
+    const oldEntry = { id: 'restoredold1', date: seed.yesterday, at: at, name: 'Smoke test restored lugaw', qty: 1, serving: '1 bowl', kcal: 180, protein: 6, carbs: 30, fat: 3.5, meal: 'Breakfast', source: 'manual' };
+    const oldFav = { id: 'restoredfav1', name: 'Smoke test restored taho', serving: '1 cup', kcal: 150, protein: 7, carbs: 24, fat: 3, uses: 1, lastUsed: at };
+    restoreFile({ app: 'training-log', version: 1, exportedAt: '2026-10-01T00:00:00.000Z', workouts: [], food: { entries: [oldEntry], saved: [oldFav] } });
+    await waitFor(() => readStore().entries.some(e => e.id === 'restoredold1'), 3000, 'the entry from the old backup');
+    const newEntry = { id: 'restorednew1', date: seed.yesterday, at: at + 1000, name: 'Smoke test restored granola', qty: 2, serving: '1 bar (30 g)', kcal: 270, protein: 4.8, carbs: 38.4, fat: 10.8, meal: 'Snack', source: 'packaged', sugars: 13.2, saturates: 1.8, fibre: 3.6, sodium: 186, category: 'supermarket', brand: 'Testco' };
+    const newFav = { id: 'restoredfav2', name: 'Smoke test restored granola', serving: '1 bar (30 g)', kcal: 135, protein: 2.4, carbs: 19.2, fat: 5.4, sugars: 6.6, saturates: 0.9, fibre: 1.8, sodium: 93, category: 'supermarket', brand: 'Testco', uses: 1, lastUsed: at };
+    restoreFile({ app: 'training-log', version: 1, exportedAt: '2026-11-22T00:00:00.000Z', workouts: [], food: { schema: 2, entries: [newEntry, oldEntry], saved: [newFav, oldFav] } });
+    await waitFor(() => readStore().entries.some(e => e.id === 'restorednew1'), 3000, 'the entry from the new backup');
+    const now = readStore(), pick = (list, id) => JSON.stringify(list.find(x => x.id === id));
+    expect(pick(now.entries, 'restoredold1') === JSON.stringify(oldEntry) && pick(now.saved, 'restoredfav1') === JSON.stringify(oldFav), 'the old-format records were changed on restore');
+    expect(pick(now.entries, 'restorednew1') === JSON.stringify(newEntry) && pick(now.saved, 'restoredfav2') === JSON.stringify(newFav), 'the new-format records were changed on restore');
+    expect(now.entries.filter(e => e.id === 'restoredold1').length === 1 && now.saved.filter(s => s.id === 'restoredfav1').length === 1, 'restoring the same records twice duplicated them');
+    expect(readKey('food').schema === 2, 'schema after restore: ' + readKey('food').schema);
+    click('food-prev'); await waitFor(() => logRow('restorednew1') && logRow('restoredold1'), 3000, 'the restored entries under yesterday');
+    expect(logRow('restorednew1').kcal === 270 && logRow('restoredold1').kcal === 180, 'restored entries show ' + logRow('restorednew1').kcal + ' and ' + logRow('restoredold1').kcal + ' kcal');
+    expect(q('#food-daymore').dataset.n === '1' && /^Sodium 186 mg$/.test(dayMore('sodium')), 'yesterday\'s summary: ' + txt(q('#food-daymore')));
+    click('food-today'); await waitFor(() => logRow('seedtoday1'), 3000, 'today\'s entries');
+    return 'backup has schema 2; an old backup (no schema, no detail) and a new one both merged without changes';
+  });
+
+  await step('old entries without the new fields still show, edit and total as before', async () => {
+    const e = kept.food.entries.find(x => x.id === 'seedtoday2'), before = localStorage.getItem('tl.food');
+    const r = logRow(e.id); expect(r && r.name === e.name && r.kcal === Math.round(e.kcal), 'the old entry is listed wrongly');
+    click('food-edit', { id: e.id });
+    await waitFor(() => q('[data-action="food-cancel"]'), 3000, 'the edit form');
+    expect(q('#ff-name').value === e.name && Number(q('#ff-kcal').value) === round1(e.kcal / e.qty), 'the edit form shows ' + q('#ff-name').value + ', ' + q('#ff-kcal').value);
+    expect(q('#ff-sodium').value === '' && q('#ff-sugars').value === '' && q('#ff-saturates').value === '' && q('#ff-fibre').value === '', 'an old entry shows extra nutrients it does not have');
+    click('food-cancel');
+    await waitFor(() => !q('[data-action="food-cancel"]'), 3000, 'the edit form to close');
+    expect(localStorage.getItem('tl.food') === before, 'Edit followed by Cancel changed what is stored');
+    expect(dayTotal() === Math.round(storeDayTotal(seed.today)), 'the header shows ' + dayTotal() + ' kcal, the stored entries add up to ' + storeDayTotal(seed.today));
+    return 'listed, editable, counted';
+  });
+
+  await step('no script errors were raised during the run', async () => {
+    expect(!appErrors.length, appErrors.join(' | '));
+    return 'none';
+  });
+
+  await step('seeded workout is untouched', async () => {
+    const w = readKey('workouts'); expect(same(w, kept.workouts), 'workouts changed: ' + JSON.stringify(w).slice(0, 200));
+    return kept.workouts.length + ' workout';
+  });
+
+  /* Keep this one LAST: every seeded entry and favourite must read back exactly as it was written. */
+  await step('data preservation: seeded old entries and favourites are byte-for-byte intact', async () => {
+    const now = readStore(), problems = [];
+    kept.food.entries.forEach(e => {
+      const cur = now.entries.find(x => x.id === e.id);
+      if (!cur) problems.push('entry ' + e.id + ' is missing'); else if (JSON.stringify(cur) !== JSON.stringify(e)) problems.push('entry ' + e.id + ' changed: ' + (diffKeys(e, cur) || 'key order'));
+    });
+    kept.food.saved.forEach(s => {
+      const cur = now.saved.find(x => x.id === s.id);
+      if (!cur) problems.push('favourite ' + s.id + ' is missing'); else if (JSON.stringify(cur) !== JSON.stringify(s)) problems.push('favourite ' + s.id + ' changed: ' + (diffKeys(s, cur) || 'key order'));
+    });
+    expect(!problems.length, problems.join('; '));
+    const raw = localStorage.getItem('tl.food');
+    expect(raw.indexOf('"entries":' + JSON.stringify(kept.food.entries).slice(0, -1)) >= 0, 'the seeded entries are no longer stored as one unchanged run of text at the start of the list');
+    expect(raw.indexOf('"saved":' + JSON.stringify(kept.food.saved).slice(0, -1)) >= 0, 'the seeded favourites are no longer stored as one unchanged run of text at the start of the list');
+    return kept.food.entries.length + ' entries and ' + kept.food.saved.length + ' favourites identical; ' + now.entries.length + ' entries and ' + now.saved.length + ' favourites stored now';
+  });
+}
+
+/* ---------- suites: pick one with ?suite=NAME ---------- */
+const SUITES = {
+  baseline: { about: 'The app as it was before the food-database change: stored data, search, logging, editing, deleting, settings.', run: suiteBaseline },
+  v2: { about: 'The food-database upgrade against a version 2 bundle: filter pills, pictures and icons, brand search, offline barcodes, extra nutrients, sodium or salt, schema marker, backups.', run: suiteV2 }
+};
+
+async function main(){
+  if (!isLocalTestHost()) { /* never touch real data: do nothing at all outside a local test server */
+    document.getElementById('result').textContent = 'This test page only runs on a local test server (127.0.0.1). Nothing was changed.';
+    return;
+  }
+  const suite = SUITES[suiteName];
+  try {
+    if (!suite) check('suite "' + suiteName + '" exists', false, 'known suites: ' + Object.keys(SUITES).join(', '));
+    else await suite.run();
+  } catch (e) {
+    check('suite "' + suiteName + '" ran to the end', false, 'uncaught: ' + (e && (e.stack || e.message) || e));
+  }
+  publish(true);
+}
+window.addEventListener('error', ev => { check('the test page itself raised no error', false, ev && ev.message || 'unknown error'); });
+window.addEventListener('unhandledrejection', ev => { const r = ev && ev.reason; check('the test page itself raised no error', false, 'unhandled promise rejection: ' + (r && r.message || r)); });
+publish(false);
+main();
+})();
+</script>
+</body>
+</html>

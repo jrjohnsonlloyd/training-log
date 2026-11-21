@@ -1,0 +1,14 @@
+fdc_id,data_type,description,brand_owner,gtin_upc,food_category,serving_size_g,household_serving,energy_kcal,energy_kj,protein_g,carbohydrate_g,sugars_g,fat_g,saturated_fat_g,fiber_g,sodium_mg
+2709224,survey_fndds_food,"Banana, raw",,,Bananas,126,1 banana,97,,0.74,23,15.8,0.29,0.1,1.7,0
+2499999,branded_food,CHEERIOS,General Mills,00016000275287,Breakfast Cereals,39,1.5 cup,359,,12.82,74.36,5.13,6.41,1.28,10.3,487
+2706000,survey_fndds_food,Big Mac (McDonalds),,,Burgers,219,1 burger,257,,11.8,20.1,3.97,14.9,5.3,1.6,460
+171688,sr_legacy_food,"Oats, rolled, dry",,,Breakfast Cereals,40,0.5 cup,,1590,13.2,67.7,0.99,6.5,1.1,10.1,6
+2500001,branded_food,CREAMY PEANUT BUTTER,Skippy,037600110754,Nut & Seed Butters,32,2 tbsp,594,,21.88,18.8,9.38,50,10.94,6.2,422
+2500002,branded_food,MYSTERY GRANOLA,Testco Foods,041220999993,Granola,30,1 bar,,,7,65,20,15,3,5,120
+170720,sr_legacy_food,"Fast foods, cheeseburger, single patty, plain",,,Sandwiches,102,1 sandwich,295,,15.4,31.2,6.5,12.3,5.6,1.1,620
+167650,sr_legacy_food,"Fried rice with egg, family style",,,Restaurant Foods,137,1 cup,174,,4.7,31,0.4,3.3,0.6,1.1,387
+321358,foundation_food,"Hummus, commercial",,,Legumes and Legume Products,33,2 tbsp,229,,7.4,14.9,0.34,17.1,2.29,5.4,438
+2706100,survey_fndds_food,"Chicken fried steak, from restaurant",,,Meat Mixed Dishes,160,1 steak,271,,14.2,13.6,0.6,17.9,5.1,0.7,560
+170310,sr_legacy_food,"WENDY'S, Classic Single Hamburger, no cheese",,,Beef Products,218,1 sandwich,214,,12.5,17.2,3.4,10.6,4.1,0.9,395
+2500003,branded_food,STARBUCKS FRAPPUCCINO COFFEE DRINK,Starbucks,012000001291,Ready-To-Drink Coffee,405,1 bottle,71,,2.22,12.1,11.36,1.11,0.74,0,35
+2706555,survey_fndds_food,Pork adobo,,,Meat Mixed Dishes,180,1 cup,236,,16.8,3.1,1.2,17.4,6.1,0.3,640
