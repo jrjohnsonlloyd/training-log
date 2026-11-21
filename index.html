@@ -106,6 +106,13 @@ label.f{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--fg
 .food-item .k{font-family:var(--display);font-weight:800;font-size:20px;white-space:nowrap;text-align:right}
 .food-item .k small{display:block;font-family:var(--body);font-weight:600;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
 .food-item .chip-row{margin-top:6px}
+.food-res{margin:10px 0 2px;border:1px solid var(--grid);border-radius:14px;padding:8px 12px 10px;max-height:58vh;overflow:auto;-webkit-overflow-scrolling:touch}
+.food-res .head{font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);padding:2px 0 4px}
+.food-res .food-item{align-items:center;padding:9px 0}
+.food-res .k{font-size:17px}
+.pickbtn{all:unset;display:block;flex:1;min-width:0;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.pickbtn b{display:block;overflow-wrap:anywhere}
+.pickbtn:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
 .frow{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:10px;align-items:end}
 .daynav{display:flex;gap:8px;align-items:center}
 .daynav b{flex:1;text-align:center}
@@ -251,6 +258,7 @@ details.hist summary::-webkit-details-marker{display:none}
       <label class="f">Appearance<select id="setTheme"><option value="system">Match the phone</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
       <label class="f">Daily calorie target (kcal)<input type="number" id="setKcal" min="0" max="10000" step="50" inputmode="numeric" placeholder="none"></label>
       <label class="f">Daily protein target (g, optional)<input type="number" id="setProtein" min="0" max="500" step="5" inputmode="numeric" placeholder="none"></label>
+      <label class="f">USDA food search key (optional)<input type="password" id="setFdc" placeholder="none" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
     </div>
     <div class="btn-row">
       <button class="btn primary" id="saveSettings">Save settings</button>
@@ -281,7 +289,6 @@ details.hist summary::-webkit-details-marker{display:none}
   <div class="toast" id="toast" hidden></div>
   <main id="view"></main>
   <datalist id="exnames"></datalist>
-  <datalist id="foodnames"></datalist>
   <input type="file" id="foodPhoto" accept="image/*" hidden>
 </div>
 
@@ -316,7 +323,7 @@ const state = {
   workouts: [], settings: Object.assign({}, DEFAULT_SETTINGS), active: null, rest: null,
   tab: 'today', loaded: false, backend: 'none', canWrite: true,
   progEx: null, progMetric: 'e1rm', confirmDelete: null, confirmDiscard: false,
-  food: { entries: [], saved: [] }, foodLib: [], foodDate: null, foodForm: null, foodResults: null, foodConfirmDel: null, foodBusy: false, foodRev: 0
+  food: { entries: [], saved: [] }, foodLib: [], foodDb: null, foodDbBusy: false, foodDate: null, foodForm: null, foodResults: null, foodConfirmDel: null, foodBusy: false, foodRev: 0
 };
 const $ = s => document.querySelector(s);
 const view = $('#view');
@@ -767,56 +774,170 @@ function bumpFood(){ state.foodRev++; render(); }
 function foodDayLabel(d){ return d === todayStr() ? 'Today' : d === dateStr(addDays(new Date(), -1)) ? 'Yesterday' : parseDate(d).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }); }
 function libKey(i){ return norm(i.name) + '|' + norm(i.cat || ''); }
 function mergeLib(base, extra){ const m = new Map(); base.concat(extra).forEach(i => { if (i && i.name && i.kcal != null) m.set(libKey(i), i); }); return Array.from(m.values()); }
-function fillFoodNames(){ const dl = $('#foodnames'); if (!dl) return; const seen = new Set(), out = []; state.food.saved.concat(state.foodLib).forEach(i => { const k = norm(i.name); if (k && !seen.has(k)) { seen.add(k); out.push('<option value="' + esc(i.name) + '"></option>'); } }); dl.innerHTML = out.join(''); }
 async function loadFoodLib(){
   let items = [];
   try { const r = await fetch('./food-library.json'); if (r.ok) { const j = await r.json(); if (j && Array.isArray(j.items)) items = j.items; } } catch (e) {}
   const ex = lsGet('foodLibExtra', null);
-  state.foodLib = mergeLib(items, ex && Array.isArray(ex.items) ? ex.items : []); fillFoodNames();
+  state.foodLib = mergeLib(items, ex && Array.isArray(ex.items) ? ex.items : []);
   const cfg = syncCfg();
   if (!cfg || navigator.onLine === false || Date.now() - (lsGet('foodLibExtraAt', 0) || 0) < 12 * 3600 * 1000) return;
   try {
     const r = await ghReq(cfg, 'GET', 'food-library.json', null, true); lsSet('foodLibExtraAt', Date.now());
-    if (r.ok) { const j = await r.json(); if (j && Array.isArray(j.items)) { lsSet('foodLibExtra', { items: j.items }); state.foodLib = mergeLib(items, j.items); fillFoodNames(); } }
+    if (r.ok) { const j = await r.json(); if (j && Array.isArray(j.items)) { lsSet('foodLibExtra', { items: j.items }); state.foodLib = mergeLib(items, j.items); } }
   } catch (e) {}
 }
-function foodSearch(q){
-  const plain = s => norm(s).replace(/['’`.]/g, '').replace(/&/g, ' and ').replace(/[^a-z0-9ñ]+/g, ' ').trim();
-  const terms = plain(q).split(' ').filter(Boolean); if (!terms.length) return [];
-  const pool = state.food.saved.map(s => Object.assign({}, s, { fav: true, cat: 'Favourite' })).concat(state.foodLib), scored = [];
-  pool.forEach(it => {
-    const name = plain(it.name), hay = name + ' ' + plain((it.aka || []).join(' ')) + ' ' + plain(it.cat || ''); let score = 0;
-    for (let k = 0; k < terms.length; k++) { const i = hay.indexOf(terms[k]); if (i < 0) return; score += name.indexOf(terms[k]) === 0 ? 3 : name.indexOf(terms[k]) > 0 ? 2 : 1; }
-    scored.push({ it: it, score: score + (it.fav ? 2 : 0) + (name === plain(q) ? 5 : 0) });
+/* The big offline table: about 12,600 USDA foods, values per 100 g with household portions. Built by tools/build_food_db.py. */
+async function loadFoodDb(){
+  if (state.foodDb || state.foodDbBusy) return; state.foodDbBusy = true;
+  try { const r = await fetch('./food-db.json'); if (r.ok) { const j = await r.json(); if (j && Array.isArray(j.items) && Array.isArray(j.cats)) { j.plain = j.items.map(x => plainTxt(x[0])); j.catPlain = j.cats.map(plainTxt); state.foodDb = j; } } } catch (e) {}
+  state.foodDbBusy = false;
+  const res = state.foodResults;
+  if (state.foodDb && res && !res.online && !state.foodBusy) { state.foodResults = localResults(res.q, res.more); paintFoodResults(); }
+}
+const plainTxt = s => norm(s).replace(/['’`.]/g, '').replace(/&/g, ' and ').replace(/[^a-z0-9ñ]+/g, ' ').trim();
+const plainCache = new WeakMap();
+function plainOf(it){ let p = plainCache.get(it); if (!p) { const n = plainTxt(it.name); p = { n: n, a: plainTxt((it.aka || []).join(' ')), c: plainTxt(it.cat || '') }; plainCache.set(it, p); } return p; }
+function roundTo(v, d){ const m = Math.pow(10, d); return Math.round((Number(v) || 0) * m) / m; }
+function portionText(p){ return /\d\s*(g|ml)\b/i.test(p[0]) ? p[0] : p[0] + ' (' + fmtNum(p[1], 1) + ' g)'; }
+/* Sets serving, kcal and macros on o from its per-100 g values and the chosen portion. Small portions keep three decimals so 150 x "1 g" still adds up. */
+function applyPortion(o, i){
+  const ps = o.portions || [], p = ps[i] || ps[0]; if (!p || !o.per100) return o;
+  const k = p[1] / 100, per = o.per100, fine = p[1] < 20;
+  o.pi = ps.indexOf(p); o.serving = portionText(p); o.kcal = roundTo(per.kcal * k, fine ? 3 : 0); o.protein = roundTo(per.protein * k, fine ? 3 : 1); o.carbs = roundTo(per.carbs * k, fine ? 3 : 1); o.fat = roundTo(per.fat * k, fine ? 3 : 1);
+  return o;
+}
+function per100Item(name, cat, per, portions, extra){
+  const ps = (portions || []).filter(p => p && p[0] && Number(p[1]) > 0).map(p => [String(p[0]), Number(p[1])]);
+  if (!ps.some(p => p[1] === 100)) ps.push(['100 g', 100]);
+  ps.push(['1 g', 1]);
+  return applyPortion(Object.assign({ name: name, cat: cat, per100: per, portions: ps, basis: 'database' }, extra || {}), 0);
+}
+function dbItem(row){ return per100Item(row[0], state.foodDb.cats[row[1]] || 'Food', { kcal: row[2], protein: row[3], carbs: row[4], fat: row[5] }, row[6], { src: 'usda' }); }
+let recentMemo = { key: '', list: [] };
+function recentFoods(){ /* what you logged before, newest first, one row per name, in the amount you had; favourites are listed on their own */
+  const key = state.foodRev + ':' + state.food.entries.length + ':' + state.food.saved.length; if (recentMemo.key === key) return recentMemo.list;
+  const seen = new Set(state.food.saved.map(x => norm(x.name))), out = [];
+  state.food.entries.slice().sort((a, b) => (b.at || 0) - (a.at || 0)).forEach(e => {
+    if (out.length >= 200 || e.status === 'pending' || e.kcal == null || !e.name) return;
+    const k = norm(e.name); if (seen.has(k)) return; seen.add(k);
+    const q = Number(e.qty) > 0 ? Number(e.qty) : 1;
+    out.push({ name: e.name, cat: 'Recent', recent: true, serving: (q !== 1 ? fmtNum(q, 2) + ' × ' : '') + (e.serving || (q !== 1 ? 'serving' : '')), kcal: Math.round(Number(e.kcal) || 0), protein: num1(e.protein), carbs: num1(e.carbs), fat: num1(e.fat) });
   });
-  return scored.sort((a, b) => b.score - a.score || String(a.it.name).length - String(b.it.name).length).slice(0, 10).map(x => x.it);
+  recentMemo = { key: key, list: out }; return out;
 }
+function termScore(name, aka, cat, t){ /* in the name: whole word beats start of a word beats inside a word; then other names for the food; a match only on the category counts least */
+  const n = ' ' + name + ' ';
+  if (n.indexOf(' ' + t + ' ') >= 0) return name.indexOf(t) === 0 ? 6 : 3.5;
+  if (name.indexOf(t) === 0) return 4.5;
+  if (n.indexOf(' ' + t) >= 0) return 3;
+  if (name.indexOf(t) >= 0) return 1.5;
+  if (aka && (' ' + aka).indexOf(' ' + t) >= 0) return 3;
+  if (aka && aka.indexOf(t) >= 0) return 1;
+  return cat && (' ' + cat).indexOf(' ' + t) >= 0 ? -2 : -9;
+}
+/* Every word typed must appear. Your own foods rank first, then the Philippine library, then the USDA tables; shorter, closer names win. */
+function foodSearch(q, limit){
+  const pq = plainTxt(q), terms = pq.split(' ').filter(Boolean).map(t => t.length > 3 && t.charAt(t.length - 1) === 's' ? t.slice(0, -1) : t); if (!terms.length) return { items: [], total: 0 };
+  const scored = [];
+  const pqs = terms.join(' ');
+  const head = raw => { /* +3 when the words typed are the food itself, not an ingredient or a side: "Rice, cooked", "Fried egg", "Fish, salmon" */
+    const segs = String(raw).replace(/\([^)]*\)/g, ' ').split(',').map(plainTxt), is = x => x === pq || x === pqs;
+    if (is(segs[0])) return 3;
+    if (segs.length > 1) return segs.slice(1).some(is) ? 2.75 : 0;
+    const n = segs[0], tail = x => n.length > x.length && n.slice(-x.length - 1) === ' ' + x;
+    return (tail(pq) || tail(pqs)) && n.indexOf(' with ') < 0 ? 3 : 0;
+  };
+  const rate = (name, aka, cat, bonus, raw) => { let sc = bonus; for (let k = 0; k < terms.length; k++) { const x = termScore(name, aka, cat, terms[k]); if (x < -5) return -1; sc += x; } return Math.max(0, sc + (name === pq ? 8 : head(raw)) - Math.min(4, name.length / 22)); };
+  const add = (it, bonus) => { const p = plainOf(it), sc = rate(p.n, p.a, p.c, bonus, it.name); if (sc >= 0) scored.push({ s: sc, it: it, n: p.n }); };
+  state.food.saved.forEach(x => add(Object.assign({}, x, { fav: true, cat: 'Favourite' }), 7));
+  recentFoods().forEach(it => add(it, 5));
+  state.foodLib.forEach(it => add(it, 4));
+  const db = state.foodDb;
+  if (db) for (let i = 0; i < db.items.length; i++) { const n = db.plain[i], row = db.items[i], sc = rate(n, '', db.catPlain[row[1]], row[7] === 0 ? 0.75 : 0, row[0]); if (sc >= 0) scored.push({ s: sc, row: row, n: n }); }
+  scored.sort((a, b) => b.s - a.s || a.n.length - b.n.length || (a.n < b.n ? -1 : 1));
+  const out = [], seen = new Set(); let total = 0;
+  for (let i = 0; i < scored.length; i++) {
+    const x = scored[i], key = x.row ? 'db|' + x.n : x.n + '|' + Math.round(Number(x.it.kcal) || 0); if (seen.has(key)) continue; seen.add(key); total++;
+    if (out.length < limit) out.push(x.row ? dbItem(x.row) : x.it);
+  }
+  return { items: out, total: total };
+}
+function localResults(q, more){ const r = foodSearch(q, more ? 60 : 12); return { q: q, items: r.items, total: r.total, more: !!more, online: false, msg: r.items.length ? '' : (state.foodDb ? 'Nothing saved in the app matches that. ' : 'The food list is still loading. ') + 'Try fewer words, search brands online, or ask Claude to estimate.' }; }
+async function fetchT(url, ms, opts){ const c = new AbortController(), t = setTimeout(() => c.abort(), ms); try { const r = await fetch(url, Object.assign({ signal: c.signal }, opts || {})); return { ok: r.ok, status: r.status, data: r.ok ? await r.json() : null }; } finally { clearTimeout(t); } }
 function offItem(p){
-  const n = p && p.nutriments || {}; if (!p || !p.product_name) return null;
-  const serv = Number(n['energy-kcal_serving']) >= 20 && p.serving_size && n['energy-kcal_100g'] != null, sfx = serv ? '_serving' : '_100g', k = n['energy-kcal' + sfx];
-  if (k == null || isNaN(Number(k))) return null;
-  return { name: (p.brands ? String(p.brands).split(',')[0].trim() + ' ' : '') + p.product_name, cat: 'Packaged', serving: serv ? String(p.serving_size) : '100 g', kcal: Math.round(Number(k)), protein: num1(n['proteins' + sfx]), carbs: num1(n['carbohydrates' + sfx]), fat: num1(n['fat' + sfx]), basis: 'database' };
+  const n = p && p.nutriments || {}, nm = p && (p.product_name || p.product_name_en); if (!nm) return null;
+  const brand = Array.isArray(p.brands) ? String(p.brands[0] || '') : p.brands ? String(p.brands).split(',')[0].trim() : '';
+  const name = (brand && plainTxt(nm).indexOf(plainTxt(brand)) < 0 ? brand + ' ' : '') + nm, has = k => n[k] != null && n[k] !== '' && !isNaN(Number(n[k]));
+  /* per 100 g as sold; else per 100 g as prepared (instant noodles, drink mixes); kilojoules are converted when calories are missing */
+  const sfx = has('energy-kcal_100g') || has('energy_100g') ? '_100g' : has('energy-kcal_prepared_100g') || has('energy_prepared_100g') ? '_prepared_100g' : '';
+  if (sfx) {
+    const kcal = has('energy-kcal' + sfx) ? Number(n['energy-kcal' + sfx]) : Number(n['energy' + sfx]) / 4.184;
+    const ps = [], m = /(\d+(?:[.,]\d+)?)\s*(g|ml)\b/i.exec(String(p.serving_size || '')), g = Number(p.serving_quantity) > 0 ? Number(p.serving_quantity) : m ? Number(m[1].replace(',', '.')) : 0;
+    if (p.serving_size && g > 0) ps.push([String(p.serving_size), g]);
+    return per100Item(name + (sfx === '_100g' ? '' : ' (prepared)'), 'Packaged', { kcal: Math.round(kcal), protein: Number(n['proteins' + sfx]) || 0, carbs: Number(n['carbohydrates' + sfx]) || 0, fat: Number(n['fat' + sfx]) || 0 }, ps, { src: 'off', online: true });
+  }
+  if (p.serving_size && has('energy-kcal_serving')) return { name: name, cat: 'Packaged', serving: String(p.serving_size), kcal: Math.round(Number(n['energy-kcal_serving'])), protein: num1(n.proteins_serving), carbs: num1(n.carbohydrates_serving), fat: num1(n.fat_serving), basis: 'database', src: 'off', online: true };
+  return null;
 }
+/* Open Food Facts: packaged products worldwide, scanned in by volunteers. A barcode number is exact; a name search is slower. */
 async function offSearch(q){
-  const fields = 'code,product_name,brands,serving_size,nutriments', digits = q.replace(/\s+/g, ''), ctrl = new AbortController(), to = setTimeout(() => ctrl.abort(), 25000);
-  try {
-    if (/^\d{8,14}$/.test(digits)) { const r = await fetch('https://world.openfoodfacts.org/api/v2/product/' + digits + '.json?fields=' + fields, { signal: ctrl.signal }); const j = await r.json(); const it = j && j.product ? offItem(j.product) : null; return it ? [it] : []; }
-    const r = await fetch('https://world.openfoodfacts.org/cgi/search.pl?search_terms=' + encodeURIComponent(q) + '&search_simple=1&action=process&json=1&page_size=12&fields=' + fields, { signal: ctrl.signal });
-    if (!r.ok) throw new Error('the food database answered ' + r.status);
-    const j = await r.json(); return (j && Array.isArray(j.products) ? j.products : []).map(offItem).filter(Boolean).slice(0, 8);
-  } finally { clearTimeout(to); }
+  const fields = 'code,product_name,product_name_en,brands,serving_size,serving_quantity,nutriments', digits = q.replace(/\s+/g, '');
+  if (/^\d{8,14}$/.test(digits)) { const r = await fetchT('https://world.openfoodfacts.org/api/v2/product/' + digits + '.json?fields=' + fields, 20000); const it = r.data && r.data.product ? offItem(r.data.product) : null; return it ? [it] : []; }
+  const url = 'https://world.openfoodfacts.org/cgi/search.pl?search_terms=' + encodeURIComponent(q) + '&search_simple=1&action=process&json=1&page_size=24&fields=' + fields;
+  let r; try { r = await fetchT(url, 20000); if (!r.ok) throw new Error('busy'); } catch (e) { await new Promise(res => setTimeout(res, 1500)); r = await fetchT(url, 20000); } /* it often refuses the first try when busy */
+  if (!r.ok) throw new Error('the packaged-food database answered ' + r.status);
+  return (r.data && Array.isArray(r.data.products) ? r.data.products : []).map(offItem).filter(Boolean).slice(0, 10);
 }
+function fdcItem(f){
+  if (!f || !f.description) return null; const per = {}, ids = { 1008: 'kcal', 1003: 'protein', 1005: 'carbs', 1004: 'fat' };
+  (f.foodNutrients || []).forEach(n => { const k = ids[n.nutrientId], v = Number(n.value); if (k && per[k] == null && !isNaN(v)) per[k] = v; });
+  if (per.kcal == null) return null;
+  const title = t => String(t || '').toLowerCase().replace(/(^|[\s(\/-])([a-z])/g, (m, a, b) => a + b.toUpperCase());
+  const brand = f.brandName || f.brandOwner || '', desc = f.description === f.description.toUpperCase() ? title(f.description) : f.description, b = brand === brand.toUpperCase() ? title(brand) : brand;
+  const unit = String(f.servingSizeUnit || '').toLowerCase(), g = Number(f.servingSize) > 0 && /^(g|grm|ml|mlt)$/.test(unit) ? Number(f.servingSize) : 0, ps = [];
+  if (g) { const u = unit.charAt(0) === 'm' ? 'ml' : 'g', h0 = String(f.householdServingFullText || '').trim(), hh = /^[\d.,\/ ]+(onz|oz|grm|g|mlt|ml)\.?$/i.test(h0) ? '' : h0; ps.push([hh && !/\d\s*(g|ml)\b/i.test(hh) ? hh.toLowerCase() + ' (' + fmtNum(g, 1) + ' ' + u + ')' : hh ? hh.toLowerCase() : fmtNum(g, 1) + ' ' + u, g]); }
+  return per100Item((b && plainTxt(desc).indexOf(plainTxt(b)) < 0 ? b + ' ' : '') + desc, 'US brand', { kcal: per.kcal, protein: per.protein || 0, carbs: per.carbs || 0, fat: per.fat || 0 }, ps, { src: 'fdc', online: true });
+}
+/* USDA branded foods: label data for US packaged products and chains. Works a few times an hour without a key; a free key in Settings lifts that. */
+async function fdcSearch(q){
+  const own = lsGet('fdcKey', ''), digits = q.replace(/\s+/g, '');
+  const url = 'https://api.nal.usda.gov/fdc/v1/foods/search?dataType=Branded&pageSize=15&query=' + encodeURIComponent(/^\d{8,14}$/.test(digits) ? digits : q);
+  let r; /* a personal key goes in a header; the service does not always accept that from a web page, so the address form is the fallback. The shared demo key is public, so it always uses the address form. */
+  try { r = own ? await fetchT(url, 15000, { headers: { 'X-Api-Key': own } }) : await fetchT(url + '&api_key=DEMO_KEY', 15000); }
+  catch (e) { if (!own) throw new Error('limit'); try { r = await fetchT(url + '&api_key=' + encodeURIComponent(own), 15000); } catch (e2) { throw new Error('no answer (the key may have reached its hourly limit)'); } }
+  if (r.status === 429) throw new Error(own ? 'the USDA key has reached its hourly limit' : 'limit');
+  if (r.status === 403) throw new Error(own ? 'the USDA key was rejected' : 'limit');
+  if (!r.ok) throw new Error(own ? 'the USDA database answered ' + r.status : 'limit');
+  const seen = new Set(); return (r.data && Array.isArray(r.data.foods) ? r.data.foods : []).map(fdcItem).filter(it => { if (!it) return false; const k = plainTxt(it.name) + '|' + it.per100.kcal; if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, 8);
+}
+function portionSelectHtml(f){ return (f.portions || []).map((p, i) => '<option value="' + i + '"' + (i === Number(f.pi) ? ' selected' : '') + '>' + esc(portionText(p)) + '</option>').join(''); }
 function paintFoodForm(){ /* update the form in place so the field being typed in keeps its focus */
-  const f = state.foodForm; view.querySelectorAll('[data-ff]').forEach(el => { const v = f[el.dataset.ff]; if (document.activeElement !== el || el.dataset.ff !== 'name') el.value = v == null ? '' : v; });
+  const f = state.foodForm, w = view.querySelector('#ff-pi-wrap');
+  if (w) { const has = !!(f.portions && f.per100); w.hidden = !has; const sel = w.querySelector('select'); if (sel) sel.innerHTML = has ? portionSelectHtml(f) : ''; }
+  view.querySelectorAll('[data-ff]').forEach(el => { const v = f[el.dataset.ff]; if (el.dataset.ff === 'pi') return; if (document.activeElement !== el || el.dataset.ff !== 'name') el.value = v == null ? '' : v; });
   const p = view.querySelector('#ff-serving'); if (p) { p.hidden = !f.serving; p.textContent = f.serving ? 'One serving: ' + f.serving + '. Change Servings if you had more or less.' : ''; }
 }
-function readFoodForm(){ const f = state.foodForm; view.querySelectorAll('[data-ff]').forEach(el => { f[el.dataset.ff] = el.value; }); return f; }
+function readFoodForm(){ const f = state.foodForm; view.querySelectorAll('[data-ff]').forEach(el => { if (el.dataset.ff !== 'pi') f[el.dataset.ff] = el.value; }); return f; }
 function entryFromForm(f){
   const qty = Number(f.qty) > 0 ? Number(f.qty) : 1;
   return { name: String(f.name || '').trim(), qty: qty, serving: f.serving || '', kcal: Math.round((Number(f.kcal) || 0) * qty), protein: num1((Number(f.protein) || 0) * qty), carbs: num1((Number(f.carbs) || 0) * qty), fat: num1((Number(f.fat) || 0) * qty), meal: MEALS.includes(f.meal) ? f.meal : mealNow(), source: f.source || 'manual' };
 }
 function addFoodEntry(o){ const e = Object.assign({ id: uid(), date: state.foodDate, at: Date.now() }, o); state.food.entries.push(e); return e; }
-function formFromItem(it, f){ return Object.assign(blankFoodForm(f.meal), { name: it.name, kcal: it.kcal, protein: it.protein || '', carbs: it.carbs || '', fat: it.fat || '', serving: it.serving || '', source: it.fav ? 'favourite' : it.cat === 'Packaged' ? 'packaged' : 'library', editId: f.editId || null }); }
+function formFromItem(it, f){
+  const o = Object.assign(blankFoodForm(f.meal), { name: it.name, kcal: it.kcal, protein: it.protein || '', carbs: it.carbs || '', fat: it.fat || '', serving: it.serving || '', source: it.fav ? 'favourite' : it.recent ? 'recent' : it.src === 'usda' ? 'usda' : it.online ? 'packaged' : 'library', editId: f.editId || null });
+  if (it.per100 && it.portions) { o.per100 = it.per100; o.portions = it.portions; o.pi = it.pi || 0; }
+  return o;
+}
+function foodResultsHtml(){
+  const res = state.foodResults; if (!res) return '';
+  const n = res.items.length, more = !res.online && res.total > n;
+  return '<div class="head">' + (state.foodBusy ? 'Searching…' : n ? (res.online || !more ? n : 'Top ' + n + ' of ' + fmtNum(res.total)) + (n === 1 ? ' match' : ' matches') : 'No match yet') + '</div>' +
+    res.items.map((it, i) => '<div class="food-item"><button type="button" class="pickbtn" data-action="food-use" data-i="' + i + '"><b>' + esc(it.name) + '</b><span class="s" style="display:block">' + (it.cat ? '<span class="pill">' + esc(it.cat) + '</span> ' : '') + esc(it.serving || '1 serving') + ' · P ' + fmtNum(it.protein, 1) + ' · C ' + fmtNum(it.carbs, 1) + ' · F ' + fmtNum(it.fat, 1) + ' g' + (it.basis === 'estimate' ? ' · approximate' : '') + '</span></button>' +
+      '<div class="k">' + fmtNum(it.kcal) + '<small>kcal</small></div><button type="button" class="btn small" data-action="food-addnow" data-i="' + i + '" aria-label="Add one serving of ' + esc(it.name) + '">Add</button></div>').join('') +
+    (res.msg ? '<p class="hr-note" style="margin:8px 0 0">' + esc(res.msg) + '</p>' : '') +
+    '<div class="chip-row" style="margin-top:10px">' + (more ? '<button type="button" class="btn small" data-action="food-more">Show more</button>' : '') + (res.online ? '' : '<button type="button" class="btn small" data-action="food-online"' + (state.foodBusy ? ' disabled' : '') + '>Search brands online</button>') + '<button type="button" class="btn small ghost" data-action="food-clear">Close</button></div>';
+}
+function paintFoodResults(){ const el = view.querySelector('#food-res'); if (!el) return; el.hidden = !state.foodResults; el.innerHTML = foodResultsHtml(); }
 function foodRing(eaten, target){
   const r = 34, c = 2 * Math.PI * r, p = Math.min(1, eaten / target), left = Math.round(target - eaten);
   return '<svg class="ring" viewBox="0 0 80 80" width="88" height="88" role="img" aria-label="' + Math.round(eaten) + ' of ' + target + ' calories"><circle cx="40" cy="40" r="' + r + '" class="ring-bg"></circle><circle cx="40" cy="40" r="' + r + '" class="ring-fg' + (left < 0 ? ' over' : '') + '" stroke-dasharray="' + (c * p).toFixed(1) + ' ' + c.toFixed(1) + '" transform="rotate(-90 40 40)"></circle><text x="40" y="43" text-anchor="middle" class="ring-t">' + fmtNum(Math.abs(left)) + '</text><text x="40" y="56" text-anchor="middle" class="ring-s">' + (left < 0 ? 'kcal over' : 'kcal left') + '</text></svg>';
@@ -842,31 +963,27 @@ function renderFood(){
     (d !== today ? '<button class="btn small" data-action="food-today">Today</button>' : '') + '<button class="btn small" data-action="food-next"' + (d >= today ? ' disabled' : '') + '>Later ›</button></div></section>';
   if (state.canWrite) {
     html += '<section><h2>' + (f.editId ? 'Edit entry' : 'Add food') + '</h2><div class="card">' +
-      '<label class="f">Food or description<input type="text" id="ff-name" data-ff="name" list="foodnames" autocomplete="off" placeholder="chicken adobo, Jollibee Chickenjoy, or a barcode number" value="' + esc(f.name) + '"></label>' +
+      '<label class="f">Food or description<input type="text" id="ff-name" data-ff="name" autocomplete="off" autocorrect="off" enterkeyhint="search" placeholder="chicken adobo, Jollibee Chickenjoy, or a barcode number" value="' + esc(f.name) + '"></label>' +
+      '<div class="food-res" id="food-res"' + (state.foodResults ? '' : ' hidden') + '>' + foodResultsHtml() + '</div>' +
+      '<label class="f" id="ff-pi-wrap"' + (f.portions && f.per100 ? '' : ' hidden') + ' style="margin-top:10px">Serving size<select data-ff="pi">' + portionSelectHtml(f) + '</select></label>' +
       '<div class="frow"><label class="f">Servings<input type="number" id="ff-qty" data-ff="qty" min="0" step="0.25" inputmode="decimal" value="' + esc(f.qty) + '"></label>' +
-      '<label class="f">Kcal per serving<input type="number" id="ff-kcal" data-ff="kcal" min="0" step="1" inputmode="numeric" value="' + esc(f.kcal) + '"></label>' +
+      '<label class="f">Kcal per serving<input type="number" id="ff-kcal" data-ff="kcal" min="0" step="any" inputmode="decimal" value="' + esc(f.kcal) + '"></label>' +
       '<label class="f">Meal<select data-ff="meal">' + MEALS.map(m => '<option' + (m === f.meal ? ' selected' : '') + '>' + m + '</option>').join('') + '</select></label></div>' +
-      '<div class="frow"><label class="f">Protein (g)<input type="number" data-ff="protein" min="0" step="0.1" inputmode="decimal" value="' + esc(f.protein) + '"></label>' +
-      '<label class="f">Carbs (g)<input type="number" data-ff="carbs" min="0" step="0.1" inputmode="decimal" value="' + esc(f.carbs) + '"></label>' +
-      '<label class="f">Fat (g)<input type="number" data-ff="fat" min="0" step="0.1" inputmode="decimal" value="' + esc(f.fat) + '"></label></div>' +
+      '<div class="frow"><label class="f">Protein (g)<input type="number" data-ff="protein" min="0" step="any" inputmode="decimal" value="' + esc(f.protein) + '"></label>' +
+      '<label class="f">Carbs (g)<input type="number" data-ff="carbs" min="0" step="any" inputmode="decimal" value="' + esc(f.carbs) + '"></label>' +
+      '<label class="f">Fat (g)<input type="number" data-ff="fat" min="0" step="any" inputmode="decimal" value="' + esc(f.fat) + '"></label></div>' +
       '<p class="hr-note" id="ff-serving" style="margin:10px 0 0"' + (f.serving ? '' : ' hidden') + '>' + (f.serving ? 'One serving: ' + esc(f.serving) + '. Change Servings if you had more or less.' : '') + '</p>' +
       '<div class="btn-row"><button class="btn primary" data-action="food-add">' + (f.editId ? 'Save changes' : 'Add to log') + '</button><button class="btn" data-action="food-find"' + (state.foodBusy ? ' disabled' : '') + '>Find food</button>' + (f.editId ? '<button class="btn" data-action="food-cancel">Cancel</button>' : '') + '</div>' +
       (f.editId ? '' : '<div class="btn-row"><button class="btn" data-action="food-photo">Photo for Claude</button><button class="btn" data-action="food-ask">Ask Claude to estimate</button></div>' +
-        '<p class="hr-note" style="margin:10px 0 0">Not sure of the numbers? Send a photo or just the description. Claude checks about every 12 hours and fills in an estimate you can correct. Needs Cloud sync on.</p>') +
+        '<p class="hr-note" style="margin:10px 0 0">Start typing to search ' + (state.foodDb ? fmtNum(Math.floor((state.foodDb.items.length + state.foodLib.length) / 100) * 100) + '+ foods' : 'the food lists') + ' saved in the app, plus your own; brands and barcodes are looked up online. Not sure of the numbers? Send a photo or just the description. Claude checks about every 12 hours and fills in an estimate you can correct. Needs Cloud sync on.</p>') +
       '</div></section>';
-    const res = state.foodResults;
-    if (res) {
-      html += '<section><h2>Matches for “' + esc(res.q) + '”</h2><div class="card">' +
-        (res.items.length ? res.items.map((it, i) => '<div class="food-item"><div class="n"><b>' + esc(it.name) + '</b><div class="s">' + (it.cat ? '<span class="pill">' + esc(it.cat) + '</span> ' : '') + esc(it.serving || '1 serving') + ' · P ' + fmtNum(it.protein, 1) + ' · C ' + fmtNum(it.carbs, 1) + ' · F ' + fmtNum(it.fat, 1) + ' g' + (it.basis === 'estimate' ? ' · approximate' : '') + '</div>' +
-          '<div class="chip-row"><button class="btn small" data-action="food-use" data-i="' + i + '">Use</button><button class="btn small" data-action="food-addnow" data-i="' + i + '">Add 1 serving</button></div></div><div class="k">' + fmtNum(it.kcal) + '<small>kcal</small></div></div>').join('') : '') +
-        (res.msg ? '<p class="hr-note" style="margin:8px 0 0">' + esc(res.msg) + '</p>' : '') +
-        '<div class="chip-row" style="margin-top:10px">' + (res.online ? '' : '<button class="btn small" data-action="food-online"' + (state.foodBusy ? ' disabled' : '') + '>Search packaged foods online</button>') + '<button class="btn small ghost" data-action="food-clear">Close</button></div></div></section>';
-    }
     const favs = state.food.saved.slice().sort((a, b) => (b.uses || 0) - (a.uses || 0) || (b.lastUsed || 0) - (a.lastUsed || 0));
     if (favs.length && !f.editId) {
       html += '<section><h2>Favourites</h2><div class="chip-row">' + favs.slice(0, 12).map(s => '<button class="btn small" data-action="food-quick" data-id="' + esc(s.id) + '">' + esc(s.name) + ' · ' + fmtNum(s.kcal) + '</button>').join('') + '</div>' +
         '<details style="margin-top:10px"><summary class="hr-note">Manage favourites</summary>' + favs.map(s => '<div class="food-item"><div class="n"><b>' + esc(s.name) + '</b><div class="s">' + esc(s.serving || '1 serving') + ' · ' + fmtNum(s.kcal) + ' kcal</div></div><div><button class="btn small ghost danger" data-action="food-unfav" data-id="' + esc(s.id) + '">Remove</button></div></div>').join('') + '</details></section>';
     }
+    const rec = recentFoods().slice(0, 10);
+    if (rec.length && !f.editId) html += '<section><h2>Recent</h2><div class="chip-row">' + rec.map((r, i) => '<button class="btn small" data-action="food-recent" data-i="' + i + '">' + esc(r.name.length > 34 ? r.name.slice(0, 32) + '…' : r.name) + ' · ' + fmtNum(r.kcal) + '</button>').join('') + '</div></section>';
   }
   html += '<section><h2>' + esc(label === 'Today' ? 'Today’s log' : label) + '</h2>';
   if (!list.length) html += '<div class="empty">Nothing logged for this day yet.</div>';
@@ -890,13 +1007,18 @@ function renderFood(){
   view.innerHTML = html;
 }
 async function foodOnline(q){
-  const local = state.foodResults && state.foodResults.q === q ? state.foodResults.items.filter(i => i.cat !== 'Packaged') : [];
-  state.foodBusy = true; state.foodResults = { q: q, items: local, online: true, msg: 'Searching packaged foods… this can take up to 20 seconds. Typing the barcode number from the pack is faster.' }; bumpFood();
-  let msg = '', off = [];
-  try { off = await offSearch(q); if (!off.length) msg = local.length ? 'No packaged-food match online.' : 'No match in the library or the packaged-food database. Type the numbers yourself, or ask Claude to estimate.'; }
-  catch (e) { msg = 'The packaged-food database did not answer (it is often slow). Try again, type the barcode number from the pack, enter the numbers yourself, or ask Claude to estimate.'; }
+  const local = state.foodResults && state.foodResults.q === q ? state.foodResults.items.filter(i => !i.online) : [];
+  state.foodBusy = true; state.foodResults = { q: q, items: local, online: true, msg: 'Searching brands and packaged foods online… this can take up to 20 seconds. The barcode number from the pack is the quickest.' }; paintFoodResults();
+  const got = await Promise.allSettled([offSearch(q), fdcSearch(q)]), off = got[0].status === 'fulfilled' ? got[0].value : [], fdc = got[1].status === 'fulfilled' ? got[1].value : [];
+  const items = [], seen = new Set(), n = Math.max(off.length, fdc.length);
+  for (let i = 0; i < n; i++) [off[i], fdc[i]].forEach(it => { if (!it) return; const k = plainTxt(it.name) + '|' + Math.round(it.kcal); if (!seen.has(k)) { seen.add(k); items.push(it); } });
+  const notes = [];
+  if (got[0].status === 'rejected') notes.push('The packaged-food database did not answer (it is often slow); try again in a moment.');
+  if (got[1].status === 'rejected') { const why = String(got[1].reason && got[1].reason.message || 'no answer'); if (why !== 'limit') notes.push('US brand search failed: ' + why + '.'); else if (!items.length) notes.push('US brand search allows only a few lookups an hour without a key. A free USDA key in Settings removes that limit.'); }
+  if (!items.length && !notes.length) notes.push(local.length ? 'No brand or packaged-food match online.' : 'No match in the app or online. Type the numbers yourself, or ask Claude to estimate.');
+  else if (!items.length) notes.push('Enter the numbers yourself, or ask Claude to estimate.');
   state.foodBusy = false;
-  if (state.foodResults && state.foodResults.q === q) { state.foodResults = { q: q, items: local.concat(off), online: true, msg: msg }; bumpFood(); }
+  if (state.foodResults && state.foodResults.q === q) { state.foodResults = { q: q, items: local.concat(items), online: true, msg: notes.join(' ') }; if (state.tab === 'food') paintFoodResults(); }
 }
 async function checkEstimates(manual){
   const cfg = syncCfg(), pending = state.food.entries.filter(e => e.status === 'pending');
@@ -944,12 +1066,20 @@ async function foodAction(act, b){
   }
   if (act === 'food-find') {
     const q = String(f.name || '').trim(); if (!q) { setStatus('Type a food name or a barcode number, then tap Find food.', 'warn'); focusEl('#ff-name'); return; }
-    const items = foodSearch(q); state.foodResults = { q: q, items: items, online: false, msg: '' };
-    if (!items.length || /^\d[\d\s]{7,15}$/.test(q)) { await foodOnline(q); return; }
-    bumpFood(); return;
+    if (!state.foodDb) await loadFoodDb();
+    state.foodResults = localResults(q, false); paintFoodResults();
+    if (state.foodResults.items.length < 3 || /^\d[\d\s]{7,15}$/.test(q)) await foodOnline(q);
+    return;
   }
   if (act === 'food-online') { if (state.foodResults) await foodOnline(state.foodResults.q); return; }
-  if (act === 'food-clear') { state.foodResults = null; bumpFood(); return; }
+  if (act === 'food-more') { if (state.foodResults) { state.foodResults = localResults(state.foodResults.q, true); paintFoodResults(); } return; }
+  if (act === 'food-clear') { state.foodResults = null; paintFoodResults(); return; }
+  if (act === 'food-recent') {
+    const r = recentFoods()[Number(b.dataset.i)]; if (!r) return;
+    const o = entryFromForm(Object.assign(blankFoodForm(f.meal), { name: r.name, kcal: r.kcal, protein: r.protein, carbs: r.carbs, fat: r.fat, serving: r.serving || '', source: 'recent' }));
+    addFoodEntry(o); try { saveFood(); } catch (e) { setStatus('Could not save: ' + (e && e.message || e), 'warn'); return; }
+    bumpFood(); setStatus('Added: ' + o.name + ', ' + fmtNum(o.kcal) + ' kcal.', 'ok'); return;
+  }
   if (act === 'food-use' || act === 'food-addnow') {
     const it = state.foodResults && state.foodResults.items[Number(b.dataset.i)]; if (!it) return;
     const nf = formFromItem(it, f);
@@ -968,9 +1098,9 @@ async function foodAction(act, b){
     if (state.food.saved.some(s => norm(s.name) === norm(e.name))) { setStatus('“' + e.name + '” is already a favourite.', 'ok'); return; }
     const q = Number(e.qty) > 0 ? Number(e.qty) : 1;
     state.food.saved.push({ id: uid(), name: e.name, serving: e.serving || '', kcal: Math.round((Number(e.kcal) || 0) / q), protein: num1((Number(e.protein) || 0) / q), carbs: num1((Number(e.carbs) || 0) / q), fat: num1((Number(e.fat) || 0) / q), uses: 1, lastUsed: Date.now() });
-    saveFood(); fillFoodNames(); bumpFood(); setStatus('Saved “' + e.name + '” as a favourite. Tap it under Favourites to log it again.', 'ok'); return;
+    saveFood(); bumpFood(); setStatus('Saved “' + e.name + '” as a favourite. Tap it under Favourites to log it again.', 'ok'); return;
   }
-  if (act === 'food-unfav') { state.food.saved = state.food.saved.filter(s => s.id !== id); saveFood(); fillFoodNames(); bumpFood(); return; }
+  if (act === 'food-unfav') { state.food.saved = state.food.saved.filter(s => s.id !== id); saveFood(); bumpFood(); return; }
   if (act === 'food-edit') {
     const e = state.food.entries.find(x => x.id === id); if (!e) return; const q = Number(e.qty) > 0 ? Number(e.qty) : 1, pend = e.status === 'pending';
     state.foodForm = { name: e.name || '', qty: q, kcal: pend || e.kcal == null ? '' : num1(e.kcal / q), protein: pend ? '' : num1((Number(e.protein) || 0) / q), carbs: pend ? '' : num1((Number(e.carbs) || 0) / q), fat: pend ? '' : num1((Number(e.fat) || 0) / q), serving: e.serving || '', meal: MEALS.includes(e.meal) ? e.meal : mealNow(), editId: e.id, source: e.source || 'manual' };
@@ -1130,12 +1260,26 @@ view.addEventListener('keydown', ev => {
   else if (f === 'set-weight') { ev.preventDefault(); t.dispatchEvent(new Event('change', { bubbles: true })); const btn = view.querySelector('[data-action="add-set"][data-ex="' + t.dataset.ex + '"]'); if (btn) btn.click(); }
   else if (f === 'ex-name') { ev.preventDefault(); t.dispatchEvent(new Event('change', { bubbles: true })); const e = activeExercise(Number(t.dataset.ex)); focusEl(e && e.kind === 'cardio' ? '#f-dist-' + t.dataset.ex : '#f-reps-' + t.dataset.ex + '-0'); }
 });
+let liveT = null;
+view.addEventListener('input', ev => { /* results follow the typing; the form is not redrawn, so the keyboard stays up */
+  const t = ev.target; if (t.id !== 'ff-name') return;
+  state.foodForm.name = t.value; clearTimeout(liveT);
+  liveT = setTimeout(() => {
+    if (state.foodBusy || state.tab !== 'food') return; const q = t.value.trim();
+    if (q.length < 2 || /^\d[\d\s]*$/.test(q)) { if (state.foodResults) { state.foodResults = null; paintFoodResults(); } return; }
+    if (!state.foodDb) loadFoodDb();
+    state.foodResults = localResults(q, false); paintFoodResults();
+  }, 130);
+});
+view.addEventListener('keydown', ev => { if (ev.key === 'Enter' && ev.target.id === 'ff-name') { ev.preventDefault(); clearTimeout(liveT); const b = view.querySelector('[data-action="food-find"]'); if (b && !b.disabled) b.click(); } });
 view.addEventListener('change', ev => {
   const t = ev.target;
   if (t.id === 'progEx') { state.progEx = t.value; lsSet('progEx', t.value); render(); return; }
   if (t.id === 'progMetric') { state.progMetric = t.value; lsSet('progMetric', t.value); render(); return; }
   if (t.dataset.ff) {
-    const ff = state.foodForm, key = t.dataset.ff; ff[key] = t.value;
+    const ff = state.foodForm, key = t.dataset.ff;
+    if (key === 'pi') { applyPortion(ff, Number(t.value) || 0); ff.auto = true; paintFoodForm(); return; }
+    ff[key] = t.value;
     if (key === 'kcal' || key === 'protein' || key === 'carbs' || key === 'fat') ff.auto = false; /* numbers typed by hand are never replaced or cleared */
     if (key === 'name') {
       const k = norm(t.value), fav = state.food.saved.find(s => norm(s.name) === k), lib = fav ? [] : state.foodLib.filter(i => norm(i.name) === k), it = fav ? Object.assign({ fav: true }, fav) : (lib.length === 1 ? lib[0] : null);
@@ -1198,7 +1342,7 @@ async function finishWorkout(){
 /* ---------- tabs & settings ---------- */
 $('#tabs').addEventListener('click', ev => { const b = ev.target.closest('button[data-tab]'); if (!b) return; if (state.tab !== b.dataset.tab) setStatus(''); state.tab = b.dataset.tab; lsSet('tab', state.tab); render(); window.scrollTo({ top: 0 }); });
 $('#tabs').addEventListener('click', () => { if (state.tab === 'food' && Date.now() - (lsGet('estCheckedAt', 0) || 0) > 10 * 60000) checkEstimates(false); });
-function openSettings(open){ const p = $('#settingsPanel'); p.hidden = !open; $('#settingsBtn').setAttribute('aria-expanded', String(open)); if (open) { $('#setTarget').value = state.settings.weeklyTarget; $('#setRest').value = state.settings.restSec || 90; $('#setWeight').value = state.settings.weightUnit; $('#setDist').value = state.settings.distUnit; const th = $('#setTheme'); if (th) th.value = state.settings.theme || 'system'; $('#setKcal').value = state.settings.kcalTarget || ''; $('#setProtein').value = state.settings.proteinTarget || ''; renderBackupInfo(); const sc = lsGet('sync', null); $('#syncRepo').value = sc && sc.repo || SYNC_DEFAULT_REPO; $('#syncToken').value = ''; $('#syncToken').placeholder = sc && sc.token ? 'saved on this phone (leave blank to keep)' : 'github_pat_...'; renderSyncInfo(); } }
+function openSettings(open){ const p = $('#settingsPanel'); p.hidden = !open; $('#settingsBtn').setAttribute('aria-expanded', String(open)); if (open) { $('#setTarget').value = state.settings.weeklyTarget; $('#setRest').value = state.settings.restSec || 90; $('#setWeight').value = state.settings.weightUnit; $('#setDist').value = state.settings.distUnit; const th = $('#setTheme'); if (th) th.value = state.settings.theme || 'system'; $('#setKcal').value = state.settings.kcalTarget || ''; $('#setProtein').value = state.settings.proteinTarget || ''; $('#setFdc').value = ''; $('#setFdc').placeholder = lsGet('fdcKey', '') ? 'saved on this phone (type none to remove)' : 'none'; renderBackupInfo(); const sc = lsGet('sync', null); $('#syncRepo').value = sc && sc.repo || SYNC_DEFAULT_REPO; $('#syncToken').value = ''; $('#syncToken').placeholder = sc && sc.token ? 'saved on this phone (leave blank to keep)' : 'github_pat_...'; renderSyncInfo(); } }
 $('#settingsBtn').addEventListener('click', () => openSettings($('#settingsPanel').hidden));
 $('#shareBackup').addEventListener('click', shareBackup);
 $('#downloadBackup').addEventListener('click', downloadBackup);
@@ -1221,6 +1365,7 @@ $('#closeSettings').addEventListener('click', () => openSettings(false));
 $('#saveSettings').addEventListener('click', async () => {
   const th = $('#setTheme');
   const s = { kcalTarget: Math.min(10000, Math.max(0, Math.round(Number($('#setKcal').value) || 0))), proteinTarget: Math.min(500, Math.max(0, Math.round(Number($('#setProtein').value) || 0))), weeklyTarget: Math.min(14, Math.max(1, Math.round(Number($('#setTarget').value) || 4))), restSec: Math.min(600, Math.max(15, Math.round(Number($('#setRest').value) || 90))), weightUnit: $('#setWeight').value === 'kg' ? 'kg' : 'lb', distUnit: $('#setDist').value === 'km' ? 'km' : 'mi', theme: th && ['light', 'dark'].includes(th.value) ? th.value : 'system' };
+  const fk = $('#setFdc').value.trim(); if (fk) lsSet('fdcKey', /^none$/i.test(fk) ? null : fk);
   try { await store.saveSettings(s); openSettings(false); setStatus('Settings saved.', 'ok'); } catch (e) { setStatus('Could not save settings: ' + (e && e.message || e), 'warn'); }
 });
 let resizeT = null; window.addEventListener('resize', () => { clearTimeout(resizeT); resizeT = setTimeout(() => { if (state.tab === 'progress') { lastKey = ''; render(); } }, 150); });
@@ -1231,7 +1376,7 @@ state.tab = TABS.includes(hash) ? hash : (TABS.includes(savedTab) ? savedTab : '
 state.foodDate = todayStr(); state.foodForm = blankFoodForm();
 state.progEx = lsGet('progEx', null); state.progMetric = ['e1rm', 'top', 'vol'].includes(lsGet('progMetric', 'e1rm')) ? lsGet('progMetric', 'e1rm') : 'e1rm';
 render();
-store.init().then(() => { if (lsGet('syncDirty', false)) queueSync(2500); loadFoodLib(); setTimeout(() => { checkEstimates(false); }, 3500); });
+store.init().then(() => { if (lsGet('syncDirty', false)) queueSync(2500); loadFoodLib(); setTimeout(loadFoodDb, 1500); setTimeout(() => { checkEstimates(false); }, 3500); });
 })();
 </script>
 </body>
