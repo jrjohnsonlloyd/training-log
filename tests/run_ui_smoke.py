@@ -52,6 +52,7 @@ CHROME_PATHS = [
 CHROME_NAMES = ["chrome", "google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]
 V2_SUITES = {"v2"}  # suites that need a version 2 bundle served as /food-db.json
 V2_BUDGET = 60000   # they do more, so they get a longer virtual time budget unless --budget is given
+RANKING_BUDGET = 400000   # the ranking suite types several hundred queries against a real bundle
 SAMPLE_BUNDLE = "tests/fixtures/food-db.v2.sample.json"
 IMPORTER = "scripts/import_foods.py"
 BUILD_INPUTS = [("--curated-json", "tests/fixtures/local_ph_curated.json"), ("--usda-path", "tests/fixtures/sample_usda.csv"),
@@ -226,7 +227,9 @@ def main(argv=None):
     ap.add_argument("-v", "--verbose", action="store_true", help="also print details of passing checks and the requests served")
     args = ap.parse_args(argv)
     needs_v2 = args.suite in V2_SUITES
-    budget = args.budget if args.budget else (V2_BUDGET if needs_v2 else 30000)
+    budget = args.budget if args.budget else (V2_BUDGET if needs_v2 else RANKING_BUDGET if args.suite == "ranking" else 30000)
+    if args.suite == "ranking" and args.timeout == 180:
+        args.timeout = 400
 
     db_file = None
     if args.db_file:
@@ -285,6 +288,11 @@ def main(argv=None):
         return 1
 
     checks = [c for c in (result.get("checks") or []) if isinstance(c, dict)]
+    # A suite that cannot say anything about the file being served (the ranking suite on a small
+    # bundle) reports why and counts as a clean skip, not a failure.
+    if result.get("skipped") and result.get("done") and not checks:
+        print("SKIPPED %s suite: %s" % (one_line(result.get("suite") or args.suite), one_line(result.get("skipped"))))
+        return 0
     passed = failed = expected = 0
     for c in checks:
         name, detail = one_line(c.get("name") or "?"), one_line(c.get("detail"))
