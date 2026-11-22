@@ -19,14 +19,16 @@ file). It is used here as the layout version:
        sodium, other names, basis, source priority, popularity and a de-duplication key
     3  adds three facts the importer needs to choose and merge Open Food Facts rows:
        foreign_tags, completeness and alt_barcodes (see _upgrade_2_to_3)
+    4  adds doubt: why an Open Food Facts row from outside the Philippines should not be
+       chosen for the app, or NULL (see _upgrade_3_to_4)
 
 migrate() walks a database up one version at a time until it reaches LATEST_VERSION.
 Each step is all-or-nothing: if anything goes wrong the file is left as it was.
 
-Adding version 4 later
+Adding version 5 later
 ----------------------
-1. Write _upgrade_3_to_4(conn) next to the other steps.
-2. Add it to _UPGRADES and set LATEST_VERSION = 4.
+1. Write _upgrade_4_to_5(conn) next to the other steps.
+2. Add it to _UPGRADES and set LATEST_VERSION = 5.
 Never edit a step that has already been used on a real file; add a new one instead.
 """
 import os
@@ -42,7 +44,7 @@ __all__ = [
     "kcal_from_kj", "sodium_mg_from_salt_g", "salt_g_from_sodium_mg",
 ]
 
-LATEST_VERSION = 3
+LATEST_VERSION = 4
 CATEGORIES = ("supermarket", "dining_out", "whole_food")
 REGIONS = ("PH", "US", "UK", "JP", "KR")          # region_tags always lists them in this order
 SOURCE_PRIORITY = {"curated": 1, "usda": 2, "off": 3}   # lower number wins when rows are de-duplicated
@@ -137,6 +139,14 @@ _V3_NEW_COLUMNS = (
     "alt_barcodes TEXT NOT NULL DEFAULT '[]'",
 )
 
+# Version 4: one column added to the end. Only Open Food Facts rows from outside the
+# Philippines use it.
+#   doubt          NULL, or a short reason ("per_serving", "not_food", ...) why the row should
+#                  not be chosen for the app; the importer explains each reason (pool_doubt)
+_V4_NEW_COLUMNS = (
+    "doubt TEXT",
+)
+
 
 # ---------------------------------------------------------------------------------------
 # Opening and upgrading a database
@@ -187,6 +197,8 @@ def _current_version(conn):
     version = _stamp(conn)
     if version == 0:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(food_items)")}
+        if "doubt" in columns:
+            return 4
         if "alt_barcodes" in columns:
             return 3
         if "calories_kcal" in columns:
@@ -265,8 +277,15 @@ def _upgrade_2_to_3(conn):
         conn.execute("ALTER TABLE food_items ADD COLUMN " + column)
 
 
+def _upgrade_3_to_4(conn):
+    """Add the version 4 column. Every existing row keeps its id and all its values and has
+    no doubt (NULL) until it is imported again."""
+    for column in _V4_NEW_COLUMNS:
+        conn.execute("ALTER TABLE food_items ADD COLUMN " + column)
+
+
 # version reached -> the step that gets there from the version before
-_UPGRADES = {1: _upgrade_0_to_1, 2: _upgrade_1_to_2, 3: _upgrade_2_to_3}
+_UPGRADES = {1: _upgrade_0_to_1, 2: _upgrade_1_to_2, 3: _upgrade_2_to_3, 4: _upgrade_3_to_4}
 
 
 def create_v1(conn):

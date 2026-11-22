@@ -2,13 +2,14 @@
 
     python tests/fixtures/make_off_fixtures.py [OUTPUT_FOLDER]
 
-Five files are written next to this script:
+Six files are written next to this script:
 
     sample_off.csv          the main import: 52 rows (32 old anchor rows + 20 selection rows)
     off_rules.csv           36 rows, one per validation / repair rule branch
     off_dedupe.csv          15 rows in groups that must (or must not) merge by name + brand
     off_alias_guard.csv     1 row whose barcode is also an alias stored on another row
     off_serving.csv         18 rows for labels typed per serving (with a "quantity" column)
+    off_doubt.csv           23 rows from other markets with doubtful numbers, and the US pool's rules
 
 Every row is written out in full below so a reader can follow the expected values in
 tests/test_import_foods.py without running anything. Short column keys:
@@ -446,3 +447,91 @@ sv = [
 ]
 assert len(sv) == 18, len(sv)
 write("off_serving.csv", sv, SERVING_HEADER)
+
+# ======================================================================================
+# off_doubt.csv : rows from other markets whose numbers are doubtful (pool_doubt) and the
+#                 US pool's own selection rules
+# ======================================================================================
+US, UK = "en:united-states", "en:united-kingdom"
+
+
+def doubt_row(code, **kw):
+    return row(code, comp=0.5, img=photo(code), **kw)
+
+
+db = [
+    # D1 per_serving: a 68 g bar's label (260 kcal, 9 / 42 / 7 g) typed per 100 g; 260 x 68 / 100 = 176.8 is no label figure
+    doubt_row(ean("001", 8001), name="Crunchy Peanut Butter Bar", brand="Trail Co", ctry=US, ss="1 bar (68 g)", sq=68,
+              scans=40, kcal=260, P=9, C=42, F=7),
+    # D2 dry_coffee: the dry-grounds figures on ground coffee; more scans and more numbers than its twin D3
+    doubt_row(ean("001", 8002), name="Ground Coffee", brand="Morning Roast", ctry=US, scans=20,
+              kcal=396.6, P=14.4, C=40.2, F=15.4, sat=5, fib=10, na=0.074),
+    # D3 the same coffee (same name and brand, calories within 10 %) without the tell-tale figures: it merges
+    # into D2, and the row that is left stays marked
+    doubt_row(ean("001", 8003), name="Ground Coffee", brand="Morning Roast", ctry=US, ss="2 tbsp (10 g)", sq=10, scans=1,
+              kcal=380, P=12, C=40, F=15),
+    # D4 per_bottle: a 450 ml bottle's 330 kcal typed per 100 ml (330 x 4.5 = 1485 is round too)
+    doubt_row(ean("001", 8004), name="Protein Plus Drink", brand="Farmhouse", ctry=US, ss="1 container (450 ml)",
+              sq=450, scans=35, kcal=330, P=30, C=37, F=6),
+    # D5 juice_high: a bottle's figure on a juice in a drinks category, the serving written as "100 g"
+    doubt_row(ean("001", 8005), name="100% Apple Juice", brand="Orchard", ctry=US, cat="Beverages,Fruit juices",
+              ss="1 serving (100 g)", sq=100, scans=30, kcal=170, P=0, C=41, F=0),
+    # D6 zero_kcal: strawberries at 0 kcal with 0 g of everything
+    doubt_row(ean("001", 8006), name="Fresh Strawberries", brand="Berry Farms", ctry=US, ss="1 cup (144 g)", sq=144,
+              scans=25, kcal=0, P=0, C=0, F=0),
+    # D7 not_food: a shampoo
+    doubt_row(ean("001", 8007), name="Argan Oil Shampoo", brand="Salon Co", ctry=US, scans=22, kcal=0, P=0, C=0, F=0),
+    # D8 a believable US product: chosen
+    doubt_row(ean("001", 8008), name="Classic Potato Chips", brand="Crispy Co", ctry=US, ss="1 oz (28 g)", sq=28,
+              scans=5, kcal=536, P=7, C=53, F=34),
+    # D9 a British pack (500 barcode) tagged US and UK: not in the US pool, it waits for the UK pool
+    doubt_row(ean("500", 8009), name="Original Crumpets", brand="Bakehouse", ctry=US + "," + UK, ss="1 crumpet (55 g)",
+              sq=55, scans=6, kcal=178, P=5.9, C=36.4, F=0.9),
+    # D10 a worldwide pack with a French barcode, tagged US only: stays in the US pool
+    doubt_row(ean("300", 8010), name="Hazelnut Spread", brand="Noisette", ctry=US, ss="1 tbsp (15 g)", sq=15,
+              scans=3, kcal=539, P=6.3, C=57.5, F=30.9),
+    # D11 the D1 pattern on a Philippine row (480 barcode, tagged PH): never marked, exported with the PH rows
+    doubt_row(ean("480", 8011), name="Soy Sauce", brand="Toyo Co", ctry=PH, ss="1 tbsp (15 ml)", sq=15,
+              scans=2, kcal=10, P=1, C=1, F=0),
+    # D12 the D1 pattern on a row tagged UK only: British labels are round per 100 g, so it is not marked
+    doubt_row(ean("500", 8012), name="Oat Biscuits", brand="Hobnob Co", ctry=UK, ss="1 biscuit (12 g)", sq=12,
+              scans=2, kcal=470, P=7, C=63, F=20),
+    # D13 round figures with a serving of 100 g: nothing to tell, not marked
+    doubt_row(ean("001", 8013), name="Pretzel Twists", brand="Bakery Co", ctry=US, ss="1 serving (100 g)", sq=100,
+              scans=4, kcal=380, P=10, C=78, F=3),
+    # D14 mayonnaise without a serving size, scanned 8 times: it counts for half (4) in the US pool, so it comes
+    # after the chips (5) and after the pretzels (4, with a serving), but before the spread (3)
+    doubt_row(ean("001", 8014), name="Real Mayonnaise", brand="Golden Spoon", ctry=US, scans=8,
+              kcal=680, P=1, C=0.6, F=75),
+    # D15 mayonnaise with a spoon serving (680 x 100 / 14 is impossible, so not per_serving): an ordinary row
+    doubt_row(ean("001", 8015), name="Whole Egg Mayonnaise", brand="Golden Spoon", ctry=US, ss="1 tbsp (14 g)", sq=14,
+              scans=2, kcal=700, P=1, C=1, F=78),
+    # D16 coffee capsules: "capsules" names a pill, but not on a coffee
+    doubt_row(ean("001", 8016), name="Espresso Coffee Capsules", brand="Crema", ctry=US, ss="1 capsule (5 g)", sq=5,
+              scans=1, kcal=0, P=0, C=0, F=0),
+    # D17 per_serving: a 32 g serving's label (190 kcal, 7 / 8 / 16 g) typed per 100 g
+    doubt_row(ean("001", 8017), name="Creamy Peanut Butter", brand="Nutty Co", ctry=US, ss="2 tbsp (32 g)", sq=32,
+              scans=2, kcal=190, P=7, C=8, F=16),
+    # D18 the same peanut butter with the same wrong numbers but no serving size, so nothing marks it by itself.
+    # It has more numbers and more scans, so D17 merges into it: it takes D17's serving and D17's mark with it
+    doubt_row(ean("001", 8018), name="Creamy Peanut Butter", brand="Nutty Co", ctry=US, scans=20,
+              kcal=190, P=7, C=8, F=16, sat=3, fib=2, na=0.14),
+    # D19 and D20: one barcode on two lines. The marked record (D19, more scans) loses to the believable one
+    doubt_row(ean("001", 8019), name="Honey Oat Bar", brand="Trail Co", ctry=US, ss="1 bar (42 g)", sq=42,
+              scans=30, kcal=190, P=3, C=29, F=7),
+    doubt_row(ean("001", 8019), name="Honey Oat Bar", brand="Trail Co", ctry=US, ss="1 bar (42 g)", sq=42,
+              scans=1, kcal=452.4, P=7.1, C=69, F=16.7),
+    # D21 a British supermarket's own pack with a short in-store code, tagged US by mistake: UK pool, not US
+    doubt_row("00357937", name="Semi Skimmed Milk", brand="Sainsbury's", ctry=US, ss="200 ml", sq=200,
+              scans=3, kcal=50, P=3.6, C=4.8, F=1.8),
+    # D22 per_serving: half a cup's label (20 kcal, 1 / 3 / 0 g) typed per 100 g; more scans and more numbers
+    # than its twin D23, so it is walked first
+    doubt_row(ean("001", 8022), name="Cut Green Beans", brand="Garden Co", ctry=US, ss="0.5 cup (121 g)", sq=121,
+              scans=21, kcal=20, P=1, C=3, F=0, sat=0, fib=1, na=0.3),
+    # D23 the same can worked out per 100 g (16.5 kcal), with a serving of its own: it passed the test D22
+    # failed, so it changes places with D22 and is the row that stays
+    doubt_row(ean("001", 8023), name="Cut Green Beans", brand="Garden Co", ctry=US, ss="121 g", sq=121,
+              scans=2, kcal=16.5, P=0.83, C=3.31, F=0),
+]
+assert len(db) == 23, len(db)
+write("off_doubt.csv", db)
