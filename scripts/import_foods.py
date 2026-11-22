@@ -601,6 +601,19 @@ def curated_row(entry):
     else:
         return None, 'nutrition_per must be "serving" or "100g"'
 
+    # Optional "default_portion": "100g" puts 100 g first, "serving" pins the stated serving first
+    # (the export rule in default_portions() would otherwise decide). Stored in the portions
+    # list, no schema change: "100g" is simply the stored order, "serving" adds a third item
+    # PIN_MARK to the first portion, which the exporter strips again.
+    mode = clean_text(entry.get("default_portion")).lower()
+    if mode not in ("", "serving", "100g"):
+        return None, 'default_portion must be "serving" or "100g"'
+    if mode and row["portions"] and row["portions"][0][1]:
+        if mode == "100g":
+            row["portions"] = [["100 g", 100]] + [p for p in row["portions"] if p[1] != 100]
+        else:
+            row["portions"][0] = row["portions"][0] + [PIN_MARK]
+
     if not apply_rules(row):
         return None, "numbers out of range (negative, or impossible for 100 g)"
     row["source_ref"] = curated_slug(row["name"], row["brand"])
@@ -1042,6 +1055,85 @@ def import_off(importer, path):
 # The app's food list
 # ---------------------------------------------------------------------------------------
 
+PIN_MARK = "serving"        # third item of a curated row's first portion: "keep this one first"
+
+_MEASURE = re.compile(r"\b(cups?|oz|fl|tbsp|tsp|tablespoons?|teaspoons?|ml|g|grams?|lb|pint|quart|scoop|packet)\b")
+_JUST_SERVING = re.compile(r"[\d/. ]*(servings?|portions?)")         # a bare "1 serving" (70 g of pastry) names no unit
+_NOT_WHOLE = re.compile(r"slice|piece|wedge|half|section|segment|chunk|cube|ring|container|serving")
+_DRINK_GROUP = re.compile(r"beverage|\bcoffee\b|\btea\b|^(other fruit|citrus|apple|vegetable) juice|\bdrinks?\b|\bwater\b|\bwine\b|\bbeer\b|liquor"
+                          r"|cocktail|smoothie|milk shake|plant-based milk|flavored milk|^milk\b|alcoholic")
+_DRINK_NAME = re.compile(r"^(\w+ )?(milk|soymilk|buttermilk|kefir|eggnog|cocoa)\b|\b(soymilk|soy milk|almond milk|oat milk|rice milk)\b"
+                         r"|^[^,]*\b(juice|nectar)\b|drinkable|yogurt drink|yogurt, liquid|smoothie|milkshake")
+_NOT_A_DRINK = re.compile(r"\b(dry|dried|powder|powdered|condensed|evaporated)\b")
+_MADE_UP = re.compile(r"(?<!not )\b(prepared|reconstituted)\b")             # a powder made up with water or milk is a drink again
+_FRUIT_GROUP = re.compile(r"fruit|banana|apple|citrus|peach|pear|pineapple|melon|mango|strawberr|berries|grape|orange")
+_NOT_RAW_FRUIT = re.compile(r"dried|juice|canned|cooked|stewed|sauce|frozen|jam|pie|salad|syrup|nectar|puree|"
+                            r"dehydrated|candied|pickled|chips|butter|powder|leather|cocktail|drink")
+_BAKERY_GROUP = re.compile(r"yeast bread|baked products|rolls and buns|bagel|biscuits|muffin|cookies|cracker|"
+                           r"cakes and pies|doughnut|pancake|turnover|\bbread|bakery|tortillas?$")
+_DRY_MIX = re.compile(r"\bdry\b|(?<!from )\bmix\b")                # a dry baking mix is not a piece, unless "prepared"
+_DISH_GROUP = re.compile(r"sandwich|burger|burrito|taco|egg rolls|dumpling|sushi|pizza")
+_UNIT_NAME = re.compile(r"sandwich(?! steak)|burger|hot dog|frankfurter|burrito|taco|taquito|enchilada|tamale|quesadilla|fajita|\bwrap\b|"
+                        r"pizza|sushi|dumpling|egg roll|spring roll|empanada|pupusa|gordita|chimichanga|pretzels?, soft|"
+                        r"rice cakes?|\bbars?\b|ice cream cone|popsicle|freezer pop|snow cone")
+_SWEET_GROUP = re.compile(r"\bbars?\b|candy|candies|sweets")
+_SWEET_UNIT = re.compile(r"\b(bars?|pieces?|candy|candies|lollipop|stick|squares?|pouch|patty|tablet)\b")
+_ICE_CREAM = re.compile(r"ice cream|frozen dairy")
+_ICE_CREAM_UNIT = re.compile(r"cone|\bbars?\b|sandwich|popsicle|\bpop\b|sundae")
+_SPOON_LABEL = re.compile(r"\b(tbsp|tablespoons?|tsp|teaspoons?|packets?|pats?|dollop|scoops?|envelopes?|cubes?)\b")
+_SPOON_FOOD = re.compile(r"\boils?\b|\bfats?\b|butter|margarine|spread|dressing|mayonnaise|sauce|gravy|ketchup|catsup|mustard|"
+                         r"condiment|\bjams?\b|jelly|jellies|preserve|honey|\bsugars?\b|sweetener|syrup|topping|frosting|icing|"
+                         r"seasoning|spice|herb|\bsalt\b|vinegar|\bdip|salsa|cream(?! of)|shortening|lard|molasses|marmalade|powders?\b")
+
+
+def _keeps_serving(category, group, name, label, grams):
+    """True when the food's own default portion (label, grams) should stay first (exceptions a to d of the 100 g rule)."""
+    group, name = (group or "").lower(), (name or "").lower()
+    head = ", ".join(name.split(", ")[:2])        # "carrots, cooked, ..., with salt" -> "carrots, cooked": what the food is
+    core = re.sub(r"\([^)]*\)|\bwithout\b.*", "", (label or "").lower())    # "1 slice (1 oz)" -> "1 slice"
+    just_serving = bool(_JUST_SERVING.fullmatch((label or "").lower().strip()))
+    if category == "dining_out":                                                    # a. eaten out
+        return True
+    if (_DRINK_GROUP.search(group) or _DRINK_NAME.search(name)) \
+            and (not _NOT_A_DRINK.search(name) or _MADE_UP.search(name)):
+        return True                                                                 # b. drinks
+    if _SPOON_LABEL.search(core) and (_SPOON_FOOD.search(group) or _SPOON_FOOD.search(head) or "powder" in name):
+        return True                                                                 # d. by the spoon (or scoop)
+    if just_serving and grams <= 40 and _SPOON_FOOD.search(group):
+        return True                         # d. Survey's condiment groups call 2 tbsp of salsa "1 serving"
+    # c. counted in units: the default portion must be the unit, not a cup, a weight or just "1 serving".
+    counted = not _MEASURE.search(core) and not just_serving
+    if (re.search(r"\beggs?\b|omelet", name) or "eggs and omelets" in group) \
+            and re.search(r"\b(egg|omelet|omelette|large|medium|small|jumbo)\b", core):
+        return True
+    if _FRUIT_GROUP.search(group) and not _NOT_RAW_FRUIT.search(name):
+        return counted and not _NOT_WHOLE.search(core)
+    if _SWEET_GROUP.search(group):
+        return bool(_SWEET_UNIT.search(core))
+    if _ICE_CREAM.search(group):
+        return bool(_ICE_CREAM_UNIT.search(core))
+    if _BAKERY_GROUP.search(group) or _DISH_GROUP.search(group) or _UNIT_NAME.search(head):
+        return counted and not (_DRY_MIX.search(name) and not _MADE_UP.search(name))
+    return False
+
+
+def default_portions(item, portions):
+    """The portions as the app should list them: 100 g first, unless the food is counted another way.
+
+    item: a food_items row; portions: its stored list. The first portion is the one the app
+    shows calories for. Rows without a gram weight (per serving), without portions, or whose
+    curated entry pinned its serving ("default_portion") keep their order; see _keeps_serving
+    for the foods that keep their own portion. The database is not changed.
+    """
+    if item["per_unit"] == "serving" or not portions or not portions[0][1]:
+        return portions
+    if len(portions[0]) > 2:                                    # pinned by default_portion: "serving"
+        return [p[:2] for p in portions]
+    if _keeps_serving(item["category"], item["group_label"], item["name"], *portions[0]):
+        return portions
+    return [["100 g", 100]] + [p for p in portions if p[1] != 100]
+
+
 def export_app(conn, out_path, max_off, built):
     """Write food-db.json "version 2" (section 6 of the data contract). Returns the row counts.
 
@@ -1080,6 +1172,7 @@ def export_app(conn, out_path, max_off, built):
             aka = json.loads(item["aka"] or "[]")
         except ValueError:
             portions, aka = [], []
+        portions = default_portions(item, portions)
         thumb = item["thumbnail_url"] or 0
         if thumb and thumb.startswith(THUMB_BASE):
             thumb = thumb[len(THUMB_BASE):]
