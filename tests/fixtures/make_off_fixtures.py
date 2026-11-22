@@ -2,7 +2,7 @@
 
     python tests/fixtures/make_off_fixtures.py [OUTPUT_FOLDER]
 
-Nine files are written next to this script:
+Ten files are written next to this script:
 
     sample_off.csv          the main import: 52 rows (32 old anchor rows + 20 selection rows)
     off_rules.csv           36 rows, one per validation / repair rule branch
@@ -12,7 +12,8 @@ Nine files are written next to this script:
     off_doubt.csv           23 rows from other markets with doubtful numbers, and the US pool's rules
     off_asia.csv            15 rows for the seven neighbouring markets (region "AS") and pool membership
     off_asia2.csv           30 rows for the rules of the Japan, Korea and Asia pools (step 5)
-    off_step6.csv           17 rows for the UK shelf and the step 6 repairs (with a "quantity" column)
+    off_step6.csv           19 rows for the UK shelf and the step 6 repairs (with a "quantity" column)
+    off_step7.csv           23 Philippine rows for the step 7 pack and serving re-base, powders and hand entries
 
 Every row is written out in full below so a reader can follow the expected values in
 tests/test_import_foods.py without running anything. Short column keys:
@@ -752,3 +753,78 @@ step6 = [
 ]
 assert len(step6) == 19, len(step6)
 write("off_step6.csv", step6, SERVING_HEADER)
+
+# ======================================================================================
+# off_step7.csv : Philippine rows carrying a pack's or a serving's figures per 100 g (ph_pack_fix),
+#                 made-up powders, a 0 kcal seasoning mix, the step 7 hand entries, and rows that are
+#                 right as they are and must come out unchanged. All tagged Philippines.
+# ======================================================================================
+step7 = [
+    # P1 a stock-list name with the pack weight: 250 kcal for one 55 g pack -> 454.5, "1 pack (55 g)"
+    s6_row("4807770270024", name="lm chicken 55g", brand="Lucky Me!", ctry=PH, scans=5, kcal=250, P=6, C=34, F=10),
+    # P2 the serving (30 g) wins over the name's 45 g pack: 90 -> 300, "1 serving (30 g)"
+    s6_row("7622210892126", name="eden original 45g", brand="Eden", ctry=PH, scans=4, kcal=90, P=3, C=3, F=7,
+           ss="30g", sq=30),
+    # P3 serving_quantity says 100, the serving text says 7.8 g: 24 -> 307.7, "1 serving (7.8 g)"
+    s6_row("4801958390108", name="crispy fry (r) 62g original", brand="Ajinomoto", ctry=PH, scans=3,
+           kcal=24, P=0.6, C=5, F=0, ss="7.8 g (100 g)", sq=100),
+    # P4 a family pack in the name (450 g) is never used: left as it is
+    s6_row(ean("480", 7104), name="Corned Beef 450g", brand="Beefy", ctry=PH, scans=2, kcal=120, P=10, C=2, F=8),
+    # P5 a liver spread at 176 is right (liver spreads are about 175): its 50 g serving is not used
+    s6_row(ean("480", 7105), name="Liver Spread", brand="Spready", ctry=PH, scans=2, kcal=176, P=10, C=10, F=10,
+           ss="50 g", sq=50),
+    # P6 a coffee mix at 200 with a 30 g sachet that does not explain it (667): powder_made_up, kept out
+    s6_row("4800016022210", "30 g", name="Great Taste White Caramel", brand="Universal Robina", ctry=PH, scans=2,
+           kcal=200, P=2, C=27, F=9),
+    # P7 a ready-to-drink milk named like a powder brand: left as it is
+    s6_row("4800361331500", name="bear brand sterilized 200ml", brand="Bear Brand", ctry=PH, scans=2,
+           kcal=72, P=3.5, C=8, F=3, ss="200ml", sq=200),
+    # P8 a seasoning mix at 0 kcal: zero_dry, kept out
+    s6_row("4801958911006", name="Ginisa Mix", ctry=PH, scans=1, kcal=0, P=0, C=0, F=0),
+    # P9 a lechon sauce at 30 with "2 tbsp (32g)": 93.75, the label's own words kept, "2 tbsp (32 g)"
+    s6_row("4801668100271", name="All-around sarsa", brand="Mang Tomas", ctry=PH, scans=1, kcal=30, P=0, C=7, F=0,
+           ss="2 tbsp (32g)", sq=32),
+    # P10 Nova left KNOWN_WRONG_PH: re-based on its 30 g quantity, 140 -> 466.7, "1 pack (30 g)"
+    s6_row("4800016666261", "30g", name="Nova Multigrain Snacks", brand="Jack n Jill", ctry=PH, scans=1,
+           kcal=140, P=3, C=21, F=4.5),
+    # P11 KNOWN_PER_PACK with the made-up glass: 73 per 100 g of the 200 g glass from a 33 g sachet -> 442.4
+    s6_row("4800361403443", name="Adult plus bear brand", ctry=PH, scans=1, kcal=73, P=2.35, C=9.1, F=3,
+           ss="200.0g", sq=200),
+    # P12 a new KNOWN_WRONG_PH entry (Eden at 495): listed, kept out
+    s6_row("7622210278432", "220ml", name="Eden", brand="Eden", ctry=PH, scans=1, kcal=495, P=5, C=5, F=50,
+           ss="40g", sq=40),
+    # G1..G4 right as they are (step 7 reader's list): unchanged
+    s6_row("5449000214799", name="Coke Zero", brand="Coca-Cola", ctry=PH, scans=9, kcal=0, P=0, C=0, F=0,
+           ss="1 can (330 ml)", sq=330),
+    s6_row("4807770270017", name="lm beef 55g", brand="Lucky", ctry=PH, scans=8, kcal=436, P=10, C=60, F=17),
+    s6_row("0748485100401", name="century tuna (p) 155g", brand="Century Pacific Food Inc", ctry=PH, scans=7,
+           kcal=179, P=21, C=2, F=10, ss="56 g", sq=56),
+    s6_row("4800016074899", name="Great Taste Chocolate Mocha", brand="Universal Robina Corporation", ctry=PH,
+           scans=6, kcal=65, P=1.5, C=11, F=1.6, ss="1 bottle (200 ml)", sq=200),
+    # second fix pass of step 7
+    # W1 canned meat whose figures Open Food Facts worked out from the 56 g serving (74 kcal, 7 g protein, 2 g
+    # carbs, 4 g fat): already per 100 g, left as it is (the first pass made it 236)
+    s6_row("0748485800035", "260g", name="argentina corned beef 260g", brand="Argentina", ctry=PH, scans=2,
+           kcal=132.142857142857, P=12.5, C=3.57142857142857, F=7.14285714285714, ss="56 g", sq=56),
+    # W2 canned fish worked out from the 56 g serving (49 kcal, 5 g, 3 g, 2 g): left as it is (the first pass made it 156)
+    s6_row("4800163443043", "155g", name="ligo sardines (g) 155g", brand="Ligo", ctry=PH, scans=2,
+           kcal=87.5, P=8.92857142857143, C=5.35714285714286, F=3.57142857142857, ss="56g", sq=56),
+    # W3 franks worked out from the 55 g serving (90 kcal, 1 g carbs, 7 g fat) with no protein figure: the
+    # protein the importer works out from the calories is left out of the test, so it is left as it is
+    s6_row("4800249044140", "500 g", name="Super Jumbo Chicken Franks", brand="CDO", ctry=PH, scans=2,
+           kcal=164, C=1.82, F=12.7, fib=12.7, ss="55g", sq=55),
+    # W4 canned meat typed per 56 g serving in whole label figures: still re-based, 110 -> 196.4, "1 serving (56 g)"
+    s6_row(ean("480", 7117), "340g", name="Corned Beef Hot Peppers", brand="Tester", ctry=PH, scans=2,
+           kcal=110, P=12, C=1, F=7, ss="56g", sq=56),
+    # H1 Clara Ole sugar-free pancake syrup, worked out from its 30 g serving (25 kcal, 6 g carbs): left at 83.3
+    s6_row("4806026200594", name="Pancke Syrup", brand="Clara Olé", ctry=PH, scans=1,
+           kcal=83.333333333333, P=0, C=20, F=0, ss="30.0g", sq=30),
+    # H2, H3 KNOWN_WRONG_PH and KNOWN_TWIN: 555 TUNA ADOBO 155G at 89 is kept out; its barcode finds the
+    # other row of the same can (250)
+    s6_row("0074848570001", "155 g", name="555 TUNA ADOBO 155G", brand="555", ctry=PH, scans=1,
+           kcal=89, P=5.35, C=8.9, F=5.35, ss="155 g", sq=155),
+    s6_row("0748485700014", "155 g", name="555 tuna adobo 155g", brand="555", ctry=PH, scans=1,
+           kcal=250, P=25, C=3.57142857142857, F=14.2857142857143, ss="56 g", sq=56),
+]
+assert len(step7) == 23, len(step7)
+write("off_step7.csv", step7, SERVING_HEADER)

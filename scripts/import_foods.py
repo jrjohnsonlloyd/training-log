@@ -2300,7 +2300,6 @@ KNOWN_WRONG_PH = {
     "4800422120333": "BTIC Chunky Cookies & Cream at 32 kcal (ice cream is about 180)",
     "4803925480133": "Cheetos at 172 kcal (about 520)",
     "4800016633614": "Piattos Nacho Pizza at 150 kcal (about 500)",
-    "4800016666261": "Nova Multigrain at 140 kcal (about 480)",
     # read by the checks of step 6
     "7622210777768": "Cadbury Dairy milk Chunks at 25 kcal (milk chocolate is about 530)",
     "4800888603692": "knorr sinigang original 11g at 0 kcal (a soup-mix powder is about 300)",
@@ -2316,18 +2315,78 @@ KNOWN_WRONG_PH = {
     "4800361393232": "Nestle Coffee Mate at 27 kcal (one spoonful's figures; the creamer is about 540)",
     "4800361396714": "Milo at 71 kcal (a made-up glass's figures; the powder is about 400)",
     "8888296051157": "Gold Kili Green Tea Latte at 56 kcal (224 on its 25 g sachet; the mix is about 430)",
-    "4806501598956": "Anchor Milk at 150 kcal (one 33 g serving's figures, with no protein given)",
     "4800361401203": "Bear Brand Fortified Strawberry at 120 kcal (a serving's figures; the powder is about 450)",
     "0748485401737": "Birch Tree milk powder at 118 kcal (a made-up glass's figures; the powder is about 480)",
     "8998866610582": "TOP Cafe Brewed 3in1 at 97 kcal (one sachet's figures; the mix is about 430)",
     "4800040115070": "Cafe Puro at 105 kcal (a sachet's figures; the powder is 350 to 450)",
     "8888030311349": "FairPrice 3 in 1 White Coffee Hazelnut at 68 kcal (a made-up cup's figures)",
-    "4800361417198": "Nestea Lemon Cucumber Green Tea powder at 32 kcal (a made-up glass's figures)",
     "4809012007030": "Instant Salabat at 15 kcal (a made-up cup's figures; the ginger powder is about 380)",
     "8717896007168": "Nido Fortifie at 132 kcal (made-up milk's figures; the powder is about 500)",
     "0106350004115": "Caffe D'Vita Cappuccino Mocha at 0 kcal (the mix is about 440)",
+    # read in step 7 (two readers, then checked against the record): wrong, and no weight in the record
+    # makes them right. Nova Multigrain (re-based on its 30 g pack by ph_pack_fix), Nestea Lemon Cucumber
+    # (on its 8.5 g sachet) and Anchor Milk (KNOWN_PER_PACK) left this list in step 7.
+    "7622210278432": "Eden at 495 kcal with 50 g fat (processed cheese is about 300 with 23 g fat)",
+    "4808647020100": "Eden Original at 600 kcal (twice a processed cheese's figures)",
+    "4805358245150": "star margarine 30g classic at 367 kcal with 40 g fat (the sibling row is 733 with 80 g)",
+    "0014285002789": "ufc banana catsup 100g at 56 kcal (banana catsup is about 110)",
+    "0014285003908": "ufc banana catsup 25g at 18 kcal (one tablespoon's figures; about 110)",
+    "4803925061110": "Gatorade at 50 kcal per 100 ml with 12 g sugar (a bottle's share; about 25)",
+    "4806512020804": "Mama Sita's Saute mix at 40 kcal with 40 g carbs (the carbs alone give 160)",
+    "6971334900820": "Mr. Squirrel Luncheon Meat at 75 kcal (re-based on its 34 g serving still only 219; about 300)",
+    "4800194152907": "martys salt & vinegar 26g at 160 kcal (one pack's figures, but 28 g of macros: no sure weight)",
+    "4800016560910": "nr seafood spicy 59g at 305 kcal (on the 59 g pack the macros would be 104 g in 100 g)",
+    "4807770274268": "lm pc extra hot chili 120g at 265 kcal (dry pancit canton is about 450; half a pack's figures?)",
+    "4800888602732": "knorr cube beef 10g at 60 kcal with no macros (a bouillon cube is about 250)",
+    "4800016068010": "c2 apple 230ml at 4 kcal per 100 ml (sweetened tea is about 25)",
+    "0748485100081": "Century Tuna Flakes in Oil at 106 kcal (its kJ and its macros give 177)",
+    "8851013744496": "Tipco Broccoli & mixed fruit juice at 30 kcal with 14 g carbs (its kJ gives 62)",
+    "4800216126725": "Leslie's cheezy corn crunch at 160 kcal (one 30 g serving's figures; no weight in the record)",
+    "4807770122170": "Butter Coconut 280 g at 54 kcal (a serving's figures; the biscuit is about 490)",
+    "4807770122163": "Butter Coconut 28 g at 257 kcal (per 14 g serving typed against 28 g; about 490)",
+    "4809015837238": "Nutrifam Chia Seeds at 357 kcal with 7 g fat (chia is about 490 with 31 g fat)",
+    "0750515018303": "Sky Flakes Crackers at 183 kcal a serving with 1.2 g carbs (a 25 g pack is about 120)",
+    "4800016642029": "Chippy 25g at 680 kcal (corn chips are about 530)",
+    "0480650272041": "Gardenia Classic at 153 kcal (carbs of a slice with protein of 100 g; the 600 g loaf row is 273)",
+    "4808680020877": "Lady's Choice Sandwich Spread at 38 kcal (sandwich spread is about 300 to 440)",
+    "4800575410206": "Alaska choco at 126 kcal per 100 g (one carton's figures; chocolate milk is about 70)",
+    "0480222046998": "SM Bonus Sardines in Corn Oil at 533 kcal with 46 g fat (sardines in oil are about 220)",
+    "4806509692601": "Jim's 3-in-1 Coffee at 272 kcal (3-in-1 mixes are about 430)",
+    "4800016078682": "Cream-O premium at 200 kcal (one serving's figures; the biscuit is about 480)",
+    "4806500474213": "Delicious Misua at 200 kcal with 40 g carbs (dry misua is about 350)",
+    "4805358247048": "Magnolia Dairy Creme at 110 kcal with 12 g fat (a spoonful's figures; about 730)",
+    "0840144385812": "Maya Oven Toaster Butter Cake mix at 195 kcal (a dry cake mix is about 400)",
+    "4800110068909": "royal elbow macaroni at 200 kcal with 42 g carbs (dry pasta is about 360)",
+    "4800528456282": "Hobe corn starch vermicelli at 205 kcal with 48 g carbs (dry vermicelli is about 350)",
+    "4804888884136": "J&F Hickory Smoke Flavored Bacon at 44 kcal (one slice's figures; bacon is about 450)",
+    "4800194116145": "Miggos nacho cheese at 160 kcal (one serving's figures; corn chips are about 530)",
+    "8710428024763": "Ensure Gold Strength Pro at 270 kcal per 100 ml (neither the made-up drink nor the powder)",
+    "8809786770525": "Benope Soft bar Peanut Butter at 285 kcal (its macros give 368, its kJ 419)",
+    "0849506770457": "Benope Soft bar Black Sesame at 285 kcal (its macros give 369, its kJ 424)",
+    "4807770272936": "Lucky me sea food noodles at 229 kcal (on its 70 g cup still 327; dry noodles are about 440)",
+    "4800129181477": "Rich Garden Mr. Cookie at 313 kcal (its kJ and its macros give 500)",
+    "0748485101903": "Century Tuna Lite Flakes in Veg Oil at 100 kcal (its kJ gives 170, its macros 162)",
+    "4800024578020": "Del Monte Pineapple Blueberry Juice at 9 kcal with 5.8 g carbs (about 23)",
+    "4800119236439": "Crispy Joy Breading Mix at 20 kcal (a breading mix is about 330)",
+    "0888127003445": "Roasted Original Laver Snack at 30 kcal (a 5 g pack's figures; seaweed snacks are about 520)",
+    "4800449557358": "La La Chicken Inasal snack at 188 kcal (a 30 g serving's figures typed on 85 g)",
+    "8801123602193": "Lotte Luncheon Meat at 70 kcal (its macros give 107, luncheon meat is about 250)",
+    "4806504710812": "Mega Fried Sardines with Tausi at 77 kcal (its kJ gives 119; fried sardines about 190)",
+    "0048485200019": "555 Sardines in Tomato Sauce at 62 kcal (its 56 g serving gives only 112; about 150)",
+    "4800611092366": "Cobra bottled at 81 kcal per 100 ml (one 240 ml bottle's figures; the same record is 34)",
+    # read in the second fix pass of step 7 (met by the first final check; no weight in the record makes them right)
+    "0014285003045": "UFC Banana Catsup 4 kg at 54 kcal with 12 g carbs (banana catsup is about 95 to 120)",
+    "4801668100301": "Banana Ketchup at 48 kcal (15 kcal and 4 g carbs for an unstated 31 g; about 95 to 120)",
+    "0074848570001": "555 TUNA ADOBO 155G at 89 kcal with 5.3 g protein (the same can's other row is 250 with 25 g)",
+    "4806514101358": "Creamline Jumbo Cone Mango Peanut Caramel at 70 kcal with no fat (an ice-cream cone is about 200)",
+    "4800249006773": "Light tuna flakes in vegetable oil at 273 kcal with 45 g carbs and 1.8 g fat (about 190, no carbs)",
 }
-KNOWN_TWIN = {"8801043014090": "0031146022861"}     # Shin Ramyun at 104 -> SHIN RAMYUN at 433
+KNOWN_TWIN = {"8801043014090": "0031146022861",     # Shin Ramyun at 104 -> SHIN RAMYUN at 433
+              "0748485100081": "0748485103693",     # Century Tuna Flakes in Oil at 106 -> Tuna Flakes in Oil 125g at 179
+              "0480650272041": "4806502720615",     # Gardenia Classic at 153 -> Gardenia White Bread Classic at 273
+              "4800611092366": "4800611000293",     # Cobra bottled at 81 -> Cobra (Bottled) at 34
+              "0014285003045": "4801668609378",     # UFC Banana Catsup 4 kg at 54 -> UFC Banana Ketchup at 91
+              "0074848570001": "0748485700014"}     # 555 TUNA ADOBO 155G at 89 -> 555 tuna adobo 155g at 250
 # Rows whose label was typed for one serving or one pack, where that serving is known (read by
 # hand, step 6): barcode -> (grams of the serving, its label, the portion to open on or None, the
 # calories per 100 g the row carried when it was read: see known_per_pack_fix). The
@@ -2359,7 +2418,25 @@ KNOWN_PER_PACK = {
     # Koka chicken cup: figures per 100 g of the made-up 390 g cup, from a 70 g dry cup (80 -> 446);
     # the fifth item is the weight of the portion shown, when it is not the first item
     "8888056705108": (70 * 100 / 390, "1 cup (70 g)", None, 80, 70),
+    # step 7: Philippine rows the rules cannot reach (no macros, no kind, or in a kind's range), each weight
+    # read in the record and checked against sibling rows
+    # Bear Brand Adult Plus: figures per 100 g of the made-up 200 g glass, from one 33 g sachet (73 -> 442;
+    # the sibling 4800361396677 is 442 with a 33 g sachet)
+    "4800361403443": (33 * 100 / 200, "1 sachet (33 g)", None, 73, 33),
+    "8888015670621": (15, "1 tbsp (15 g)", None, 48),            # Nanyang Nonya Kaya (serving "1 tablespoon (100 g)") 48 -> 320
+    "8850144226727": (35, "1 pack (35 g)", None, 125),           # Knorr Hot Meals Beef Goto Mix, no macros, 35 g pack: 125 -> 357
+    "4806501598956": (33, "1 serving (33 g)", None, 150),        # Anchor Milk powder, 33 g serving: 150 -> 455
+    "4800216125919": (30, "1 serving (30 g)", None, 150),        # Leslie's Cheezy Corn Crunch, 30 g serving: 150 -> 500
+    "0000072217887": (56, "1 serving (56 g)", None, 100),        # 555 Fried sardines hot & spicy, 56 g serving: 100 -> 179
+    "4800249006599": (56, "1 serving (56 g)", None, 93),         # san marino (r) 100g, 56 g serving: 93 -> 166 (siblings 166)
 }
+# Philippine rows ph_pack_fix must leave as they are: their per-100 g figures were doubled by hand from
+# a 50 g serving (whole, even figures, so _ph_worked_out cannot see it) and fall below their kind's
+# range; a re-base would double them a second time (the final check of step 7 read both).
+PH_LEAVE_AS_IS = frozenset((
+    "4808887012781",    # Purefoods Bongga Corned Beef, 114 (Purefoods Corned Beef is 198)
+    "4808887304954",    # Chicken Sausage (Purefoods), 136 (Tender Juicy Chicken Hotdog is 163)
+))
 _LIQUID_LABEL = re.compile(r"\d\s*(?:ml|cl|l|liters?|litres?)\b|fl\.?\s*oz|\bfloz\b", re.I)
 _SHAKE_NAME = re.compile(r"shake|nutrition|ensure|boost|osmolite|protein|formula|meal|huel|soylent|kate farms", re.I)
 _DAIRY_NAME = re.compile(r"milk|dairy|kefir|latte|chai|mocha", re.I)
@@ -2662,6 +2739,405 @@ def oil_fix(row, serving_g):
         rebase_on_serving(row, grams, label or f"{tidy_number(round(grams, 1))} g")
         return "rebased"
     return "oil_low"
+
+
+# ---------------------------------------------------------------------------------------
+# Step 7 (November 2026): Philippine rows carrying one pack's or one serving's figures in the
+# per-100 g boxes ("lm chicken 55g" at 250, "eden original 45g" at 90, Lady's Choice at 66). Two
+# readers measured these rules on all 5,081 Philippine candidates and read every change.
+#   ph_pack  re-base on a pack or serving weight, by kind of food (PH_KINDS). A row stored per
+#            100 g with no pinned portion, whose kind is known and whose calories are outside the
+#            kind's range, is re-based on the first weight that brings it into the range: the
+#            record's serving_quantity, the first weight written in serving_size ("7.8 g (100 g)"),
+#            the weight in the name ("lm chicken 55g", "3x20g" -> 20) and the first weight of the
+#            quantity. The weight must be 5 to 89 g (the rule only scales up: never a family pack),
+#            at least one of protein, carbs and fat must be given and the calories must agree with
+#            them (to 20 %, or 10 kcal per 100 g of serving); after re-basing protein, carbs and fat
+#            together stay at or under 100 g, and cheese, canned fish and meat stay under their caps.
+#            86 changes read: 79 right (16 of them canned fish whose 56 g serving lands them at
+#            105-160 kcal, believable for sardines and tuna), 6 doubtful, 1 still too low (kept out
+#            by hand). The untuned first version (any weight, broad ranges) was wrong 30 times in
+#            101; the ranges below are the tuned ones.
+#            Second fix pass: a row whose per-100 g figures Open Food Facts already worked out from
+#            the record's serving (_typed_for_serving: Argentina corned beef 132.142857 kcal and
+#            12.5 g protein = 74 kcal and 7 g for 56 g) is never re-based; the first pass did, for
+#            41 of its 81 re-bases (canned meat and fish, bacon, sausages), and 37 of those came out
+#            1.79 times too high. The test leaves out a macro the importer worked out itself
+#            (CDO Super Jumbo Chicken Franks). After a re-base a fibre figure above carbs + 5 g
+#            or 40 g is dropped.
+#   ph_powder_made_up  coffee, milk, chocolate and tea powders under 250 kcal carrying a made-up
+#            glass's or one sachet's figures, with no sachet weight that explains them (the rule
+#            above re-bases those that have one). Ice creams, tea bags and ready-to-drink bottles
+#            are left alone. 51 rows read, all sorted right.
+#   ph_zero_dry  a dry food (noodles, chips, biscuits, snack cakes, chocolate or candy, cheese,
+#            powders, seasoning mixes, cubes) at under 5 kcal that does not say zero, diet or
+#            sugar free (Ginisa Mix at 0): kept out.
+# Rows above their kind's range are never divided down (tried: 1 right in 15; sardines in oil,
+# chili garlic oil and longganisa are dense). Those that are wrong are kept out by hand.
+class _PhKind:
+    """One kind of Philippine food for ph_pack_fix: plausible calories per 100 g (100 ml for drinks)."""
+    __slots__ = ("name", "low", "high", "word", "words", "places", "dry", "no_liquid", "liquid_only",
+                 "max_carbs", "max_protein")
+
+    def __init__(self, name, low, high, word, words, places=None, dry=False, no_liquid=False, liquid_only=False,
+                 max_carbs=None, max_protein=None):
+        self.name, self.low, self.high, self.word = name, low, high, word
+        self.words = re.compile(words, re.I)
+        self.places = re.compile(places, re.I) if places else None
+        self.dry, self.no_liquid, self.liquid_only = dry, no_liquid, liquid_only
+        self.max_carbs, self.max_protein = max_carbs, max_protein
+
+
+_NEVER = 1e9
+# In the order they are tried on "name | brand"; the categories (as en: tags) only when no kind's
+# words match. "skip" and "meat_marinade" are never changed. word: the portion word for a pack.
+PH_KINDS = (
+    _PhKind("skip", 0, _NEVER, None,
+            r"shirataki|konjac|keto|sandwich|sandwhich|ice cream|gelato|sorbetes|frozen|popsicle|ice candy|ice pop"
+            r"|big scoop|selecta|magnolia (?:ice|gold label|creamy)|nestle (?:ice|drumstick|crunch .*stick)|\bcornetto"
+            r"|ice bar|arce|carmen.?s best|jelly drink|drinkable jelly|mannan|manann", r"en:(?:ice-creams|frozen-desserts)"),
+    _PhKind("condensed", 290, 370, "can", r"\b(?:condensed|kremdensada|condensada|sweetened condensed)\b",
+            r"en:sweetened-condensed-milks"),
+    _PhKind("evap_cream", 110, 360, "can",
+            r"\b(?:evaporated|evap|evaporada|all.?purpose cream|nestle cream|table cream|coconut milk|coconut cream"
+            r"|kakang gata|gata)\b", r"en:(?:evaporated-milks|creams|coconut-milks)"),
+    _PhKind("tomato_paste", 60, 130, "pack", r"\btomato paste\b", r"en:tomato-pastes"),
+    # Liver spreads are about 175 kcal (Reno, CDO, Purefoods): 300 is the top of the range.
+    _PhKind("liver_spread", 150, 300, "can", r"\b(?:liver spread|reno|liver pate|pate|meat spread|deviled ham)\b",
+            r"en:(?:meat-pates|liver-pates)"),
+    _PhKind("nut_spread", 480, 680, "jar",
+            r"\b(?:peanut butter|lily.?s peanut|nutella|choco spread|chocolate spread|hazelnut spread)\b",
+            r"en:(?:peanut-butters|nut-butters|chocolate-spreads|hazelnut-spreads)"),
+    _PhKind("dressing", 150, 520, "sachet", r"\b(?:dressing|thousand island|caesar|ceasar)\b", r"en:salad-dressings"),
+    _PhKind("mayo", 300, 760, "sachet",
+            r"\b(?:mayonnaise|mayo|sandwich spread|ladys choice|lady.?s choice|best foods)\b(?!.*dressing)",
+            r"en:(?:mayonnaises|sandwich-spreads)"),
+    _PhKind("cube", 150, 360, "cube", r"\b(?:cubes?|bouillon|cubito)\b", r"en:(?:bouillon-cubes|stock-cubes)"),
+    _PhKind("powder", 330, 540, "sachet",
+            r"\b(?:3 ?in ?1|3-in-1|2 ?in ?1|3in1|twin ?pack|coffee ?mix|kopiko|great taste|nescafe|san mig coffee|cafe puro"
+            r"|blanca|creamy white|white coffee|brown coffee|cappuccino|milo|ovaltine|energen|swiss miss|hot choco"
+            r"|bear brand|nido|birch tree|alaska powdered|klim|cerelac|nestogen|bonna|promil|enfagrow|lactum"
+            r"|powdered milk|milk powder|creamer|coffee ?mate|tang|eight o.?clock|juice powder|powdered juice"
+            r"|instant coffee|cocoa powder|salabat|oat cereal drink|cereal drink|nestea|nesvita|choco drink mix)\b",
+            r"en:(?:instant-coffees|coffee-mixes|milk-powders|powdered-milks|dried-milks|creamers"
+            r"|cocoa-and-chocolate-powders|instant-beverages|beverage-preparations|powdered-drinks)", no_liquid=True),
+    _PhKind("milk_rtd", 25, 100, "bottle",
+            r"\b(?:nutri ?boost|dutch mill|cimory|yogurt drink|chuckie|uht|fresh milk|milk drink|choco drink|yakult"
+            r"|vitamilk|soy ?milk|milk tea|coffee drink|kopiko 78|lactose.?free milk|sterili[sz]ed|ready to drink|rtd)\b",
+            r"en:(?:milks|plant-based-milks|dairy-drinks|chocolate-milks)", liquid_only=True),
+    _PhKind("rtd_drink", 0, 75, "bottle",
+            r"\b(?:monster|monstter|fruity zing|coke|coca.?cola|pepsi|sprite|royal|7.?up|mountain dew|mirinda|sarsi"
+            r"|rc cola|cola|soda|zesto|c2|iced tea|minute maid|juice|juice drink|gatorade|pocari|powerade|cobra|sting"
+            r"|red bull|real leaf|lipton|summit|wilkins|absolute|refresh|dalandan|smart c|mogu|pop cola|mug root|a&w"
+            r"|schweppes|tonic|energy drink|sparkling)\b",
+            r"en:(?:sodas|carbonated-drinks|colas|iced-teas|fruit-juices|juices-and-nectars|waters|energy-drinks"
+            r"|sports-drinks|tea-based-beverages)", liquid_only=True),
+    _PhKind("meat_marinade", 0, _NEVER, None,
+            r"\b(?:marinade|sauce|mix|seasoning|flavou?r(?:ed|ing)? (?:chips|crackers))\b"
+            r"(?=.*\b(?:tapa|tocino|ham|bacon|sausage|longganisa)\b)|\b(?:tapa|tocino|longganisa) (?:marinade|mix|sauce)\b"),
+    _PhKind("canned_meat", 150, 360, "can",
+            r"\b(?:corned beef|corned|carne norte|karne norte|luncheon meat|luncheon|meat loaf|beef loaf|vienna sausage"
+            r"|spam|delimondo)\b(?!.*sandwich)", r"en:(?:canned-meats|corned-beef|luncheon-meats)", max_protein=30),
+    _PhKind("ham", 100, 220, "pack", r"\b(?:ham|hamon|jamon)\b(?!.*(?:burger|deviled))", r"en:hams"),
+    _PhKind("bacon", 300, 560, "pack",
+            r"\bbacon\b(?!.*(?:bits|chips|flavou?r|sausage|saudage|longganisa|hotdog))", r"en:bacons",
+            max_carbs=16),
+    _PhKind("tapa_tocino", 110, 300, "pack", r"\b(?:tapa|tocino|longganisa|longanisa|skinless)\b"),
+    _PhKind("dumpling", 140, 300, "pack",
+            r"\b(?:siomai|siumai|shumai|dumplings?|gyoza|kikiam|fish ?balls?|squid ?balls?|kwek)\b"),
+    _PhKind("meat", 180, 340, "pack",
+            r"\b(?:sausages?|saudage|bratwurst|krainer|hot ?dogs?|franks?|chorizo|embutido|meatballs?|burger patty"
+            r"|patties|nuggets?|vienna)\b", r"en:(?:sausages|chicken-nuggets)", max_protein=35),
+    _PhKind("canned_fish", 90, 360, "can",
+            r"\b(?:tuna|sardines?|mackerel|squid|bangus|salmon|tuyo)\b(?!.*(?:style|plant|meat-free))",
+            r"en:(?:canned-fishes|canned-tuna|tunas|sardines|canned-sardines|canned-mackerels)", max_protein=30),
+    _PhKind("sweet_spread", 200, 360, "jar",
+            r"\b(?:kaya|coconut jam|jam|preserves|marmalade|matamis na bao|ube halaya|halaya|macapuno|honey|syrup"
+            r"|dulce|yema spread)\b", r"en:(?:jams|fruit-preserves|sweet-spreads|honeys|syrups)"),
+    _PhKind("chips", 400, 620, "pack",
+            r"\b(?:popcorn|curls|onion rings|potato fries|kimchi crisp|rinbee|piattos|nova|chippy|tortillos|mr\.? ?chips"
+            r"|cheese ring|clover|v-?cut|martys|marty.?s|boy bawang|cornick|corniks?|corn bits|kropek|chicharr?on"
+            r"|cracklin|crackling|potato chips|pringles|lay.?s|lays|roller coaster|taquitos|nachos?|chips|crisps|puffs"
+            r"|prawn crackers|fishda|kirei|ridges|bread pan|wonder ?bites|cheez it|tostillas|cheetos|doritos|ruffles"
+            r"|jumpee|tahoos|cheepee|peewee|pee wee|sugo|chiz curls|mang juan|lumpia wrapper snack)\b",
+            r"en:(?:chips-and-fries|crisps|potato-crisps|corn-chips|extruded-snacks|puffed-snacks|appetizers|salty-snacks)",
+            dry=True),
+    _PhKind("biscuits", 380, 560, "pack",
+            r"\b(?:sky ?flakes|skyflakes|fita|rebisco|hansel|cream[- ]?o|wafello|nagaraya|hiho|hi-ho|berry knots"
+            r"|magic chips?|topps|magic flakes|m\.?y\.? san|bingo|presto|oreo|graham|marie|crackers?|biscuits?|cookies?"
+            r"|wafers?|hello panda|butter coconut|choco mucho|bread sticks|pretzels?|cracker nuts?|polvoron|rosquillos"
+            r"|barquillos|uraro|otap|digestive|jacobs|julie.?s|danisa|khong guan|lady fingers|stick-?o|pocky|yan yan"
+            r"|hi-?ro|ritz|nabisco|salvaro|whatta tops|dewberry|sponge)\b",
+            r"en:(?:biscuits|biscuits-and-crackers|crackers|cookies|wafers|sweet-biscuits|dry-biscuits)", dry=True),
+    _PhKind("thin_condiment", 0, 120, "bottle",
+            r"\b(?:soy ?sauce|toyo|vinegar|suka|patis|fish sauce|datu puti|silver swan|marca pina|kikkoman"
+            r"|calamansi extract|liquid seasoning|pinakurat|sinamak)\b", r"en:(?:soy-sauces|vinegars|fish-sauces)"),
+    _PhKind("pasta", 300, 420, "pack",
+            r"\b(?:mac (?:&|and|n) cheese|macaroni|baked mac|instant pasta|spaghetti|pasta|elbow|fettuccine|penne"
+            r"|linguine|lasagna)\b(?!.*sauce)", r"en:(?:pastas|dried-pastas)", dry=True),
+    _PhKind("noodles", 380, 520, "pack",
+            r"\b(?:misua|miswa|yakiudon|udon|lm|lucky me|nr|nissin|payless|quickchow|pancit canton|canton|mami|batchoy"
+            r"|la paz|ramen|ramyun|ramyeon|cup noodles?|yakisoba|instant noodles?|noodles?|mi goreng|indomie"
+            r"|beef na beef|sotanghon|bihon|go cup|labuyo)\b", r"en:(?:instant-noodles|noodles)", dry=True),
+    _PhKind("bread", 200, 400, "pack",
+            r"\b(?:bread|pandesal|pan de sal|loaf|gardenia|neubake|buns?|monay|toast|tortillas?|wraps?|baguette"
+            r"|croissant|crossaint|ensaymada|pita)\b", r"en:(?:breads|sandwich-breads|sliced-breads)", dry=True),
+    _PhKind("snack_cake", 260, 500, "pack",
+            r"\b(?:fudgee ?barr|cupp? ?keyk|lemon square|mamon|inipit|cream roll|swiss roll|choco roll|cake bar|cupcake"
+            r"|brownies?|muffin|torta|broas|hopia|pastry|big bite|sponge ?cake|magic creams|pillows|cream filled"
+            r"|toasties|donut|doughnut|cake)\b", r"en:(?:cakes|snack-cakes|pastries|sponge-cakes)", dry=True),
+    _PhKind("choc_candy", 340, 600, "pack",
+            r"\b(?:choc ?nut|chocnut|cloud 9|curly tops|flat tops|goya|hany|frutos|maxx|snow bear|mentos|chupa chups"
+            r"|storck|kit ?kat|snickers|toblerone|m&m.?s|ferrero|hershey.?s|cadbury|dairy milk|nips|candy|candies"
+            r"|chocolates?|lollipops?|gumm(?:y|ies)|marshmallows?|marshies|mallows|toffees?|yema|pastillas|nougat"
+            r"|caramels?|choco|tic ?tac|halls|lozenges?|mints?|ricoa|beng.?beng|tango|delfi|cha cha|potchi|fruitella"
+            r"|haw ?flakes|dynamite|tira ?tira|judge|big boy|yupi|alpenliebe|white rabbit|sweets|lindt|galaxy|reese"
+            r"|twix|milky way|chewy|loaded)\b", r"en:(?:chocolates|candies|confectioneries|sweets|bonbons)", dry=True),
+    _PhKind("cheese", 230, 430, "pack",
+            r"\b(?:eden|cheez ?whiz|quickmelt|quick melt|magnolia cheese|cheddar|mozzarella|parmesan|gouda|edam|cheese"
+            r"|kesong puti|keso|queso de bola|daily quezo)\b", r"en:(?:cheeses|processed-cheese|spreadable-cheeses)",
+            max_carbs=15),
+    _PhKind("catsup", 80, 170, "sachet", r"\b(?:catsup|ketchup|banana sauce)\b", r"en:ketchup"),
+    _PhKind("margarine", 480, 760, "pack",
+            r"\b(?:margarine|buttercup|dari ?creme|butter|spreadable|ghee|shortening|lard)\b"
+            r"(?!.*(?:cookie|coconut|biscuit|cracker))", r"en:(?:margarines|butters|spreads-of-vegetable-oils)"),
+    _PhKind("oil", 800, 900, "bottle",
+            r"\b(?:cooking oil|vegetable oil|coconut oil|palm oil|canola oil|olive oil|soybean oil|corn oil|minola"
+            r"|baguio oil|golden fiesta|spring oil)\b(?!.*chil)", r"en:(?:vegetable-oils|cooking-oils)"),
+    _PhKind("nuts", 450, 680, "pack",
+            r"\b(?:peanuts?|mani|cashews?|kasoy|almonds?|pili|mixed nuts|mix nuts|nuts|butong|pumpkin seeds"
+            r"|watermelon seeds|sunflower seeds)\b", r"en:(?:nuts|peanuts|salted-nuts|seeds)", dry=True),
+    _PhKind("seasoning_mix", 180, 420, "pack",
+            r"\b(?:sinigang|mix|seasoning|magic sarap|crispy fry|breading|batter|ginisa|tasty boy|recipe mix|soup mix"
+            r"|gravy mix|instant soup|cream soup|soup powder|hotcake|pancake mix)\b",
+            r"en:(?:seasonings|seasoning-mixes|dehydrated-soups|soups-in-powder|breadings|bread-crumbs)", no_liquid=True),
+    # Mang Tomas and the other lechon sauces are thick and sweet (about 94 kcal); a sauce at 30 is two spoons'.
+    _PhKind("lechon_sauce", 70, 200, "bottle", r"\b(?:mang tomas|lechon sauce|all.?around sarsa)\b"),
+    _PhKind("sauce", 25, 260, "sachet",
+            r"\b(?:oyster sauce|sarsa|all.?around|spaghetti sauce|tomato sauce|pasta sauce|bbq sauce|barbecue sauce"
+            r"|marinade|hot sauce|sweet chili|chili sauce|pizza sauce|hoisin|teriyaki|sauce|gravy|salsa|ready recipes)\b",
+            r"en:(?:sauces|tomato-sauces|condiments)"),
+    _PhKind("canned_fruit_veg", 10, 110, "can",
+            r"\b(?:pineapple|tidbits|chunks|fruit cocktail|mixed fruits?|peaches|mushrooms?|mixed vegetables|cream corn"
+            r"|whole kernel|green peas|young corn|bamboo shoots?|pork and beans|pork & beans|sweet blend)\b",
+            r"en:(?:canned-fruits|canned-vegetables|fruits-in-syrup)"),
+    _PhKind("cereal_flour", 320, 470, "pack",
+            r"\b(?:cereal|oats|oatmeal|corn ?flakes|koko krunch|granola|flour|rice|cornstarch|starch|glutinous|sago"
+            r"|tapioca)\b", r"en:(?:breakfast-cereals|flours|rices|cereals-and-potatoes)", dry=True),
+    _PhKind("sugar", 360, 410, "pack", r"\b(?:sugar|muscovado)\b(?!.*(?:free|biscuit|cookie|coated))", r"en:sugars"),
+)
+_PH_LIQUID = re.compile(r"\d\s*(?:ml|cl|l|ltrs?|liters?|litres?)\b|fl\.?\s*oz", re.I)
+_PH_SPOON_KINDS = frozenset(("mayo", "dressing", "sweet_spread", "margarine", "nut_spread", "catsup", "sauce",
+                             "lechon_sauce", "thin_condiment", "cheese", "liver_spread"))
+_PH_ML_KINDS = frozenset(("rtd_drink", "milk_rtd", "thin_condiment", "evap_cream", "condensed"))
+_PH_ZERO_DRY = frozenset(("noodles", "chips", "biscuits", "snack_cake", "choc_candy", "cheese", "powder",
+                          "seasoning_mix", "cube"))
+PH_PACK_MAX = 90                # the rule only scales up: a weight under 90 g
+PH_SOLIDS_MAX = 100             # g of protein, carbs and fat in 100 g after re-basing
+PH_FIBRE_OVER_CARBS = 5         # after re-basing, fibre above carbs + 5 g ...
+PH_FIBRE_MAX = 40               # ... or above 40 g per 100 g is dropped (ph_drop_bad_fibre)
+# A weight written in a name, a serving or a quantity: "3x20g" and "20g x 10" are 20 g; a bare count is none.
+_PH_UNIT = {"g": 1, "gm": 1, "gms": 1, "gr": 1, "grams": 1, "gram": 1, "grm": 1, "kg": 1000, "kgs": 1000,
+            "ml": 1, "mls": 1, "cl": 10, "l": 1000, "lt": 1000, "ltr": 1000, "ltrs": 1000, "liter": 1000,
+            "litre": 1000, "liters": 1000, "litres": 1000, "oz": 28.35}
+_PH_LIQUID_UNITS = frozenset(("ml", "mls", "cl", "l", "lt", "ltr", "ltrs", "liter", "litre", "liters", "litres"))
+_PH_UNITS = r"(kgs?|gms?|grams?|grm|gr|g|mls?|cl|ltrs?|lt|l|liters?|litres?)"
+_PH_MULTI = re.compile(r"(\d+)\s*[x×]\s*(\d+(?:[.,]\d+)?)\s*" + _PH_UNITS + r"(?![a-z])", re.I)
+_PH_MULTI2 = re.compile(r"(\d+(?:[.,]\d+)?)\s*" + _PH_UNITS + r"\s*[x×]\s*(\d+)(?![a-z0-9])", re.I)
+_PH_ONE = re.compile(r"(?<![\d.,])(\d+(?:[.,]\d+)?)\s*(kgs?|gms?|grams?|grm|gr|g|mls?|cl|ltrs?|lt|l|liters?|litres?|oz)"
+                     r"(?![a-z])", re.I)
+
+
+def ph_weight(text):
+    """(grams or ml of one unit, liquid?) written in a text, or (None, False)."""
+    text = text or ""
+    for pattern, number, unit in ((_PH_MULTI, 2, 3), (_PH_MULTI2, 1, 2), (_PH_ONE, 1, 2)):
+        found = pattern.search(text)
+        if found:
+            word = found.group(unit).lower()
+            factor = _PH_UNIT.get(word, _PH_UNIT.get(word.rstrip("s"), 1))
+            return float(found.group(number).replace(",", ".")) * factor, word in _PH_LIQUID_UNITS
+    return None, False
+
+
+def ph_tags(categories):
+    """categories_en ("Snacks,Salty snacks") as en: tags ("en:snacks,en:salty-snacks")."""
+    return ",".join("en:" + re.sub(r"\s+", "-", item.strip().lower()) for item in (categories or "").split(",")
+                    if item.strip())
+
+
+def ph_kind(name, brand, categories, serving_size, quantity):
+    """The _PhKind of a Philippine row, or None. Drinks need a liquid amount (name, serving or
+    quantity); the dry kinds and powders refuse a liquid amount in the name or the serving."""
+    text = (name or "") + " | " + (brand or "")
+    name_liquid = ph_weight(name)[1]
+    serving_liquid = bool(_PH_LIQUID.search(serving_size or ""))
+    liquid = name_liquid or serving_liquid or bool(_PH_LIQUID.search(quantity or ""))
+
+    def fits(kind):
+        if kind.liquid_only and not liquid:
+            return False
+        return not ((kind.dry or kind.no_liquid) and (serving_liquid or name_liquid))
+
+    for kind in PH_KINDS:
+        if kind.words.search(text):
+            if kind.name == "skip" or fits(kind):
+                return kind
+    tags = ph_tags(categories)
+    for kind in PH_KINDS:
+        if kind.places is not None and kind.places.search(tags) and fits(kind):
+            return kind
+    return None
+
+
+def _ph_worked_out(row, grams, filled=None):
+    """True when the row's per-100 g figures were already worked out from numbers typed for one
+    serving of grams (_typed_for_serving): Argentina corned beef at 132.1 kcal and 12.5 g protein is
+    74 kcal and 7 g for its 56 g serving. Such figures are per 100 g already and are never re-based
+    again. filled: the macro the importer worked out from the calories (fill_missing_macro), which
+    is not a label figure and is left out of the test."""
+    if filled:
+        row = dict(row)
+        row[filled] = None
+    return _typed_for_serving(row, grams)
+
+
+def ph_drop_bad_fibre(row):
+    """After a re-base of a Philippine row: a fibre figure above carbs + 5 g or above 40 g per 100 g
+    is a typing slip scaled up (CDO franks would show 23 g, Nestea Lemon Cucumber 53 g): dropped."""
+    fibre = row["fibre_g"]
+    if fibre is not None and (fibre > (row["carbs_g"] or 0) + PH_FIBRE_OVER_CARBS or fibre > PH_FIBRE_MAX):
+        row["fibre_g"] = None
+
+
+def _ph_rebase_test(row, kind, grams, filled=None):
+    """True when grams can be the weight the row's figures were typed for (see the notes above)."""
+    kcal = row["calories_kcal"]
+    if grams is None or not 5 <= grams < PH_PACK_MAX:
+        return False
+    factor = 100.0 / grams
+    if not kind.low <= kcal * factor <= kind.high:
+        return False
+    protein, carbs, fat = row["protein_g"], row["carbs_g"], row["fat_g"]
+    if protein is None and carbs is None and fat is None:
+        return False
+    if ((protein or 0) + (carbs or 0) + (fat or 0)) * factor > PH_SOLIDS_MAX:
+        return False
+    if kind.max_carbs is not None and (carbs or 0) * factor > kind.max_carbs:
+        return False
+    if kind.max_protein is not None and (protein or 0) * factor > kind.max_protein:
+        return False
+    if _ph_worked_out(row, grams, filled):
+        return False        # worked out from the label's serving (a bun's 110 kcal for 60 g): already per 100 g
+    from_macros = 4 * (protein or 0) + 4 * (carbs or 0) + 9 * (fat or 0)
+    return abs(kcal - from_macros) <= max(0.2 * max(kcal, from_macros), 10 * grams / 100.0)
+
+
+_PH_PACK_NAME = (("bar", re.compile(r"\bbar\b|barr", re.I)), ("cup", re.compile(r"\bcup\b|go cup", re.I)),
+                 ("can", re.compile(r"\bcan\b", re.I)), ("sachet", re.compile(r"sachet|stick", re.I)))
+
+
+def ph_portion_label(kind, grams, source, pack_weights, name, liquid):
+    """The plain label of the portion a row is re-based on: "1 pack (55 g)", "1 tbsp (15 g)", "1 serving (56 g)".
+    A weight that is the pack's (from the name or the quantity) is named for the pack; a serving
+    weight that is not the pack's is a serving, a spoonful for spoon foods, a sachet for powders."""
+    amount = tidy_number(round(grams, 1))
+    unit = "ml" if liquid and kind.name in _PH_ML_KINDS else "g"
+    is_pack = source in ("name", "quantity") or any(abs(grams - other) < 0.5 for other in pack_weights if other)
+    if is_pack:
+        word = kind.word or "pack"
+        for name_word, pattern in _PH_PACK_NAME:
+            if pattern.search(name or ""):
+                word = name_word
+                break
+        if word in ("jar", "bottle") or (word == "can" and grams < 60):
+            word = "pack"
+    elif kind.name == "sugar" and grams <= 5:
+        word = "tsp"
+    elif kind.name in _PH_SPOON_KINDS and grams <= 20:
+        word = "tbsp"
+    elif kind.name == "cube":
+        word = "cube"
+    elif kind.name == "powder":
+        word = "sachet"
+    else:
+        word = "serving"
+    return f"1 {word} ({amount} {unit})"
+
+
+# A label that names a unit: "1 bun", "2 tbsp", "1 Pack", "3 pieces" (not "1 serving", "1 portion" or a bare weight).
+_PH_UNIT_LABEL = re.compile(r"(?:\d+(?:\.\d+)?|½|one)\s+(?:buns?|pieces?|pcs?|slices?|bars?|packs?|packets?|sachets?|cups?"
+                            r"|tbsps?|tablespoons?|tsps?|teaspoons?|cans?|sticks?|cubes?|links?|patties|patty|rolls?)",
+                            re.I)
+_PH_POWDER_NAME = re.compile(
+    r"\bfortified\b.*\b(?:milk|choco)|\b(?:milk|choco)\b.*\bfortified\b|\banchor milk\b", re.I)
+_PH_POWDER_PLACE = re.compile(
+    r"en:(?:instant-coffees|coffee-mixes|milk-powders|powdered-milks|dried-milks|creamers|cocoa-and-chocolate-powders"
+    r"|instant-beverages|powdered-drinks)", re.I)
+_PH_ICE = re.compile(r"ice ?cream|sundae|frozen|selecta|aice|magnolia gold|big scoop", re.I)
+_PH_TEA_BAG = re.compile(r"\btea\b(?!.*(?:latte|milk))|herbal|chamomile", re.I)
+_PH_NOT_TEA_BAG = re.compile(r"nestea|kopiko|latte", re.I)
+_PH_READY = re.compile(r"ready.?to.?drink|\brtd\b|bottle|\bcan\b|\buht\b|sterili[sz]ed|liquid|tetra|concentrate"
+                       r"|ice ?cream|frozen|sundae|\biced\b|ice black|chocolait|\bdrink\b(?!.*(?:mix|powder))", re.I)
+_PH_DRINK_MIX = re.compile(r"drink (?:mix|powder)|cereal drink|oat drink|powder|3 ?in ?1|2 ?in ?1|sachet|stick", re.I)
+_PH_ZERO_CUE = re.compile(r"zero|sugar.?free|diet", re.I)
+
+
+def ph_pack_fix(row, categories, serving_size, serving_g, quantity, filled=None):
+    """Step 7 rules for a Philippine row (see the notes above). Returns "" (nothing done),
+    "rebased" (figures now per 100 g, the pack or serving pinned first), or a reason to keep
+    the row out: "powder_made_up" or "zero_dry". Rows already re-based (a pinned portion) and
+    rows stored per serving are left alone, and so are rows whose figures were worked out from
+    the record's own serving (_ph_worked_out): no other weight is tried for them. filled: the
+    macro fill_missing_macro worked out, if any."""
+    if row["per_unit"] != "100g" or any(len(p) > 2 for p in row["portions"] or []):
+        return ""
+    if (row["barcode"] or "") in PH_LEAVE_AS_IS:
+        return ""
+    name, brand, kcal = row["name"] or "", row["brand"] or "", row["calories_kcal"]
+    kind = ph_kind(name, brand, categories, serving_size, quantity)
+    name_grams, name_liquid = ph_weight(name)
+    serving_text_grams, _ = ph_weight(serving_size)
+    quantity_grams, _ = ph_weight(quantity)
+    rebased = False
+    worked_out = any(_ph_worked_out(row, grams, filled) for grams in {serving_g, serving_text_grams} if grams)
+    if kind is not None and kind.name != "skip" and not kind.low <= kcal <= kind.high and not worked_out:
+        weights = (("serving", serving_g or serving_text_grams), ("serving", serving_text_grams),
+                   ("name", name_grams), ("quantity", quantity_grams))
+        for source, grams in weights:
+            if _ph_rebase_test(row, kind, grams, filled):
+                liquid = bool(name_liquid or _PH_LIQUID.search(serving_size or "") or _PH_LIQUID.search(quantity or ""))
+                label = ph_portion_label(kind, grams, source, (name_grams, quantity_grams), name, liquid)
+                # The label's own words for that weight ("1 bun (60 g)", "2 tbsp (32g)") are kept when they
+                # name a unit; the row's other portions belong to the old figures and are dropped.
+                for old_label, old_grams, *_ in row["portions"] or []:
+                    words = re.sub(r"\([^)]*\)", "", str(old_label)).strip()
+                    if old_grams and abs(old_grams - grams) < 0.5 and _PH_UNIT_LABEL.fullmatch(words):
+                        label = f"{words[0].lower()}{words[1:]} ({tidy_number(round(grams, 1))} {label.split()[-1]}"
+                        break
+                row["portions"] = []
+                rebase_on_serving(row, grams, label)
+                ph_drop_bad_fibre(row)
+                rebased = True
+                break
+    if rebased:
+        return "rebased"
+    text = name + " | " + brand
+    powder = next(k for k in PH_KINDS if k.name == "powder")
+    if kcal < 250 and (powder.words.search(text) or _PH_POWDER_NAME.search(text)
+                       or _PH_POWDER_PLACE.search(ph_tags(categories))):
+        if _PH_ICE.search(text):
+            return ""
+        if _PH_TEA_BAG.search(name) and not _PH_NOT_TEA_BAG.search(text):
+            return ""
+        if (_PH_READY.search(name) or _PH_LIQUID.search(name) or _PH_LIQUID.search(serving_size or "")) \
+                and not _PH_DRINK_MIX.search(name):
+            return ""
+        return "powder_made_up"
+    if kind is not None and kind.name in _PH_ZERO_DRY and kcal < 5 and not _PH_ZERO_CUE.search(name) \
+            and not re.search(r"\btea\b", name, re.I):
+        return "zero_dry"
+    return ""
 
 
 # --- The British shelf (the UK pool) ---
@@ -3550,8 +4026,11 @@ def import_off(importer, path):
                 continue
             importer.repaired += 1
         # One blank macro is worked out from the calories (the app would show it as 0 g).
+        blank_macros = [column for column in ("protein_g", "carbs_g", "fat_g") if row[column] is None]
+        filled_macro = None
         if fill_missing_macro(row, alcohol_g, categories):
             importer.filled += 1
+            filled_macro = blank_macros[0]
         # Sugars cannot exceed carbs, nor saturates fat.
         reconcile_parts(row)
 
@@ -3567,6 +4046,8 @@ def import_off(importer, path):
         # A row read by hand whose label was typed for a known serving or pack (KNOWN_PER_PACK).
         if known_per_pack_fix(row):
             importer.step6["known_per_pack"] += 1
+            if philippine:
+                ph_drop_bad_fibre(row)
         elif philippine:
             fixed = serving_typed_fix(row, row["name"], row["brand"], categories, serving_size, serving_g, quantity)
             if fixed:
@@ -3586,6 +4067,12 @@ def import_off(importer, path):
             # read by hand (KNOWN_WRONG_PH) and plain oils carrying a spoonful's figures are
             # marked, and the Philippine part of the list leaves out the marked ones.
             why = "listed" if row["barcode"] in KNOWN_WRONG_PH else oil_fix(row, serving_g)
+            if not why:
+                # Step 7: a pack's or serving's figures typed per 100 g, made-up powders, 0 kcal dry foods.
+                why = ph_pack_fix(row, categories, serving_size, serving_g, quantity, filled=filled_macro)
+                if why == "rebased":
+                    importer.step6["ph_pack_rebased"] += 1
+                    why = ""
             if why:
                 importer.step6["ph_" + why] += 1
                 row["doubt"] = None if why == "rebased" else why
@@ -4549,7 +5036,7 @@ def pick_off_rows(conn, quota, repeats=None):
         SELECT id, name, calories_kcal, popularity, region_tags, origin, rank, completeness,
                has_photo, has_brand, has_serving, is_ph, may_enter, british, away,
                must,
-               COALESCE(doubt, '') IN ('listed', 'oil_low') AS ph_out,
+               COALESCE(doubt, '') IN ('listed', 'oil_low', 'powder_made_up', 'zero_dry') AS ph_out,
                (NOT has_serving AND needs_serving(name, calories_kcal)) AS no_serving,
                half_latin(name) AS latin, (NOT has_brand AND plain_words(name) IN temp.reference_names) AS generic,
                shop_listing(name) AS listing
