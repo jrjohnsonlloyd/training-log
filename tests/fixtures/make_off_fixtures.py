@@ -2,7 +2,7 @@
 
     python tests/fixtures/make_off_fixtures.py [OUTPUT_FOLDER]
 
-Eight files are written next to this script:
+Nine files are written next to this script:
 
     sample_off.csv          the main import: 52 rows (32 old anchor rows + 20 selection rows)
     off_rules.csv           36 rows, one per validation / repair rule branch
@@ -12,6 +12,7 @@ Eight files are written next to this script:
     off_doubt.csv           23 rows from other markets with doubtful numbers, and the US pool's rules
     off_asia.csv            15 rows for the seven neighbouring markets (region "AS") and pool membership
     off_asia2.csv           30 rows for the rules of the Japan, Korea and Asia pools (step 5)
+    off_step6.csv           17 rows for the UK shelf and the step 6 repairs (with a "quantity" column)
 
 Every row is written out in full below so a reader can follow the expected values in
 tests/test_import_foods.py without running anything. Short column keys:
@@ -681,3 +682,73 @@ asia2 = [
 ]
 assert len(asia2) == 30, len(asia2)
 write("off_asia2.csv", asia2)
+
+# ======================================================================================
+# off_step6.csv : the UK shelf and the step 6 repairs (with a "quantity" column): stock cubes,
+#                 bread typed per slice, a kJ repair, drink powders, squash, a zero drink storing
+#                 the bottle, dry noodle packs, plain oils, a Philippine row read by hand, pack
+#                 sizes as portions, and repeats whose barcodes are passed on.
+# ======================================================================================
+UK, US, KRUS = "en:united-kingdom", "en:united-states", "en:south-korea,en:united-states"
+
+
+def s6_row(code, quantity="", **kw):
+    kw.setdefault("comp", 0.5)
+    kw.setdefault("img", photo(code))
+    return row(code, **kw) + [quantity]
+
+
+step6 = [
+    # U1 Knorr stock cubes stored as made up (6 kcal) with the cube as serving: opens on "100 ml made up" (UK pool)
+    s6_row(ean("500", 6001), name="Beef Stock Cubes", brand="Knorr", ctry=UK, scans=30,
+           kcal=6, P=0.3, C=0.6, F=0.3, ss="1 cube (10 g)", sq=10),
+    # U2 sourdough typed per 50 g slice (127 kcal): re-based to 254 kcal, "1 slice (50 g)" first (UK pool)
+    s6_row(ean("505", 6002), name="Rye Sourdough Bread", brand="Tesco", ctry=UK, scans=29,
+           kcal=127, P=4.5, C=21.3, F=1.9, ss="1 slice (50 g)", sq=50),
+    # U3 a granary loaf at 112 kcal and no serving to explain it: uk_bread_low, in no pool
+    s6_row(ean("501", 6003), name="Granary Bread", brand="Hovis", ctry=UK, scans=28, kcal=112, P=4, C=20, F=1.5),
+    # U4 wheat biscuits at 227 kcal whose own kJ (1550) fits their macros: 370.5 kcal, basis "estimate" (UK pool)
+    s6_row(ean("501", 6004), name="Original Wheat Biscuits", brand="Weetabix", ctry=UK, scans=27,
+           kcal=227, kj=1550, P=12, C=69, F=2),
+    # U5 a cappuccino powder stored as made up (24 kcal) with its 14 g sachet: uk_powder_made_up
+    s6_row(ean("500", 6005), name="Cappuccino Unsweetened", brand="Nescafe", ctry=UK, scans=26,
+           kcal=24, P=1, C=3, F=0.9, ss="1 sachet (14 g)", sq=14),
+    # U6 squash stored diluted (4 kcal) with a 35 ml measure: opens on "1 glass, diluted (250 ml)" (UK pool);
+    # at 10 kcal with 2.3 g of carbs it would be a no-added-sugar concentrate and keep its 35 ml
+    s6_row(ean("500", 6006), name="Lemon Squash", brand="Robinsons", ctry=UK, scans=25,
+           kcal=4, P=0.1, C=0.9, F=0, ss="35 ml", sq=35),
+    # U7 a bar labelled per 100 g with round figures and a 68 g serving: the US per-serving test is not asked (UK pool)
+    s6_row(ean("500", 6007), name="Peanut Bar", brand="Nutty", ctry=UK, scans=24,
+           kcal=260, P=9, C=42, F=7, ss="1 bar (68 g)", sq=68),
+    # U8 pots sold as "4 x 125g" with no serving: open on "1 unit (125 g)" (UK pool)
+    s6_row(ean("500", 6008), "4 x 125g", name="Chocolate Dessert Pots", brand="Gu", ctry=UK, scans=23,
+           kcal=150, P=4, C=20, F=6),
+    # Z1 a Korean zero soda storing its 500 ml bottle per 100 ml (16 kcal): re-based to 3.2 (Korea pool)
+    s6_row(ean("880", 6101), name="Milkis Zero", brand="Lotte", ctry="en:south-korea", scans=20,
+           kcal=16, P=1, C=3, F=0, ss="500 ml", sq=500),
+    # Z2 a Korean ramen block at 270 kcal with 8.2 g fat (prepared figures): dry_noodle
+    s6_row(ean("880", 6102), name="Hot Chicken Flavor Ramen", brand="Samyang", ctry="en:south-korea", scans=19,
+           kcal=270, P=6, C=43, F=8.2),
+    # Z3 Philippine sesame oil typed per 15 ml (120 kcal): re-based to 800 kcal (Philippine part)
+    s6_row(ean("480", 6201), name="Sesame Oil", brand="Good Life", ctry=PH, scans=5,
+           kcal=120, P=0, C=0, F=14, ss="15 ml", sq=15),
+    # Z4 a Philippine regular soda at 0 kcal, read by hand (KNOWN_WRONG_PH): left out of the Philippine part
+    s6_row("4803925033124", name="7 up Regular in can", brand="7up", ctry=PH, scans=4, kcal=0, P=0, C=0, F=0),
+    # Z5 a Thai lemon tea sold as 330 ml with no serving: opens on "1 bottle (330 ml)" (Asia pool)
+    s6_row(ean("885", 6301), "330 ml", name="Lemon Tea Drink", brand="Chabaa", ctry="en:thailand", scans=18,
+           kcal=40, P=0, C=10, F=0),
+    # R1, R2 a Korean "Soy Sauce" tagged Korea and US (Korea pool) and Kikkoman's (US): the US one is chosen too
+    s6_row(ean("880", 6401), name="Soy Sauce", brand="Sempio", ctry=KRUS, scans=10, kcal=67, P=8, C=8, F=0),
+    s6_row(ean("004", 6402), name="Soy Sauce", brand="Kikkoman", ctry=US, scans=9, kcal=67, P=8, C=8, F=0),
+    # R3, R4 two US waters of one name and calories: R4 is skipped as a repeat and its barcode finds R3
+    s6_row(ean("007", 6403), name="Spring Water", brand="Aqua One", ctry=US, scans=8, kcal=0, P=0, C=0, F=0),
+    s6_row(ean("007", 6404), name="Spring water", brand="Aqua Two", ctry=US, scans=7, kcal=0, P=0, C=0, F=0),
+    # M1 a British EAN-8 (stored 0000050...) also sold in Germany: local enough for the UK pool (second fix pass)
+    s6_row("50123459", name="English Mustard", brand="Colman's", ctry="en:germany," + UK, scans=6,
+           kcal=190, P=6.6, C=16, F=10, ss="5g", sq=5),
+    # M2 a product of MUST_HAVE_UK, unscanned and sold in four other countries: picked first for the UK pool
+    s6_row("6003770000168", name="PERi-PERi Sauce Medium", brand="Nando's", ctry="en:australia,en:france," + UK,
+           scans=0, kcal=51, P=0.5, C=1.5, F=4.5, ss="1 portion (20 g)", sq=20),
+]
+assert len(step6) == 19, len(step6)
+write("off_step6.csv", step6, SERVING_HEADER)

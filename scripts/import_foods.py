@@ -57,6 +57,7 @@ upgraded has none; the export refuses to fill a market pool from such a database
 import argparse
 import csv
 import datetime
+import collections
 import gzip
 import hashlib
 import html
@@ -111,7 +112,7 @@ MERGE_KCAL_FLOOR = 5.0          # ... or 5 kcal, whichever is more
 # label typed the same way). The others are read from the name and the calories, which the
 # twin shares. See _absorb and _better_twin.
 OWN_DOUBTS = ("macro_mismatch", "dense_low", "drink_high", "mix_low", "zero_food", "per_serving_as", "per_bottle_as")
-SERVING_DOUBTS = ("per_serving", "per_bottle")
+SERVING_DOUBTS = ("per_serving", "per_bottle", "per_bottle_zero", "uk_huge_serving", "uk_powder_made_up", "uk_meal_low")
 
 # Open Food Facts: the only columns read out of roughly 200, and the countries that are kept.
 OFF_COLUMNS = (
@@ -469,6 +470,8 @@ class Importer:
         self.asia_rebased = 0
         # Rows from other markets kept but marked as not to be chosen for the app (see pool_doubt), by reason.
         self.doubts = {}
+        # Step 6 repairs and marks, by kind (see import_off).
+        self.step6 = collections.Counter()
         self._waiting = []                                  # cleaned rows not yet written
         self._order = 0                                     # 1, 2, 3 ... in the order rows are read
         conn.create_function("regions_union", 2, regions_union)
@@ -688,7 +691,7 @@ class Importer:
                 "invalid": self.invalid, "duplicates": self.duplicates, "total_rows": total,
                 "repaired": self.repaired, "filled": self.filled, "off_dropped": dict(self.off_dropped),
                 "aliases": aliases, "serving_typed": dict(self.serving_typed), "asia_rebased": self.asia_rebased,
-                "doubts": dict(sorted(self.doubts.items()))}
+                "doubts": dict(sorted(self.doubts.items())), "step6": dict(sorted(self.step6.items()))}
 
 
 def _same_food(kept, row, key):
@@ -731,7 +734,13 @@ def _better_twin(keeper, row):
         return False                # a neighbouring-market row never replaces a row of the five markets
     if _philippine_kept(keeper) or _philippine_kept(row):
         return False
-    return keeper.doubt in OWN_DOUBTS or (keeper.doubt in SERVING_DOUBTS and row.portions != "[]")
+    return keeper.doubt in OWN_DOUBTS or (keeper.doubt in SERVING_DOUBTS and has_serving(row.portions))
+
+
+def has_serving(portions):
+    """True when a stored portions text holds a serving of the source's own: not "[]" and not only a
+    portion worked out from the pack size (PACK_MARK, see asia_pack_portion and uk_review)."""
+    return portions != "[]" and not portions.endswith(',"pack"]]')
 
 
 def _absorb(keeper, loser, by_name):
@@ -803,8 +812,8 @@ def _absorb(keeper, loser, by_name):
 
     if by_name:
         keeper.popularity = max(keeper.popularity or 0, loser.popularity or 0)
-        no_serving = keeper.portions == "[]"
-        if keeper.source == "off" and no_serving and loser.portions != "[]":
+        no_serving = not has_serving(keeper.portions)
+        if keeper.source == "off" and no_serving and has_serving(loser.portions):
             keeper.portions = loser.portions
         if (keeper.source == "off" and loser.doubt and not keeper.doubt and loser.doubt not in OWN_DOUBTS
                 and (no_serving or loser.doubt not in SERVING_DOUBTS) and not _philippine_kept(keeper)):
@@ -2221,6 +2230,135 @@ KNOWN_WRONG = {
     "8801392037139": "Bibigo tteokbokki at 322 kcal (half a pack's figures worked out from kJ; about 180)",
     "8996001526378": "Mayora Wow spageti at 300 kcal (the 75 g pack's figures; about 400)",
     "8888030303191": "FairPrice Natural Fruits & Nuts at 146 kcal (a fruit and nut mix is about 450)",
+    # read in step 6 (November 2026): the Japan, Korea and Asia pools
+    "4904621042196": "Daisho Nabe soup base at 1 kcal (its own macros give 13)",
+    "4902201446273": "Starbucks black iced coffee concentrate at 43 kcal with 3.1 g protein and 1.5 g fat (about 10)",
+    "8809059296523": "Hosan seasoned seaweed snack at 300 kcal with 50 g fat (its macros give 650; about 560)",
+    "9555487800038": "Farm Fresh Pure Fresh Milk at 26 kcal per 100 ml (about 65)",
+    "9556001267948": "Maggi Jap ter noodles at 72 kcal (a dry noodle pack is about 450)",
+    "8997035600645": "Pocari Sweat at 0 kcal (about 26)",
+    "8999918182095": "Anekabis Gabin cracker at 140 kcal with 20.8 g protein (a cracker biscuit is about 450)",
+    "4902201183901": "Matcha Latte KitKat at 369 kcal (a KitKat is about 540)",
+    "4903711148305": "7-Eleven Banana Milk Smoothie at 152 kcal per 100 g (about 75; likely the bottle's figures)",
+    "8801043015639": "Nongshim kimchi ramen at 32 kcal with a 1,170 g serving (about 420)",
+    "8850999111001": "Singha beer at 660 kcal per 100 ml (about 42; a figure worked out from a wrong alcohol value)",
+    "8801382150244": "Marlin Apple Mango Juice at 0 kcal (about 45)",
+    "8801047289685": "Omija Five Flavor Juice at 2 kcal (about 40)",
+    "0028400152693": "Lay's Cheddar & Sour Cream chips at 156 kcal (about 540)",
+    # the US pool
+    "0861525000339": "Phonomenal Ripened Jackfruit Chips at 167 kcal (its macros give 107; about 500)",
+    "0051500006962": "Smucker's Strawberry Jelly at 331 kcal (about 260)",
+    "0038000183393": "Kellogg's Froot Loops at 469 kcal (its macros give 404; about 380)",
+    "4062139015436": "pepsi at 1 kcal per 100 ml (the regular drink its name says has sugar)",
+    "0810206001110": "Massel chicken stock cubes at 308 kcal with 0.1 g protein (macros per 2.6 g cube, calories per 100 g)",
+    "0000007825600": "A&W Root Beer at 0 kcal (about 47)",
+    "0052000208078": "Gatorade Thirst Quencher Orange at 4 kcal per 100 ml (about 25)",
+    "0096619196470": "Kirkland Heart Healthy Mixed Nuts at 200 kcal (about 610)",
+    "0000000062534": "Trader Joe's unsalted butter quarters at 164 kcal (about 717)",
+    # the UK pool
+    "8445290616944": "Nestle Quality Street at 471 kcal, right, but its first portion '3 pieces (100 g)' (3 pieces weigh about 25 g)",
+    "0000054492127": "Sprite mini 150 ml at 47 kcal per 100 ml (its kJ give 22)",
+    "0777777111122": "Fresh Express Coconut Water at 150 kcal per 100 ml (coconut milk's figures; about 20)",
+    "7622202023804": "Cadbury High Lights drink powder at 190 kcal (its kJ give about 350)",
+    "5013665103134": "Kallo very low salt vegetable stock cubes at 90 kcal with made-up stock's macros (8 kcal; a cube is about 250)",
+    # read in the final check of step 6
+    "8935090913560": "Dan-D Pak almonds at 330 kcal (about 580)",
+    "8801056001667": "Lotte Mango Drink at 96 kcal per 100 ml (a can's figures; about 45)",
+    "8801128240147": "Hot Brew Vanilla Latte at 130 kcal per 100 ml (351 for a 270 ml can; a canned latte is about 50 per 100 ml)",
+    # read by the three checks of step 6: labels typed per serving with matching macros, which no rule tells
+    "5000328014876": "Doritos Nacho Cheese (UK) at 206 kcal (about 500)",
+    "5010067373417": "Allinson's Easy Bake Yeast at 2 kcal (dried yeast is about 350)",
+    "5059319020730": "Kellogg's Extra granola milk chocolate at 212 kcal (about 450)",
+    "5038862233996": "innocent Super Smoothie Energise at 7 kcal per 100 ml (about 53; a 750 ml bottle's figures divided again)",
+    "4025500279813": "Cadbury Dairy Milk Made to Share at 231 kcal (about 530)",
+    "4025500306694": "Cadbury Dairy Milk with Twirl pieces at 264 kcal (about 530; half a bar's figures)",
+    "8888056603862": "Koka The Original Chicken Flavour noodles at 81 kcal opening on 100 g (prepared figures; the dry pack is about 470)",
+    "8885012290494": "Ribena Blackcurrant Fruit Cordial at 116 kcal per 100 ml of concentrate opening on 200 ml (232 kcal for a glass of about 45)",
+    # read in the second fix pass of step 6 (rows whose figures belong to a spoonful, a made-up drink or nothing)
+    "7460193700270": "Manicera fat spread at 67 kcal with 7 g fat (one spoonful's figures; a spread is about 600)",
+    "0040100009282": "Fleischmann's Active Dry Yeast at 0 kcal (dried yeast is about 325)",
+    "5000354909924": "Bisto at 12 kcal opening on 100 g (made-up gravy figures on the granules)",
+    "8445291686069": "Nescafe espresso concentrate at 43 kcal with 3.1 g protein and 1.5 g fat (the Starbucks concentrate's figures)",
+    "5034660021445": "Cadbury Bournville Cocoa at 56 kcal opening on 204 g (made-up drink figures; cocoa powder is about 350)",
+    "8801526212319": "Good Korean yogurt drink at 9 kcal per 100 ml opening on 325 ml (a yogurt drink is about 60)",
+    "4892218029159": "Knorr Fish Dense Soup at 18 kcal opening on 100 g (made-up broth or one 8 g serving: cannot tell)",
+}
+# Rows of the Philippine part of the list read by hand and found plainly wrong (step 6). The
+# Philippine part takes every Philippine row whatever the doubt tests say, so these are left out
+# of it by barcode. KNOWN_TWIN names, for some of them, the barcode of a believable row of the same
+# product; typing the wrong row's barcode then finds that row.
+KNOWN_WRONG_PH = {
+    "8801043014090": "Nongshim Shin Ramyun at 104 kcal with a 507 g pack (as-prepared figures; the dry pack is about 433)",
+    "4806014000243": "Doña Elena Anchovies at 30 kcal (one serving's figures; about 200)",
+    "4803925033124": "7 up Regular at 0 kcal per 100 ml (about 40)",
+    "4806527711582": "Royal Crown Cola at 0 kcal per 100 ml (about 44)",
+    "4806527712336": "RC Cola Carbonated Cola Drink at 0 kcal per 100 ml (about 44)",
+    "4804888899925": "Zesto root beer at 0 kcal per 100 ml (about 40)",
+    "4803925251917": "Mountain Dew 500ml at 1 kcal per 100 ml (about 48)",
+    "4809015337028": "Mani (peanuts) at 53 kcal (about 570)",
+    "4809010109781": "Otap Sugar Biscuits at 220 kcal (its macros give 342; about 450)",
+    "4800422120333": "BTIC Chunky Cookies & Cream at 32 kcal (ice cream is about 180)",
+    "4803925480133": "Cheetos at 172 kcal (about 520)",
+    "4800016633614": "Piattos Nacho Pizza at 150 kcal (about 500)",
+    "4800016666261": "Nova Multigrain at 140 kcal (about 480)",
+    # read by the checks of step 6
+    "7622210777768": "Cadbury Dairy milk Chunks at 25 kcal (milk chocolate is about 530)",
+    "4800888603692": "knorr sinigang original 11g at 0 kcal (a soup-mix powder is about 300)",
+    "4800888600219": "knorr sinigang miso 23g at 6 kcal (a soup-mix powder is about 300)",
+    "4800361317528": "Sinigang at 6 kcal (its own macros give 19; the mix is about 300)",
+    # read in the second fix pass of step 6: coffee, chocolate-drink and milk powders and drink mixes
+    # under 200 kcal (the dry powder is 350 to 520) whose sachet weight is not known, and a light soda
+    # carrying the regular drink's figures
+    "4801981110001": "Coke light at 42 kcal per 100 ml with 10.5 g sugar (regular Coke's figures; about 0.3)",
+    "8998666001719": "Kopiko Brown Twin at 110 kcal with 20 g sugar (one sachet's figures; 20 g of sugar does not fit a 20 g sachet)",
+    "4800361339568": "Nescafe Classic stick at 5 kcal (one cup's figures on the instant coffee)",
+    "4800016091131": "Swiss Miss at 130 kcal (one envelope's figures; the powder is about 420)",
+    "4800361393232": "Nestle Coffee Mate at 27 kcal (one spoonful's figures; the creamer is about 540)",
+    "4800361396714": "Milo at 71 kcal (a made-up glass's figures; the powder is about 400)",
+    "8888296051157": "Gold Kili Green Tea Latte at 56 kcal (224 on its 25 g sachet; the mix is about 430)",
+    "4806501598956": "Anchor Milk at 150 kcal (one 33 g serving's figures, with no protein given)",
+    "4800361401203": "Bear Brand Fortified Strawberry at 120 kcal (a serving's figures; the powder is about 450)",
+    "0748485401737": "Birch Tree milk powder at 118 kcal (a made-up glass's figures; the powder is about 480)",
+    "8998866610582": "TOP Cafe Brewed 3in1 at 97 kcal (one sachet's figures; the mix is about 430)",
+    "4800040115070": "Cafe Puro at 105 kcal (a sachet's figures; the powder is 350 to 450)",
+    "8888030311349": "FairPrice 3 in 1 White Coffee Hazelnut at 68 kcal (a made-up cup's figures)",
+    "4800361417198": "Nestea Lemon Cucumber Green Tea powder at 32 kcal (a made-up glass's figures)",
+    "4809012007030": "Instant Salabat at 15 kcal (a made-up cup's figures; the ginger powder is about 380)",
+    "8717896007168": "Nido Fortifie at 132 kcal (made-up milk's figures; the powder is about 500)",
+    "0106350004115": "Caffe D'Vita Cappuccino Mocha at 0 kcal (the mix is about 440)",
+}
+KNOWN_TWIN = {"8801043014090": "0031146022861"}     # Shin Ramyun at 104 -> SHIN RAMYUN at 433
+# Rows whose label was typed for one serving or one pack, where that serving is known (read by
+# hand, step 6): barcode -> (grams of the serving, its label, the portion to open on or None, the
+# calories per 100 g the row carried when it was read: see known_per_pack_fix). The
+# figures are re-based to 100 g (basis "estimate") and the serving is put first, as the re-base
+# repair does for the rows a rule finds (see rebase_on_serving).
+KNOWN_PER_PACK = {
+    "4550583361488": (165, "1 pack (165 g)", None, 358),         # Muji Morioka cold noodles at 358 -> 217
+    "8809750474312": (210, "1 container (210 g)", None, 310),    # Good today black rice at 310 -> 148
+    "8801382148524": (500, "1 bottle (500 ml)", None, 40),      # Woongjin Teazle yuja green tea at 40 -> 8
+    "8850389121023": (500, "1 bottle (500 ml)", None, 40),      # B'lue Vitamin Water at 40 -> 8
+    "8996006856715": (500, "1 bottle (500 ml)", None, 120),      # Tebs sparkling at 120 -> 24
+    "8998666003072": (23, "1 sachet (23 g)", None, 90),         # Torabika Gilus Mix at 90 -> 391
+    "4967825003325": (1.7, "1.7 g", None, 6),                  # Kinjirushi Kona Wasabi at 6 -> 353
+    "4902087120007": (15, "1 tbsp (15 ml)", None, 4),          # Tamanoi grain vinegar at 4 -> 27
+    "9557727931663": (250, "1 bottle (250 ml)", None, 128),      # Goodday Charge at 128 -> 51
+    "4987035032410": (80, "1 pack (80 g)", ("2 blocks (40 g)", 40), 400),    # Calorie Mate Maple at 400 -> 500
+    "9556001177339": (57, "1 cup (57 g)", None, 254),            # Maggi cup ayam at 254 -> 446
+    "0074923405068": (50, "1 pack (50 g)", None, 270),           # Pik-Nik shoestring potatoes at 270 -> 540 (Philippine shelf)
+    "8850389116753": (320, "1 bottle (320 ml)", None, 150),      # Mogu Mogu watermelon at 150 -> 47
+    "8809041429649": (500, "1 bottle (500 ml)", None, 225),      # OKF watermelon with aloe at 225 -> 45
+    "4804880314181": (15, "1 tbsp (15 g)", None, 135),           # Pur palm cooking oil at 135 -> 900 (Philippine shelf)
+    # second fix pass of step 6
+    "8998666001702": (20, "1 sachet (20 g)", None, 90),          # Kopiko Black Twin 40g (2 x 20 g) at 90 -> 450
+    "4800361413992": (20, "1 sachet (20 g)", None, 94),          # Nescafe Twin Creamy Latte 40g (2 x 20 g) at 94 -> 470
+    "4800016021039": (30, "1 sachet (30 g)", None, 140),         # Great Taste White 30g at 140 -> 467
+    "4806501594002": (10, "1 serving (10 g)", None, 63),         # Anchor Spreadable at 63 -> 630
+    "4969556644785": (150, "1 pack (150 g)", None, 364),         # Maibasket egg salad and ham sandwiches at 364 -> 243
+    "8801045053103": (18, "1.25 tbsp (18 g)", None, 70),         # Ottogi Corn Cream Soup Powder at 70 -> 389
+    # Koka chicken cup: figures per 100 g of the made-up 390 g cup, from a 70 g dry cup (80 -> 446);
+    # the fifth item is the weight of the portion shown, when it is not the first item
+    "8888056705108": (70 * 100 / 390, "1 cup (70 g)", None, 80, 70),
 }
 _LIQUID_LABEL = re.compile(r"\d\s*(?:ml|cl|l|liters?|litres?)\b|fl\.?\s*oz|\bfloz\b", re.I)
 _SHAKE_NAME = re.compile(r"shake|nutrition|ensure|boost|osmolite|protein|formula|meal|huel|soylent|kate farms", re.I)
@@ -2267,16 +2405,16 @@ def _on_grid(value, step, slack=_GRID_SLACK):
     return value is not None and abs(value / step - round(value / step)) * step <= slack
 
 
-def pool_doubt(row, serving_size, serving_g, categories, alcohol=None):
+def pool_doubt(row, serving_size, serving_g, categories, alcohol=None, uk=False):
     """Why a row from outside the Philippines should not be chosen for the app ("" = no reason).
 
     row: the cleaned row (numbers per 100 g, checked by apply_rules); serving_size and
     serving_g: the source's serving text and weight; categories: categories_en; alcohol:
-    grams of alcohol per 100 g when the source states it. See the notes above for each
-    reason. The row is not changed.
+    grams of alcohol per 100 g when the source states it; uk: the row is of the British shelf
+    (see uk_shelf). See the notes above for each reason. The row is not changed.
     """
     name = row["name"] or ""
-    if _NOT_FOOD.search(name) and not _COFFEE_NAME.search(name):
+    if _NOT_FOOD.search(name) and not _COFFEE_NAME.search(name) and not (uk and _UK_NOT_PILLS.search(name)):
         return "not_food"
     if row["barcode"] in KNOWN_WRONG:
         return "listed"
@@ -2336,6 +2474,9 @@ def pool_doubt(row, serving_size, serving_g, categories, alcohol=None):
         if why:
             return why
 
+    if not uk and dry_noodle(row):
+        return "dry_noodle"
+
     drink_place = any(_DRINK_CATEGORY.match(item.strip()) for item in (categories or "").split(","))
     if (drink_place and _JUICE_NAME.search(name) and 100 < kcal <= 300 and not _NOT_JUICE.search(name)
             and not _DENSE_LIQUID.search(name) and not _PIECE_LABEL.search(label)
@@ -2353,6 +2494,453 @@ def pool_doubt(row, serving_size, serving_g, categories, alcohol=None):
         if kcal > ceiling + max(0.25 * ceiling, rounding, 15) and not is_alcoholic(row, alcohol, categories or ""):
             return "macro_mismatch"
     return ""
+
+
+# ---------------------------------------------------------------------------------------
+# Step 6 (November 2026): rules measured by reading rows by hand. Each was kept only where
+# its marks were right about nine times in ten or better on the rows read.
+# ---------------------------------------------------------------------------------------
+
+def rebase_on_serving(row, grams, label, first=None):
+    """Turn figures typed for one serving of `grams` into figures per 100 g: basis "estimate",
+    the serving (or `first`, a (label, grams) portion to open on) pinned as the first portion."""
+    factor = 100.0 / grams
+    for column in ("calories_kcal",) + GRAM_COLUMNS:
+        if row[column] is not None:
+            row[column] = row[column] * factor
+    sodium = row["sodium_mg"]
+    row["sodium_mg"] = None if sodium is None or sodium * factor > SERVING_SODIUM_MAX else sodium * factor
+    row["basis"] = "estimate"
+    amount = tidy_number(round(grams, 2))
+    lead = [[str(label)[:60], amount, PIN_MARK]]
+    if first:
+        lead = [[first[0], first[1], PIN_MARK], [str(label)[:60], amount]]
+    weights = {p[1] for p in lead}
+    row["portions"] = lead + [p[:2] for p in row["portions"] or [] if p[1] not in weights]
+
+
+def known_per_pack_fix(row):
+    """Re-base a row of KNOWN_PER_PACK on its pack or serving. True when done.
+
+    Only while the row still carries the calories that were read as wrong (within 15 %, or 1.5 kcal):
+    a label corrected later at Open Food Facts is not divided a second time. The row's other
+    portions are dropped: they belong to the old figures (Gilus Mix's "150 ml" of made-up drink)."""
+    entry = KNOWN_PER_PACK.get(row["barcode"] or "")
+    if not entry or row["per_unit"] != "100g":
+        return False
+    grams, label, first, wrong_kcal = entry[:4]
+    kcal = row["calories_kcal"]
+    if kcal is None or abs(kcal - wrong_kcal) > max(0.15 * wrong_kcal, 1.5):
+        return False
+    row["portions"] = []
+    rebase_on_serving(row, grams, label, first)
+    if len(entry) > 4:                      # the portion shown weighs entry[4] (Koka: a 70 g dry cup)
+        row["portions"] = [[label, tidy_number(entry[4]), PIN_MARK]]
+    return True
+
+
+def _first_grams(row):
+    """(label, grams) of the row's first portion, or ("", None)."""
+    portions = row["portions"] or []
+    return (str(portions[0][0]), portions[0][1]) if portions else ("", None)
+
+
+# E. Low-calorie bottled drinks storing the whole bottle per 100 ml. Read on every candidate of
+# the Japan, Korea, Asia, US and UK pools: a drink called zero, diet or sugar-free (a soda, a tea,
+# an energy drink; not coffee, milk, juice or alcohol) with a serving of 200 ml or more and more
+# than 12 kcal per 100 ml: 7 rows, all 7 wrong (Milkis Zero at 16 with a 500 ml bottle, Lipton
+# Diet iced tea at 14, Polar Diet at 16.7, Irn Bru zero at 83, Dr Pepper diet cherry at 42, NOS zero
+# at 62.5, Ocean Spray Diet Cranberry at 33.9). When the bottle's figures make 6 kcal or less per
+# 100 ml the row is re-based on the bottle; otherwise it is kept out ("per_bottle_zero").
+_ZERO_WORDS = re.compile(r"(?<![a-z])(?:zero|diet|sugar[ -]?free|zero sugar|no sugar(?! added))(?![a-z])|제로|ゼロ", re.I)
+_ZERO_NOT_SODA = re.compile(
+    r"milk(?!is)|soy|soya|almond|(?<![a-z])oat|coconut|cashew|yog|kefir|protein|shake|latte|au lait|lait|coffee|espresso"
+    r"|mocha|macchiato|creamer|cream|smoothie|cocoa|chocolate|juice|nectar|zero fat|fat free|0% fat|soup|sauce|ketchup"
+    r"|syrup|squash|cordial|concentrate|powder|alcohol|beer|lager|(?<![a-z])ale(?![a-z])|(?<![a-z])ipa(?![a-z])|cider|seltzer"
+    r"|wine|sake|soju|chu-?hi|highball|whisk|vodka|(?<![a-z])gin(?![a-z])|(?<![a-z])rum(?![a-z])|liqueur|cocktail|mocktail"
+    r"|zero.proof|ultra|michelob|hyoketsu|horoyoi|strong zero|-196|(?<![a-z])sour(?![a-z])|ミルク|ラテ|우유|두유|コーヒー|커피"
+    r"|ビール|酒|소주|맥주|サワー|チューハイ|ハイボール"
+    # beers, ciders and premixes named zero (alcohol-free or sugar-free) are round per 100 ml (step 6 checks:
+    # Budweiser ZERO at 13.7, Birra Moretti Zero, Smirnoff Ice Zero, Leitz Zero Point Five, Cass Zero)
+    r"|budweiser|guinness|heineken|corona|dos equis|moretti|peroni|carlsberg|san miguel|(?<![a-z])cass(?![a-z])"
+    r"|smirnoff|jack daniel|bacardi|gordon'?s|leitz|long drink|0[.,]0 ?%|alcohol.?free|non.?alc", re.I)
+# A drinks category, read item by item: "Plant-based foods and beverages" (most plant foods) is none.
+_ZERO_DRINK_CATEGORY = re.compile(r"(?!.*\bfoods?\b).*\b(?:beverages|drinks|sodas|teas|waters)", re.I)
+
+
+def zero_bottle_fix(row, serving_size, serving_g, categories):
+    """Item E above: "rebased", "per_bottle_zero" or "".
+
+    A row with 1.5 g of protein or 0.5 g of fat per 100 ml or more is no diet soda (a milk coffee
+    such as Starbucks Doubleshot Energy Zero at 18 kcal with 2.2 g protein and 0.7 g fat is per
+    100 ml already; Milkis Zero, a bottle's figures, has 1 g protein and no fat)."""
+    name_brand = (row["name"] or "") + " " + (row["brand"] or "")
+    if row["per_unit"] != "100g" or not _ZERO_WORDS.search(name_brand) or row["calories_kcal"] <= 12:
+        return ""
+    if (row["protein_g"] or 0) >= 1.5 or (row["fat_g"] or 0) >= 0.5:
+        return ""
+    label = clean_text(serving_size)
+    grams = serving_g if serving_g is not None else (text_weight(label) if label else None)
+    if grams is None or not 200 <= grams <= 2000:
+        return ""
+    drinks_place = any(_ZERO_DRINK_CATEGORY.fullmatch(item.strip()) for item in (categories or "").split(","))
+    liquid = _LIQUID_LABEL.search(label) or drinks_place
+    if not liquid or _ZERO_NOT_SODA.search(name_brand + " " + (categories or "")):
+        return ""
+    if row["calories_kcal"] * 100.0 / grams <= 6:
+        amount = tidy_number(round(grams, 1))
+        named = re.search(r"\d", label) and re.search(r"[a-z]", label, re.I) and not re.search(r"\d\s*g\s*$", label, re.I)
+        rebase_on_serving(row, grams, label if named else f"{amount} ml")
+        return "rebased"
+    return "per_bottle_zero"
+
+
+# F. Dry instant-noodle packs typed with prepared (or partial) figures, read by the kind of food
+# rather than the brand: an instant noodle, ramyun, mi goreng, cup noodle or "<flavour> noodles"
+# product (not soup, chilled, fresh, frozen or ready meals, udon, soba, sauces, snacks) under 300
+# kcal with 3 g of fat or more is a dry fried block (about 450) with the wrong figures, unless its
+# first portion is a whole prepared cup (200 to 800 g that makes 250 to 700 kcal). Read on the
+# Japan, Korea, Asia and US candidates: 23 marked, 21 wrong rows (Top Ramen at 224, Indomie mi
+# goreng at 219, Koka at 213, Samyang at 270). Not asked of British rows, whose labels give the
+# figures as prepared on purpose.
+_DRY_NOODLE = re.compile(
+    r"instant (?:noodles?|ramen|mi(?![a-z])|mie|mee|ramyun|ramyeon)|noodles? instan|ramyun|ramyeon|ramyon|(?<![a-z])mi goreng"
+    r"|mie goreng|mee goreng|cup noodles?|cup ramen|top ramen|pancit canton|(?<![a-z])ramen noodles?|oriental noodles?"
+    r"|bowl noodle|noodle bowl instant|chapagh?etti|jjapaguri|neoguri|buldak|mie sedaap|indomie|(?<![a-z])mama (?:instant|noodle)"
+    r"|(?:chicken|beef|shrimp|pork|curry|kimchi|seafood|spicy|tom ?yum|vegetable|laksa|soto|ayam|oriental|mushroom|sesame"
+    r"|black bean|jjajang|kari|asam) (?:flavou?r(?:ed)? )?(?:instant )?(?:noodles|ramen)(?! soup)|ラーメン|라면|라볶이|짜파게티", re.I)
+_NOT_DRY_NOODLE = re.compile(
+    r"(?<!noodle )soup(?! base)|chilled|fresh|frozen|refrigerat|ready|cooked|heat|bowl(?! noodle)|kit|meal"
+    r"|with (?:chicken|beef|pork|shrimp)|yakisoba|udon|soba|vegetables? for|cut vegetables|soup base|dumpling|mandu|gyoza"
+    r"|sosis|sausage|bbq chicken|broth|stock|seasoning|sauce|paste|snack|chips|crisps|cracker|shirataki|konjac|keto|zero"
+    r"|tofu|salad|生|冷凍|チルド|鍋|スープ|kimbap|sapporo .*butter", re.I)
+_SNACK_NOODLE = re.compile(r"ppushu|snack noodle|baby star|mamee monster|ramen snack|chicken ramen snack|크런치|뿌셔", re.I)
+_NOODLE_WORD = re.compile(r"noodle|ramen|ramyun|ramyeon|ramyon|mi goreng|(?<![a-z])mie(?![a-z])|(?<![a-z])mee(?![a-z])|pancit|yakisoba|ラーメン|라면|麺|면|mì", re.I)
+
+
+def dry_noodle(row):
+    """Item F above: True for a dry instant-noodle pack carrying too few calories."""
+    name = row["name"] or ""
+    kind = (_DRY_NOODLE.search(name + " " + (row["brand"] or "")) and not _NOT_DRY_NOODLE.search(name)
+            and not _SNACK_NOODLE.search(name)) \
+        or (re.search(r"instant|cup noodle|bowl noodle", name, re.I) and _NOODLE_WORD.search(name)
+            and not _NOT_DRY_NOODLE.search(name.replace("Noodle Soup", "Noodle")))
+    if not kind or row["calories_kcal"] >= 300 or (row["fat_g"] or 0) < 3 or re.search(r"puffs?|(?<![a-z])with ", name, re.I):
+        return False
+    grams = _first_grams(row)[1]
+    if grams and 200 <= grams <= 800 and 250 <= row["calories_kcal"] * grams / 100 <= 700:
+        return False                                    # a whole prepared cup: the figures are as prepared, on purpose
+    if not grams and re.search(r"(?<![a-z])cup(?![a-z])", name, re.I):
+        return False                                    # a cup with no weight: its figures may be as prepared
+    return True
+
+
+# A plain cooking oil (the name ends in "oil": "Sesame Oil", "Pure Coconut Oil") under 700 kcal
+# carries a spoonful's figures (Good Life sesame oil at 120 with 15 ml, palm olein at 135) or
+# another food's (Dong Won sesame oil at 596 with 17.9 g protein). With a spoon-sized serving (5 to
+# 30 g) that makes 780 to 930 kcal per 100 g, the row is re-based on it; otherwise it is kept out
+# ("oil_low"). Asked of Philippine rows too, where it decides whether the row is exported.
+_OIL_NOT = re.compile(r"spray|essential|massage|baby oil|hair|fish oil|cod liver|krill|cbd|hemp seed oil capsules|in oil|chil[il]|crisp"
+                      r"|tuna|sardine|salmon|mackerel|anchov|seaweed|laver|flakes?|flks|garlic|onion|shallot|\bn oil|snack|chips"
+                      r"|bean|pepper|truffle|infused|flavou?red|dressing|scallion|lard|bread|ciabatta|focaccia|crackers?|popcorn"
+                      r"|crostini|wraps?|(?<![a-z])bars?(?![a-z])|almonds|tortilla|pretzels?|crisps|biscuits?", re.I)
+_OIL_KIND = re.compile(r"sesame|olive|coconut|palm|olein|vegetable|canola|rapeseed|sunflower|corn|soy|soya|soybean|peanut|groundnut"
+                       r"|rice bran|avocado|cooking|grapeseed|safflower|perilla|walnut|almond|mustard|flaxseed|linseed|virgin", re.I)
+
+
+def oil_fix(row, serving_g):
+    """"rebased", "oil_low" or "" (see above)."""
+    name = row["name"] or ""
+    kcal = row["calories_kcal"]
+    if row["per_unit"] != "100g" or not _PLAIN_OIL.search(name) or _NOT_PLAIN_OIL.search(name) or _OIL_NOT.search(name) \
+            or not _OIL_KIND.search(name) or not 0 < kcal < 700:
+        return ""
+    label, grams = _first_grams(row)
+    if grams is None:
+        grams = serving_g
+    if grams and 5 <= grams <= 30 and 780 <= kcal * 100.0 / grams <= 930:
+        rebase_on_serving(row, grams, label or f"{tidy_number(round(grams, 1))} g")
+        return "rebased"
+    return "oil_low"
+
+
+# --- The British shelf (the UK pool) ---
+# British labels are per 100 g by law, so the US per-serving tests stay off for them (switched on,
+# they were right on 4 of 45 rows). The traps are others; each rule below was measured on the
+# British candidates (rows tagged UK and not US, or British packs, see british_pack).
+#   kJ        a row marked macro_mismatch whose own kJ figure fits its macros (within 12 %) takes
+#             its calories from the kJ (basis "estimate"): Weetabix at 227 becomes 366. Not for
+#             fruit and the like (protein under 2 g and fat under 1 g). 45 read, 41 right.
+#   not_food  multivitamin juices and squashes and flaxseed with CoQ10 are food (14 of 25 marks wrong).
+#   uk_huge_serving   a first portion over 1.5 kg is dropped; a row that is no drink and has under
+#             20 kcal was divided by it and is kept out (11 of 11 right).
+#   stock     stock cubes, pots and gravy stored as made up (under 50 kcal) open on "100 ml made up",
+#             not on a 10 g cube (45 of 45 right).
+#   gravy     dry granules (250 kcal or more) lose a made-up serving of 30 ml or more (10 of 11).
+#   squash    squash or cordial stored diluted (30 kcal or less) opens on a diluted glass, 250 ml,
+#             not on a 35 ml measure of concentrate (12 of 13; 45 of 45 without a serving). Diluted
+#             means 5 kcal or less (no added sugar) or 3 g of sugar or carbs or more (a sugared drink made up):
+#             a no-added-sugar concentrate at 10 to 18 kcal with 2 g of sugar (Robinsons Double
+#             Concentrate at 18) is undiluted and keeps its own portions (step 6 checks).
+#   uk_powder_made_up  cappuccino, latte, hot chocolate, Coffee Mate and malt-drink powders under
+#             120 kcal with a dry sachet of 40 g or less carry the made-up figures (16 of 17).
+#   bread     bread under 180 kcal: re-based when a 20 to 100 g slice makes 200 to 330 kcal (8 of 8),
+#             otherwise kept out, "uk_bread_low" (26 marks, 0 false once sauces, salsa and sushi
+#             rolls were left out).
+#   cereal    dry breakfast cereal under 300 kcal: re-based when a 20 to 80 g serving makes 320 to
+#             520 kcal with 45 to 85 g of carbs (7 of 8), otherwise kept out, "uk_cereal_low" (15 of 16).
+#   uk_butter_low  a row named just butter (salted, unsalted, British, Irish ...) under 650 kcal.
+#   uk_spirit_range  spirits outside 180 to 320 kcal per 100 ml (Open Food Facts works 660 out of
+#             a wrong alcohol figure): 8 of 8 once pickles, alcohol-free and crisps were left out.
+#   pasta     plain dry pasta, rice, noodles or couscous stored cooked (under 220 kcal) lose a dry
+#             serving of 90 g or less and open on "100 g cooked" (30 right, 10 doubtful, 0 wrong).
+#   uk_meal_low  a ready meal of 250 g or more that makes under 160 kcal (10 of 10).
+#   uk_chocolate_low  chocolate under 250 kcal (6 of 6).
+#   unit      a row with no serving whose pack reads "4 x 125g" opens on one unit (26 of 27).
+#   slice     a first portion "1 slice" of 90 g or more (a slice weighs 30 to 60 g: the label's 100 g
+#             column was read as a slice) is dropped (3 of the 2,400 rows, all three loaves).
+_UK_NOT_PILLS = re.compile(r"juice|drink|squash|boost|smoothie|nectar|cordial|flax|linseed", re.I)
+_UK_STOCK = re.compile(r"stock cubes?|stock pots?|stockpots?|bouillon|\bstock\b|gravy granules|\bcubes?\b.*\b(?:beef|chicken|veg\w*|lamb"
+                       r"|ham|fish)\b|\boxo\b", re.I)
+_UK_NOT_STOCK = re.compile(r"soup|noodle|crisps|pie|sausage|ramen|potatoes?|sauce\b|stock ?pot noodle", re.I)
+_UK_GRAVY_DRY = re.compile(r"gravy|bouillon powder|stock powder|bisto|granules", re.I)
+_UK_NOT_GRAVY_DRY = re.compile(r"pie|crisps|mix\b|wellington", re.I)
+_UK_SQUASH = re.compile(r"squash|cordial|dilut|double (?:concentrate|strength)|\bconcentrate\b", re.I)
+_UK_NOT_SQUASH = re.compile(r"butternut|soup|squashies|squashums|curry|sauce|espresso|coffee|tomato|lemon curd|ravioli|roasted"
+                            r"|risotto|vegetable|pasta"
+                            r"|juice (?:not )?from concentrate|from concentrate|not from|orzotto|whey|chai", re.I)
+_UK_POWDER_DRINK = re.compile(r"cappuccino|latte|mocha|hot chocolate|drinking chocolate|coffee.?mate|creamer|chai|cocoa\b"
+                              r"|horlicks|ovaltine|malted drink|high lights|options\b|whitener|signature chocolate", re.I)
+_UK_NOT_POWDER = re.compile(
+    r"bottle|chilled|ready to drink|iced|can\b|frappuccino|oatly|starbucks .*(?:latte|mocha|cafe)|protein|bars?\b|biscuit"
+    r"|cake|cereal|cookie|spread|yog|ice cream|truffle|dark chocolate|milk chocolate|jimmy|huel|arla|perfect ted|barista"
+    r"|skinny|liquid|cocoa (?:powder|nibs|butter)|% cocoa|cocoa orange|cocoa vanilla|cocoa hazelnut|cocoa & |cocoa oat"
+    r"|cocoa alpha|cocoa delight|cocoa bars", re.I)
+_UK_BREAD = re.compile(r"\bbread\b|\bloaf\b|bloomer|sourdough|baguettes?|\bbatch\b|\bbaps?\b|\bbagels?\b|\bpittas?\b|\bnaans?\b"
+                       r"|tortilla wraps?|\bwraps\b|ciabatta|focaccia|farmhouse|\bsliced (?:white|brown|wholemeal)|\bthick sliced\b"
+                       r"|\bmedium sliced\b|\btoastie\b|rolls\b", re.I)
+_UK_NOT_BREAD = re.compile(
+    r"crumpets?|pikelets?|crumbs|pudding|sauce|breadsticks?|croutons|crisps?|chips|garlic bread|sticks|thins?\b.*crisp|bites"
+    r"|crackers?|crispbread|flatbread thins|toasts?\b|rusks?|spring rolls?|sausage rolls?|swiss rolls?|mini rolls?|cinnamon"
+    r"|cheese|ham|chicken|egg|tuna|prawn|bacon|sandwich|meal|kit|lasagne|pizza|cake|brioche|fruit|malt loaf|teacakes?"
+    r"|hot cross|popped|lentil|tortilla chips|nachos|chocolate|choc|maple|bars?\b|butter\b|yog|sushi|dragon|salmon|maki|dosa"
+    r"|mushroom|vegetable|pate|pâté|turkey|pork|beef|dip\b|topper|flavour|drink|farmhouse (?!loaf|bread|batch)|salsa|beanies"
+    r"|california|sola\b|keto|low.?carb|protein|carb|high fibre|high fiber|thin", re.I)
+_UK_CEREAL = re.compile(r"granola|muesli|porridge oats|porage oats|rolled oats|jumbo oats|scottish oats|steel cut oats|weetabix"
+                        r"|bran flakes|cornflakes|corn flakes|shreddies|shredded wheat|special flakes|fruit (?:&|and) fibre"
+                        r"|wheats\b|malted wheats", re.I)
+_UK_NOT_CEREAL = re.compile(
+    r"bars?\b|\bpots?\b|ready|drink|milk\b|yog|cookies?|biscuits?|squares|overnight|made with|flapjack|oat ?(?:milk|drink"
+    r"|cream)|oatly|nordic oats|so simple|instant|sachet|golden syrup|bites\b|porridge pot|squash|prepared|\bpouch|bread|bagel"
+    r"|baguette|pitta|loaf|baby|hipp|bircher|hoops|kefir|yogurt|on the go|caff[eè]|latte|rounds|alpro|yeo", re.I)
+_UK_BUTTER_WORDS = frozenset((
+    "salted", "unsalted", "lightly", "slightly", "british", "irish", "scottish", "welsh", "english", "cornish", "jersey",
+    "organic", "pure", "dairy", "creamery", "block", "fresh", "farmhouse", "traditional", "churned", "slow", "west", "country",
+    "danish", "french", "president", "président", "lurpak", "anchor", "kerrygold", "yeo", "valley", "country", "life",
+    "wyke", "farms", "graham's", "grahams", "the", "family", "sainsbury's", "tesco", "asda", "morrisons", "waitrose",
+    "aldi", "lidl", "m&s", "ocado", "co-op", "finest", "taste", "the", "difference", "essential", "by", "deluxe", "luxury",
+    "all", "natural", "grass", "fed", "salt", "sea", "with", "crystals", "&", "and", "of", "cows", "cow's", "milk"))
+_UK_NOT_BUTTER = re.compile(r"butterly|buttery|believe|spread|blend|light|lighter|vegetable|olive|plant|vegan|peanut|nut\b|cocoa|shea", re.I)
+_UK_SPIRIT_CATEGORY = re.compile(r"hard liquors|distilled beverages|whiskies|whiskeys|vodkas|\bgins\b|\brums\b|brandies|cognacs"
+                                 r"|tequilas|bourbons", re.I)
+_UK_NOT_SPIRIT = re.compile(r"liqueur|cream|ready|premix|\bcans?\b|tonic|cola|pickle|gherkin|alcohol.?free|non.?alc|0\.0|crisps"
+                            r"|ruffles|chocolate|truffle|sauce|marmalade|cake", re.I)
+_UK_DRY_STARCH = re.compile(r"noodles?|spaghetti|penne|fusilli|macaroni|pasta\b|tagliatelle|linguine|lasagne sheets?|lasagne pasta"
+                            r"|\brice\b|couscous|bucatini|rigatoni|conchiglie|farfalle|orzo", re.I)
+_UK_NOT_DRY_STARCH = re.compile(
+    r"microwave|pouch|ready|wok|udon|fresh|cooked|steamed|pudding|cakes?|crisp|krispies|cereal|snack|crackers?|vinegar|milk"
+    r"|drink|sauce|pot\b|cup\b|soup|salad|meal|with|&|and|pilau|egg fried|special|golden|mexican|coconut|lime|chicken|beef"
+    r"|prawn|curry|katsu|tikka|bolognese|hoops|shapes|sausage|cheese|pesto|flakes|snaps|pops|bites|chips|paper|flour|wine"
+    r"|tilda|ben'?s|uncle ben|veetee|merchant gourmet|itsu|bol\b|batchelors|super noodles|pot noodle|instant|teriyaki|satay"
+    r"|quinoa|bulgur|skinny|konjac|shirataki|paste|gochujang", re.I)
+_UK_MEAL = re.compile(r"lasagne|curry|tikka|korma|katsu|cottage pie|shepherd'?s pie|fish pie|risotto|chilli con carne|bolognese"
+                      r"|macaroni cheese|mac (?:&|and|n) cheese|carbonara|hotpot|stew|casserole|biryani|enchiladas?|moussaka"
+                      r"|paella|chow mein|pad thai|jalfrezi|masala|meatballs|roast dinner|pasta bake|mash\b", re.I)
+_UK_NOT_MEAL = re.compile(r"sauce|paste|kit|seasoning|mix\b|crisps|powder|soup|jar|spice|cooking|marinade"
+                          r"|rice\b(?!.*(?:curry|tikka|katsu|masala|chilli))|noodles only|pot noodle|stock|cubes?|pickle|chutney"
+                          r"|flavour|drink|juice|soda|tango", re.I)
+_UK_CHOCOLATE = re.compile(r"dairy milk|\d\d ?% (?:cocoa|cacao)", re.I)
+_UK_CHOCOLATE_CATEGORY = re.compile(r"(?:^|,)\s*(?:chocolates|milk chocolates|dark chocolates|white chocolates|chocolate bars)\s*(?:,|$)", re.I)
+_UK_NOT_CHOCOLATE = re.compile(r"dessert|ice cream|drink|protein|whip|mousse|sauce|powder|spread|biscuit|cookie|cake|pudding"
+                               r"|pots?\b|yog|milkshake|shake|hot chocolate|cereal|granola|frozen|lolly", re.I)
+_UK_NOT_CHOCOLATE_CATEGORY = re.compile(r"ice creams|frozen|beverages|biscuits|cakes|cereal|desserts|spreads", re.I)
+_UK_MULTIPACK = re.compile(r"(\d{1,2})\s*[x×]\s*(\d+(?:[.,]\d+)?)\s*(g|ml)\b|(\d+(?:[.,]\d+)?)\s*(g|ml)\s*[x×]\s*(\d{1,2})\b", re.I)
+
+
+def uk_shelf(barcode, brand, regions):
+    """True for a row of the British shelf: a British pack (see british_pack), or tagged UK and not US,
+    and from none of the Asian shelves or the Philippines."""
+    tags = (regions or "").split(",")
+    if "PH" in tags or barcode_origin(barcode) == "PH" or asia_market(barcode, regions):
+        return False
+    return bool(british_pack(barcode, brand, regions)) or ("UK" in tags and "US" not in tags)
+
+
+# Wheat germ 5011259055074 would, repaired, have the calories of USDA "Wheat germ" and merge into
+# that row, which would then be tagged UK too; the curated and USDA rows stay as they are.
+# Two chia seed packs (label 490 kcal, kJ 1521 and 1560) and an Ovaltine (label 375, kJ 1203) carry a
+# kJ figure that is wrong, not the calories: repaired, they fell to 365 to 373 and 287 and no longer
+# merged into USDA "Chia seeds" (486) and Ovaltine 7612100054024 (400), so typing their barcodes
+# found nothing (second fix pass of step 6). Left alone they merge, as before step 6.
+_KJ_KEEP = frozenset(("5011259055074", "5017174044582", "5056182402748", "7612100062340"))
+# British packs of dry pasta and noodles stored with the cooked figures whose serving is a cooked
+# portion or missing, so the pasta rule below (a dry serving of 90 g or less) does not see them; read
+# by hand (second fix pass of step 6). They open on "100 g cooked" too. A rule for every such row was
+# tried and marked ready meals (hoisin duck noodles, pasta bakes), so it is a list.
+KNOWN_COOKED_UK = frozenset((
+    "5010338103781",    # Blue Dragon whole wheat noodles at 164 (dry: about 340)
+    "5000119319906",    # Tesco Wholewheat Fusilli at 168, opening on a 170 g cooked portion
+    "5000354924712",    # Sharwood's Medium Egg Noodles at 142, opening on a 145 g cooked portion
+    "0000000322768",    # Sainsbury's Medium Egg Noodles at 185, opening on a 116 g cooked portion
+))
+
+
+def uk_kj_fix(row, kilojoules):
+    """The kJ repair of a British row marked macro_mismatch (see above). True when done."""
+    protein, carbs, fat = row["protein_g"], row["carbs_g"], row["fat_g"]
+    if kilojoules is None or kilojoules <= 0 or None in (protein, carbs, fat) or (protein < 2 and fat < 1):
+        return False
+    macros = 4 * protein + 4 * carbs + 9 * fat
+    said = kilojoules / 4.184
+    if macros <= 20 or abs(said - macros) > 0.12 * macros or said > MAX_KCAL_PER_100G:
+        return False
+    row["calories_kcal"] = said
+    row["basis"] = "estimate"
+    return True
+
+
+def _uk_drink(name, label):
+    return bool(_LIQUID_LABEL.search(label or "")) or (bool(_OFF_DRINK_WORDS.search(name)) and not _OFF_NOT_DRINK.search(name))
+
+
+def _uk_butter(name, brand):
+    words = re.findall(r"[\w'&.-]+", name.lower())
+    if not words or words[-1] != "butter" or len(words) > 6 or _UK_NOT_BUTTER.search(name):
+        return False
+    own = set(re.findall(r"[\w'&.-]+", (brand or "").lower()))
+    return all(word in _UK_BUTTER_WORDS or word in own for word in words[:-1])
+
+
+def uk_review(row, serving_size, serving_g, categories, quantity):
+    """The British-shelf rules above: a doubt reason, or "" (the row may have been repaired:
+    re-based, or its portions changed)."""
+    name = row["name"] or ""
+    kcal = row["calories_kcal"]
+    if row["per_unit"] != "100g":
+        return ""
+    categories = categories or ""
+    label, grams = _first_grams(row)
+    portions = row["portions"] or []
+    drink = _uk_drink(name, label)
+    if grams and grams > 1500:
+        if not drink and kcal < 20:
+            return "uk_huge_serving"
+        row["portions"] = portions = portions[1:]
+        label, grams = _first_grams(row)
+    if grams and grams >= 90 and re.match(r"1 slices?\b", label, re.I):
+        row["portions"] = portions = portions[1:]       # "1 Slice (100 g)" on a loaf: the 100 g column read as a slice
+        label, grams = _first_grams(row)
+    if _UK_STOCK.search(name) and not _UK_NOT_STOCK.search(name) and kcal < 50:
+        if not (grams and grams >= 150):
+            row["portions"] = [["100 ml made up", 100, PIN_MARK]]
+        return ""
+    if _UK_GRAVY_DRY.search(name) and not _UK_NOT_GRAVY_DRY.search(name) and kcal >= 250 and grams and grams >= 30 \
+            and not re.search(r"as sold", label, re.I):
+        row["portions"] = portions[1:]
+        return ""
+    sugar = max(row["sugars_g"] or 0, row["carbs_g"] or 0)
+    if _UK_SQUASH.search(name) and not _UK_NOT_SQUASH.search(name) and kcal <= 30 and not (grams and grams >= 100) \
+            and (kcal <= 5 or sugar >= 3):
+        row["portions"] = [["1 glass, diluted (250 ml)", 250, PIN_MARK]] + [p[:2] for p in portions if p[1] and p[1] >= 100]
+        return ""
+    if _UK_POWDER_DRINK.search(name) and not _UK_NOT_POWDER.search(name) and kcal < 120 and grams and grams <= 40:
+        return "uk_powder_made_up"
+    if _UK_BREAD.search(name) and not _UK_NOT_BREAD.search(name + " " + (row["brand"] or "")) and kcal < 180:
+        if grams and 20 <= grams <= 100 and 200 <= kcal * 100.0 / grams <= 330:
+            rebase_on_serving(row, grams, label)
+            return ""
+        return "uk_bread_low"
+    if _UK_CEREAL.search(name) and not _UK_NOT_CEREAL.search(name) and kcal < 300 and not (grams and grams >= 120):
+        if grams and 20 <= grams <= 80 and 320 <= kcal * 100.0 / grams <= 520 \
+                and 45 <= (row["carbs_g"] or 0) * 100.0 / grams <= 85:
+            rebase_on_serving(row, grams, label)
+            return ""
+        return "uk_cereal_low"
+    if kcal < 650 and _uk_butter(name, row["brand"]) and not (row["barcode"] or "").startswith("8719200"):
+        return "uk_butter_low"
+    if _UK_SPIRIT_CATEGORY.search(categories) and not _UK_NOT_SPIRIT.search(name) and not 180 <= kcal <= 320:
+        return "uk_spirit_range"
+    if _UK_DRY_STARCH.search(name) and not _UK_NOT_DRY_STARCH.search(name) and kcal < 220 and grams and grams <= 90 \
+            and not re.search(r"cooked|prepared", label, re.I):
+        row["portions"] = [["100 g cooked", 100, PIN_MARK]] + [p[:2] for p in portions[1:] if p[1] != 100]
+        return ""
+    if row["barcode"] in KNOWN_COOKED_UK and kcal < 220:       # the serving, if any, is a cooked one: kept
+        row["portions"] = [["100 g cooked", 100, PIN_MARK]] + [p[:2] for p in portions if p[1] != 100]
+        return ""
+    if _UK_MEAL.search(name) and not _UK_NOT_MEAL.search(name + " " + categories) and grams and grams >= 250 \
+            and kcal * grams / 100.0 < 160:
+        return "uk_meal_low"
+    if kcal < 250 and (_UK_CHOCOLATE.search(name) or _UK_CHOCOLATE_CATEGORY.search(categories)) \
+            and not _UK_NOT_CHOCOLATE.search(name) and not _UK_NOT_CHOCOLATE_CATEGORY.search(categories):
+        return "uk_chocolate_low"
+    if not portions and kcal >= 50:
+        found = _UK_MULTIPACK.search(quantity or "")
+        if found:
+            weight = float((found.group(2) or found.group(4)).replace(",", "."))
+            unit = (found.group(3) or found.group(5)).lower()
+            if 10 <= weight <= 500:
+                amount = tidy_number(weight)
+                row["portions"] = [[f"1 unit ({amount} {unit})", amount, PACK_MARK]]
+    return ""
+
+
+# The doubts above that are read from a serving are in SERVING_DOUBTS: a twin with a serving of its
+# own was tested afresh and does not take them over (see _absorb).
+
+
+# --- J. Rows of the Japan, Korea and Asia shelves with no serving: one from the pack size ---
+# A drink (not a powder, mix, concentrate, syrup or base) sold as 100 to 650 ml opens on "1 bottle"
+# (300 ml or more) or "1 can/pack"; a single-unit food (onigiri, bun, cup noodle, pudding, egg pack,
+# sandwich) sold as 20 to 250 g opens on "1 pack". A multipack ("6 x 50 g") gives the unit. Read on
+# 60 rows: 41 of 44 right once the sizes were capped (the wrong ones: a cookie bag, a chocolate bar,
+# a bag of mini pies, now left out). The portion is marked "pack" so that it does not count as a
+# serving where the pools are chosen (see pick_off_rows).
+PACK_MARK = "pack"
+_J_DRINK = re.compile(r"drink|juice|(?<![a-z])tea(?![a-z])|coffee|soda|cola|water|milk|latte|beverage|sparkling|lemonade|yakult"
+                      r"|isotonic|(?<![a-z])jus(?![a-z])|minuman|nước|trà|น้ำ|ชา|茶|ジュース|飲料|음료|우유|커피|caf[eé]|kopi"
+                      r"|(?<![a-z])teh(?![a-z])|susu", re.I)
+_J_NOT_DRINK = re.compile(r"powder|(?<![a-z])mix|sachet|stick|candy|jelly|biscuit|cookie|cake|bread|ice ?cream|(?<![a-z])bar(?![a-z])"
+                          r"|chips|noodle|sauce|bag|leaves|concentrate|syrup|3 ?in ?1|instant|base|beer|sake|soju|wine|yogh?urt"
+                          r"|margarine|chocolate|condensed|evaporated|creamer|vinegar|soup", re.I)
+_J_UNIT = re.compile(r"onigiri|rice ?balls?|(?<![a-z])buns?(?![a-z])|cup noodles?|pudding|sandwich|egg pack|(?<![a-z])eggs?(?![a-z])"
+                     r"|kimbap|gimbap|bento", re.I)
+_J_NOT_UNIT = re.compile(r"cookie|biscuit|chocolate|mini|mix|powder|sauce|yogh?urt|furikake|margarine|chips|cracker|masala|spice"
+                         r"|seasoning|curry|\bbars?\b", re.I)
+
+
+def asia_pack_portion(row, quantity):
+    """Item J above: a [label, grams, "pack"] portion from the pack size, or None."""
+    if row["portions"] or row["per_unit"] != "100g":
+        return None
+    name = row["name"] or ""
+    text = quantity or ""
+    multi = _UK_MULTIPACK.search(text)
+    if multi:
+        size, unit = float((multi.group(2) or multi.group(4)).replace(",", ".")), (multi.group(3) or multi.group(5)).lower()
+    else:
+        found = re.search(r"(\d+(?:[.,]\d+)?)\s*(ml|cl|l|g)\b", text, re.I)
+        if not found:
+            return None
+        size, unit = float(found.group(1).replace(",", ".")), found.group(2).lower()
+        if unit in ("cl", "l"):
+            size, unit = size * (10 if unit == "cl" else 1000), "ml"
+    amount = tidy_number(round(size, 1))
+    if _J_DRINK.search(name) and not _J_NOT_DRINK.search(name) and unit == "ml" and 100 <= size <= 650:
+        return [f"1 bottle ({amount} ml)" if size >= 300 else f"1 can/pack ({amount} ml)", amount, PACK_MARK]
+    if _J_UNIT.search(name) and not _J_NOT_UNIT.search(name) and unit == "g" and 20 <= size <= 250 \
+            and not (re.search(r"buns?|bread", name, re.I) and size > 150):
+        return [f"1 pack ({amount} g)", amount, PACK_MARK]
+    return None
 
 
 def market_origin(barcode, regions):
@@ -2976,7 +3564,10 @@ def import_off(importer, path):
         # dropped. Measured on other markets the same words misjudged one row in five
         # (restaurant items, US biscuits, oven chips), so those rows are left as they are.
         philippine = "PH" in regions.split(",") or barcode_origin(row["barcode"]) == "PH"
-        if philippine:
+        # A row read by hand whose label was typed for a known serving or pack (KNOWN_PER_PACK).
+        if known_per_pack_fix(row):
+            importer.step6["known_per_pack"] += 1
+        elif philippine:
             fixed = serving_typed_fix(row, row["name"], row["brand"], categories, serving_size, serving_g, quantity)
             if fixed:
                 importer.serving_typed[fixed] += 1
@@ -2990,12 +3581,39 @@ def import_off(importer, path):
             continue
         # Rows from other markets: patterns that make the numbers doubtful are noted, so the
         # row is not chosen for the app (see pool_doubt). The numbers stay as they are.
-        if not philippine:
+        if philippine:
+            # Philippine rows are not tested by pool_doubt (every one is exported); only the rows
+            # read by hand (KNOWN_WRONG_PH) and plain oils carrying a spoonful's figures are
+            # marked, and the Philippine part of the list leaves out the marked ones.
+            why = "listed" if row["barcode"] in KNOWN_WRONG_PH else oil_fix(row, serving_g)
+            if why:
+                importer.step6["ph_" + why] += 1
+                row["doubt"] = None if why == "rebased" else why
+        else:
+            market = asia_market(row["barcode"], regions)
             # A Japanese, Korean or neighbouring-market snack whose serving explains its too-few
             # calories is re-based on that serving first (see asia_serving_fix).
-            if asia_market(row["barcode"], regions) and asia_serving_fix(row, serving_size, serving_g, categories):
+            if market and asia_serving_fix(row, serving_size, serving_g, categories):
                 importer.asia_rebased += 1
-            row["doubt"] = pool_doubt(row, serving_size, serving_g, categories, alcohol_g) or None
+            uk = uk_shelf(row["barcode"], row["brand"], regions)
+            why = zero_bottle_fix(row, serving_size, serving_g, categories) or oil_fix(row, serving_g)
+            if why == "rebased":
+                importer.step6["rebased"] += 1
+                why = ""
+            row["doubt"] = why or pool_doubt(row, serving_size, serving_g, categories, alcohol_g, uk=uk) or None
+            if uk and row["doubt"] == "macro_mismatch" and row["barcode"] not in _KJ_KEEP and uk_kj_fix(row, kilojoules):
+                importer.step6["uk_kj"] += 1
+                row["doubt"] = None
+            if uk and not row["doubt"]:
+                before = (row["calories_kcal"], row["portions"])
+                row["doubt"] = uk_review(row, serving_size, serving_g, categories, quantity) or None
+                if not row["doubt"] and before != (row["calories_kcal"], row["portions"]):
+                    importer.step6["uk_repaired"] += 1
+            if market and not row["doubt"]:
+                portion = asia_pack_portion(row, quantity)
+                if portion:
+                    row["portions"] = [portion]
+                    importer.step6["pack_portion"] += 1
             if row["doubt"]:
                 importer.doubts[row["doubt"]] = importer.doubts.get(row["doubt"], 0) + 1
         code = code.strip()
@@ -3471,6 +4089,40 @@ def asia_name(name, brand=None):
     return new if _TYPEABLE.search(new) else text
 
 
+# Names of the UK pool as the app shows them (read in step 6 on the 2,600 British rows: every
+# change below was read, none made a name worse): a shop's item code in front goes ("098381
+# Pringles Paprika"), so do the pack size, a multipack and "imp" at the end, as in asia_name, and
+# a name typed in capitals is written in ordinary case ("WALKERS READY SALTED CRISPS" -> "Walkers
+# Ready Salted Crisps"). Short forms in capitals stay (BBQ, UHT, HP, M&S ...), as do words without
+# a vowel and words already in mixed case ("McLaren").
+_UK_SHOP_CODE = re.compile(r"^\d{5,8}\s+(?=\D)")
+_UK_JUNK_WORD = re.compile(r"^superseded\s+", re.I)
+_UK_CAPS_KEEP = frozenset(("BBQ", "UHT", "HP", "PG", "M&S", "KP", "TUC", "F1", "UK", "USA", "BLT", "XL", "XXL", "OJ", "TV",
+                           "DIY", "NYC", "II", "III", "IPA", "GF", "VG", "UK's"))
+_UK_SMALL_WORDS = frozenset(("and", "or", "of", "with", "in", "the", "a", "an", "on", "for", "to", "&", "n", "de", "au"))
+
+
+def uk_name(name):
+    """The name of a UK-pool row as the app shows it (see above)."""
+    whole = str(name)
+    text = asia_name(_UK_JUNK_WORD.sub("", _UK_SHOP_CODE.sub("", whole)))
+    text = re.sub(r"\s+\d{1,2}\s*[x×]$", "", text)      # "Vegetable Stock cubes 8 x": a multipack left after the pack size went
+    letters = [ch for ch in text if ch.isalpha()]
+    if len(letters) >= 4 and sum(1 for ch in letters if ch.isupper()) > 0.8 * len(letters):
+        words = []
+        for place, word in enumerate(text.split(" ")):
+            core = re.sub(r"[^A-Za-z&']", "", word)
+            if core in _UK_CAPS_KEEP or (core and not re.search(r"[AEIOUYaeiouy]", core)) or re.search(r"[a-z][A-Z]", core):
+                words.append(word)
+            elif place and core.lower() in _UK_SMALL_WORDS:
+                words.append(word.lower())
+            else:
+                low = word.lower()
+                words.append(re.sub(r"[a-z]", lambda found: found.group(0).upper(), low, count=1))
+        text = " ".join(words)
+    return text if _TYPEABLE.search(text) else whole
+
+
 # Serving words of Japanese, Korean, Thai and Chinese labels, longest first, and the English
 # word for one of them. 本 is a bottle when the serving is liquid or weighs 100 g or more,
 # otherwise a stick.
@@ -3729,6 +4381,25 @@ def british_pack(barcode, brand, regions):
     return 0
 
 
+# Famous British products that were only just below the UK pool's cut (17 scans) or kept out as
+# sold in other countries too (second fix pass of step 6). Each record was read: its figures are
+# believable. They are picked first for the UK pool (within its quota), when they are complete,
+# typeable and not doubtful; nothing else about them is asked.
+MUST_HAVE_UK = frozenset((
+    "5000168040097",    # McVitie's Jaffa Cakes, 376 kcal, 1 cake (11 g)
+    "5000382122289",    # IRN-BRU, 19 kcal per 100 ml, 1 can (330 ml)
+    "5000328531007",    # Walkers Monster Munch Pickled Onion, 492 kcal
+    "5000328014791",    # Walkers Monster Munch Roast Beef, 490 kcal
+    "0000050147588",    # Colman's English Mustard, 190 kcal, 5 g
+    "6003770000168",    # Nando's PERi-PERi Sauce Medium, 51 kcal, 20 g
+    "5057742000251",    # Greggs Sausage Rolls, 338 kcal, 1 roll (103 g)
+    "5057742000381",    # Greggs Vegan Sausage Roll, 305 kcal, 1 roll (101 g)
+    "5059977003021",    # Pret Free-Range Egg Mayo sandwich, 197 kcal, 175 g
+    "5065002532367",    # Pret Bar, 462 kcal, 1 bar (64 g)
+    "5059977000105",    # Pret Chicken Caesar & Bacon Baguette, 273 kcal, 220 g
+))
+
+
 # Western supermarkets' own brands, and Western brands seen with short codes that read as Korean
 # (second reading of step 5): a Calvé peanut butter (0000088031304, an 8-digit code stored with
 # five zeros), a Trader Joe's nut milk or a Lidl cheese is no product of the Japanese, Korean or
@@ -3739,16 +4410,25 @@ _WESTERN_SHOP_BRAND = re.compile(
     r"|marks (?:and|&) spencer|italiamo|mcennedy|maille)(?![a-z])", re.I)
 
 
-def away_from_asia(barcode, brand, name, korean_brands):
+# Western shops that run Asian shops too (Aldi China, Tesco Malaysia, Carrefour Taiwan), and a
+# Malaysian pudding stored with the brand Lidl: a full 13-digit barcode registered in China,
+# Taiwan, Korea, Thailand, Singapore, Malaysia, Vietnam or Indonesia on a row tagged for the Asian
+# shelves is that shop's Asian product (read in step 6: about 11 good products were kept out).
+_ASIAN_PREFIX = re.compile(r"(?:69\d|471|489|880|885|888|893|899|955|956)\d{10}")
+
+
+def away_from_asia(barcode, brand, name, korean_brands, regions=None):
     """1 when a row must not enter the Japan, Korea or Asia pools (see _WESTERN_SHOP_BRAND), else 0.
 
     korean_brands: the brands (lower case) of rows with a full 13-digit Korean code. A short code
     that reads as Korean counts only with Hangul in the name or brand, or with one of those brands.
+    regions: the row's region text; see _ASIAN_PREFIX.
     """
     if _NATIVE.search(name or ""):
         return 0
     if brand and _WESTERN_SHOP_BRAND.search(brand):
-        return 1
+        tags = (regions or "").split(",")
+        return 0 if _ASIAN_PREFIX.fullmatch(barcode or "") and ("AS" in tags or "KR" in tags) else 1
     code = barcode or ""
     if code.startswith("00000880") and not _NATIVE.search(brand or "") \
             and (brand or "").strip().lower() not in korean_brands:
@@ -3756,7 +4436,7 @@ def away_from_asia(barcode, brand, name, korean_brands):
     return 0
 
 
-def pick_off_rows(conn, quota):
+def pick_off_rows(conn, quota, repeats=None):
     """Choose the Open Food Facts rows for the app. Returns {pool: [id, ...]} with the keys
     "PH" and the five pools of OFF_POOLS; each list of food_items ids is in the order to write.
 
@@ -3778,8 +4458,9 @@ def pick_off_rows(conn, quota):
 
     A row can enter a pool only when it is
       - local: tagged with no other country (foreign_tags = 0), or carrying a barcode from
-        one of the markets above (a product scanned in 30 countries is usually the French
-        or Moroccan pack, not the one on a Manila shelf);
+        one of the markets above, or a British EAN-8 tagged UK (stored 0000050...: Colman's mustard)
+        (a product scanned in 30 countries is usually the French or Moroccan pack, not the
+        one on a Manila shelf);
       - typeable: the name has three plain letters in a row (the app has no camera scanner,
         so a name in Japanese script could never be found);
       - complete: protein, carbs and fat are all known (the app would log a blank as 0 g);
@@ -3787,6 +4468,8 @@ def pick_off_rows(conn, quota):
         letters;
       - not doubtful: import_off found none of the patterns of pool_doubt in it (a label
         typed per serving, a dry-coffee figure on coffee, shampoo ...).
+    The rows of MUST_HAVE_UK are picked first for the UK pool when complete, typeable and not
+    doubtful, whatever their scans and tags.
     A British pack (see british_pack: a British barcode, a British supermarket's own brand,
     or a short in-store code tagged UK) is left out of the US pool and belongs to the UK
     pool whatever its tags say. Worldwide packs with other European barcodes (Nutella,
@@ -3808,8 +4491,15 @@ def pick_off_rows(conn, quota):
     Philippine rows (a brand that is on Philippine shelves). While a pool is filled, a row
     is skipped when a chosen row already has the same plain name and the same calories:
     that is usually the same product under another spelling of its brand. The US and UK pools
-    count only chosen rows that are Philippine or sold in their own market for this, so a
-    Japanese, Korean or Asian product never takes the place of an American one of the same name.
+    count only rows chosen for the Philippine part or for the US or UK pool, and only when they
+    are Philippine or sold in their own market, so a Japanese, Korean or Asian product (chosen
+    for its own pool, whatever its tags) never takes the place of an American one of the same name.
+    A Philippine row read by hand and found wrong (KNOWN_WRONG_PH) or a plain oil carrying a
+    spoonful's figures (oil_fix) is left out of the Philippine part.
+
+    repeats: when a dictionary is given, it is filled with {chosen id: [ids of the rows skipped
+    as its repeats]}, so that the export can pass the skipped rows' barcodes on (their calories
+    are the same by construction).
     """
     conn.create_function("market_origin", 2, market_origin, deterministic=True)
     conn.create_function("typeable", 1, lambda name: 1 if _TYPEABLE.search(name or "") else 0,
@@ -3823,8 +4513,8 @@ def pick_off_rows(conn, quota):
     conn.create_function("british_pack", 3, british_pack, deterministic=True)
     korean_brands = frozenset((brand or "").strip().lower() for (brand,) in conn.execute(
         "SELECT DISTINCT brand FROM food_items WHERE source = 'off' AND barcode LIKE '880%' AND length(barcode) = 13"))
-    conn.create_function("away_from_asia", 3, lambda barcode, brand, name: away_from_asia(barcode, brand, name, korean_brands),
-                         deterministic=True)
+    conn.create_function("away_from_asia", 4, lambda barcode, brand, name, regions:
+                         away_from_asia(barcode, brand, name, korean_brands, regions), deterministic=True)
 
     # Brands on Philippine shelves: the brand half of name_key ("lucky me|pancit canton"),
     # seen on two or more rows tagged Philippines first.
@@ -3846,6 +4536,11 @@ def pick_off_rows(conn, quota):
         names.update(filter(None, (plain_words(name), plain_words((name or "").split(",")[0]))))
     conn.executemany("INSERT INTO temp.reference_names VALUES (?)", ((name,) for name in sorted(names)))
 
+    # Famous British products picked first for the UK pool (see MUST_HAVE_UK).
+    conn.execute("DROP TABLE IF EXISTS temp.must_have_uk")
+    conn.execute("CREATE TEMP TABLE must_have_uk (barcode TEXT PRIMARY KEY) WITHOUT ROWID")
+    conn.executemany("INSERT INTO temp.must_have_uk VALUES (?)", ((code,) for code in sorted(MUST_HAVE_UK)))
+
     # One line of facts per Open Food Facts row that is Philippine or may enter a pool.
     # Innermost: the plain facts. Middle: the entry test. Outermost: drop the rest.
     conn.execute("DROP TABLE IF EXISTS temp.off_facts")
@@ -3853,20 +4548,26 @@ def pick_off_rows(conn, quota):
         CREATE TEMP TABLE off_facts AS
         SELECT id, name, calories_kcal, popularity, region_tags, origin, rank, completeness,
                has_photo, has_brand, has_serving, is_ph, may_enter, british, away,
+               must,
+               COALESCE(doubt, '') IN ('listed', 'oil_low') AS ph_out,
                (NOT has_serving AND needs_serving(name, calories_kcal)) AS no_serving,
                half_latin(name) AS latin, (NOT has_brand AND plain_words(name) IN temp.reference_names) AS generic,
                shop_listing(name) AS listing
-        FROM (SELECT *, ((foreign_tags = 0 OR origin IS NOT NULL) AND typeable AND has_macros
-                         AND (rank > 0 OR (has_photo AND latin_brand)) AND doubt IS NULL) AS may_enter
+        FROM (SELECT *, ((foreign_tags = 0 OR origin IS NOT NULL OR british_short) AND typeable AND has_macros
+                         AND (rank > 0 OR (has_photo AND latin_brand)) AND doubt IS NULL) AS may_enter,
+                     (must_have AND typeable AND has_macros AND doubt IS NULL) AS must
               FROM (SELECT f.id, f.name, f.calories_kcal, f.popularity, f.region_tags, f.foreign_tags,
                            f.completeness, f.doubt,
+                           COALESCE(substr(f.barcode, 1, 7) = '0000050' AND instr(f.region_tags, 'UK') > 0, 0)
+                               AS british_short,
+                           COALESCE(f.barcode IN temp.must_have_uk, 0) AS must_have,
                            market_origin(f.barcode, f.region_tags) AS origin,
                            british_pack(f.barcode, f.brand, f.region_tags) AS british,
-                           away_from_asia(f.barcode, f.brand, f.name) AS away,
+                           away_from_asia(f.barcode, f.brand, f.name, f.region_tags) AS away,
                            f.popularity * (CASE WHEN b.brand_key IS NULL THEN 1 ELSE 3 END) AS rank,
                            (f.thumbnail_url IS NOT NULL) AS has_photo,
                            (f.brand IS NOT NULL) AS has_brand,
-                           (f.portions <> '[]') AS has_serving,
+                           (f.portions <> '[]' AND f.portions NOT LIKE '%,"pack"]]') AS has_serving,
                            (f.protein_g IS NOT NULL AND f.carbs_g IS NOT NULL AND f.fat_g IS NOT NULL) AS has_macros,
                            typeable(f.name) AS typeable,
                            latin_text(f.brand) AS latin_brand,
@@ -3874,16 +4575,22 @@ def pick_off_rows(conn, quota):
                     FROM food_items AS f
                     LEFT JOIN ph_brand AS b ON b.brand_key = substr(f.name_key, 1, instr(f.name_key, '|') - 1)
                     WHERE f.source = 'off'))
-        WHERE is_ph OR origin = 'PH' OR may_enter""")
+        WHERE is_ph OR origin = 'PH' OR may_enter OR must""")
 
-    # Chosen rows, and their (plain name, whole kcal) with the markets of the rows that took it.
-    taken_ids, taken_foods = set(), {}
+    # Chosen rows, and their (plain name, whole kcal) with the markets of the rows that took it
+    # (for a row chosen for the Japan, Korea or Asia pool: that pool's name), and the first row
+    # chosen for it.
+    taken_ids, taken_foods, first_taker = set(), {}, {}
+    skipped = {} if repeats is None else repeats
     picked = {"PH": []}
     for row_id, name, kcal in conn.execute("""SELECT id, name, calories_kcal FROM off_facts
-                                              WHERE is_ph OR origin = 'PH' ORDER BY popularity DESC, id"""):
+                                              WHERE (is_ph OR origin = 'PH') AND NOT ph_out
+                                              ORDER BY popularity DESC, id"""):
         picked["PH"].append(row_id)
         taken_ids.add(row_id)
-        taken_foods.setdefault((plain_words(name), int(round(kcal))), set()).add("PH")
+        food = (plain_words(name), int(round(kcal)))
+        taken_foods.setdefault(food, set()).add("PH")
+        first_taker.setdefault(food, row_id)
 
     members = {"KR": "origin = 'KR'", "JP": "origin = 'JP'",
                "AS": "(origin = 'AS' OR (region_tags = 'AS' AND COALESCE(origin, '') NOT IN ('JP', 'KR')))",
@@ -3897,10 +4604,12 @@ def pick_off_rows(conn, quota):
         asian = pool in ("JP", "KR", "AS")
         rank = {"US": "(CASE WHEN no_serving THEN rank / 2 ELSE rank END)",
                 "AS": "(CASE WHEN instr(region_tags, 'AS') = 0 THEN rank / 2 ELSE rank END)"}.get(pool, "rank")
+        uk = pool == "UK"
         candidates = conn.execute(f"""
             SELECT id, name, calories_kcal, region_tags FROM off_facts
-            WHERE may_enter AND {members[pool]} {"AND NOT generic AND NOT listing AND NOT away" if asian else ""}
-            ORDER BY {"(latin OR popularity > 0) DESC," if asian else ""} {rank} DESC,
+            WHERE {"(may_enter OR must)" if uk else "may_enter"} AND {members[pool]}
+                  {"AND NOT generic AND NOT listing AND NOT away" if asian else ""}
+            ORDER BY {"(latin OR popularity > 0) DESC," if asian else ""} {"must DESC," if uk else ""} {rank} DESC,
                      completeness DESC, has_photo DESC, has_brand DESC, has_serving DESC, id""")
         # The US and UK pools skip a repeat only of a Philippine row or of a row sold in their own
         # market: "Soy Sauce" by Kikkoman (US) stays although a Korean "Soy sauce" of the same
@@ -3913,16 +4622,23 @@ def pick_off_rows(conn, quota):
             food = (plain_words(name), int(round(kcal)))
             takers = taken_foods.get(food)
             if takers and (blocking is None or takers & blocking):
+                skipped.setdefault(first_taker[food], []).append(row_id)
                 continue
             chosen.append(row_id)
             taken_ids.add(row_id)
-            taken_foods.setdefault(food, set()).update((regions or "").split(","))
+            taken_foods.setdefault(food, set()).update({pool} if asian else (regions or "").split(","))
+            first_taker.setdefault(food, row_id)
             if len(chosen) >= wanted:
                 break
         candidates.close()                      # a full pool leaves rows unread; let go of the table
+    for keeper in list(skipped):                # a row skipped in one pool and chosen by a later one
+        skipped[keeper] = [row_id for row_id in skipped[keeper] if row_id not in taken_ids]
+        if not skipped[keeper]:
+            del skipped[keeper]
     conn.execute("DROP TABLE temp.off_facts")
     conn.execute("DROP TABLE temp.ph_brand")
     conn.execute("DROP TABLE temp.reference_names")
+    conn.execute("DROP TABLE temp.must_have_uk")
     return picked
 
 
@@ -3952,7 +4668,8 @@ def export_app(conn, out_path, off_quota, built):
     conn.execute(pick.format(code=1, where="source = 'usda' AND substr(source_ref, 1, 7) = 'survey:'", order="id"))
     conn.execute(pick.format(code=2, where="source = 'usda' AND (source_ref IS NULL"
                                            " OR substr(source_ref, 1, 7) <> 'survey:')", order="id"))
-    off_rows = pick_off_rows(conn, off_quota)
+    repeats = {}
+    off_rows = pick_off_rows(conn, off_quota, repeats)
     for pool in ("PH",) + OFF_WRITE_ORDER:
         conn.executemany("INSERT INTO export_pick (id, code, pool) VALUES (?, 3, ?)",
                          ((row_id, pool) for row_id in off_rows[pool]))
@@ -3965,21 +4682,13 @@ def export_app(conn, out_path, off_quota, built):
     brands, groups = {}, {}
     counts = {"curated": 0, "usda": 0, "off": 0}
     aliases, alias_codes = [], set()
-    listing = conn.execute("""SELECT f.brand, f.group_label, p.code, f.alt_barcodes, p.pool FROM export_pick AS p
-                              JOIN food_items AS f ON f.id = p.id ORDER BY p.pos""")
-    for number, (brand, group, code, alt_barcodes, pool) in enumerate(listing):     # number = the row's place in "items"
-        brand = shown_brand(brand, pool)
-        if brand and brand not in brands:
-            brands[brand] = len(brands)
-        if group and group not in groups:
-            groups[group] = len(groups)
-        counts[("curated", "usda", "usda", "off")[code]] += 1
-        if alt_barcodes == "[]":
-            continue
-        # A merged barcode is passed on when its own pack was scanned at least once or is
-        # tagged PH, JP or KR. One that is (by now) some row's own barcode is left out, and
-        # so is one already listed for an earlier row.
-        codes = []
+    shipped_codes = {barcode for (barcode,) in conn.execute(
+        "SELECT f.barcode FROM export_pick AS p JOIN food_items AS f ON f.id = p.id WHERE f.barcode IS NOT NULL")}
+    twin_of = {twin: wrong for wrong, twin in KNOWN_TWIN.items()}
+
+    def passed_on(alt_barcodes):
+        """The merged barcodes of alt_barcodes that the file lists (see below), in order."""
+        found = []
         for barcode, (popularity, regions) in sorted(aliases_read(alt_barcodes).items()):
             if popularity < 1 and not any(region in regions.split(",") for region in ALIAS_REGIONS):
                 continue
@@ -3988,9 +4697,39 @@ def export_app(conn, out_path, off_quota, built):
             if conn.execute("SELECT 1 FROM food_items WHERE barcode = ?", (barcode,)).fetchone():
                 continue
             alias_codes.add(barcode)
-            codes.append(int(barcode))
+            found.append(barcode)
+        return found
+
+    listing = conn.execute("""SELECT f.brand, f.group_label, p.code, f.alt_barcodes, p.pool, f.id, f.barcode
+                              FROM export_pick AS p JOIN food_items AS f ON f.id = p.id ORDER BY p.pos""")
+    for number, (brand, group, code, alt_barcodes, pool, row_id, own) in enumerate(listing.fetchall()):
+        # number = the row's place in "items"
+        brand = shown_brand(brand, pool)
+        if brand and brand not in brands:
+            brands[brand] = len(brands)
+        if group and group not in groups:
+            groups[group] = len(groups)
+        counts[("curated", "usda", "usda", "off")[code]] += 1
+        # A merged barcode is passed on when its own pack was scanned at least once or is
+        # tagged PH, JP or KR. One that is (by now) some row's own barcode is left out, and
+        # so is one already listed for an earlier row.
+        codes = passed_on(alt_barcodes) if alt_barcodes != "[]" else []
+        # Rows skipped as repeats of this one while the pools were filled (same plain name, same
+        # whole calories; see pick_off_rows): their own barcodes and theirs merged find this row.
+        for other in repeats.get(row_id, ()):
+            barcode, more = conn.execute("SELECT barcode, alt_barcodes FROM food_items WHERE id = ?", (other,)).fetchone()
+            if barcode and barcode.isdigit() and barcode not in alias_codes and barcode not in shipped_codes:
+                alias_codes.add(barcode)
+                codes.append(barcode)
+            if more and more != "[]":
+                codes.extend(passed_on(more))
+        # A Philippine row read by hand and left out (KNOWN_WRONG_PH) whose product has a believable row.
+        wrong = twin_of.get(own or "")
+        if wrong and wrong not in shipped_codes and wrong not in alias_codes:
+            alias_codes.add(wrong)
+            codes.append(wrong)
         if codes:
-            aliases.append([number] + codes)
+            aliases.append([number] + [int(barcode) for barcode in codes])
 
     def one_decimal(value):
         return None if value is None else tidy_number(round(value, 1))
@@ -4002,6 +4741,10 @@ def export_app(conn, out_path, off_quota, built):
         except ValueError:
             portions, aka = [], []
         name, brand = item["name"], shown_brand(item["brand"], pool)
+        if portions and len(portions[0]) > 2 and portions[0][2] == PACK_MARK and pool not in ("UK",) + ASIA_POOLS:
+            portions = []               # a portion from the pack size, measured on the UK and Asian shelves only
+        if pool == "UK":
+            name = uk_name(name)
         if pool in ASIA_POOLS:
             name = asia_name(name, brand)
             portions = asia_portions(item, portions)
@@ -4011,6 +4754,9 @@ def export_app(conn, out_path, off_quota, built):
             portions = default_portions(item, portions)
         if item["source"] == "off" and not _philippine(item):
             portions = [[tidy_label(label, rest[0] if rest else None)] + rest for label, *rest in portions]
+        if item["source"] == "off" and portions and (portions[0][1] or 0) > 1000:
+            # a 2-litre bottle or a 3 kg pack is no portion to open on (five rows of the step 5 list)
+            portions = [["100 g", 100]] + [p for p in portions if p[1] != 100]
         thumb = item["thumbnail_url"] or 0
         if thumb and thumb.startswith(THUMB_BASE):
             thumb = thumb[len(THUMB_BASE):]

@@ -902,6 +902,7 @@ function dbRec(db, row){
 /* Builds the search tables once: plain names (also padded with a space each side, so the search builds no strings per row), brand and other names, group, category and source per row, a barcode map, and the names by which curated rows replace older library items.
    ord puts rows that tie in the search in a fixed order: a barcode with the Philippine prefix 480 first, then rows tagged as sold in the Philippines, then the rest.
    A newer bundle may carry "alias": [[row index, barcode, barcode, ...], ...], the barcodes of other packs of the same product, written as numbers (so without their leading zeros). They join the barcode map but never replace a row's own barcode; altCode remembers which codes they are. A bundle without the list loads as before. */
+const PACK_TAIL = / \d+(?: \d+)? ?(?:g|gr|gm|grams?|ml|kg|l|ltr|litres?|liters?)$/; /* a pack size at the end of a plain name: "milo 24g", "pancit canton 60 g" */
 function prepFoodDb(j){
   if (!j || !Array.isArray(j.items)) return null;
   const v2 = Array.isArray(j.fields); if (!v2 && !Array.isArray(j.cats)) return null;
@@ -910,10 +911,11 @@ function prepFoodDb(j){
   if (v2) j.fields.forEach((f, i) => { db.ix[f] = i; });
   const n = db.items.length, memo = new Map(), pl = s => { let p = memo.get(s); if (p == null) { p = plainTxt(s); memo.set(s, p); } return p; };
   db.nameAt = v2 ? (db.ix.name == null ? 0 : db.ix.name) : 0;
-  db.plain = new Array(n); db.pad = new Array(n); db.aux = new Array(n); db.grp = new Array(n); db.code = new Uint8Array(n); db.src = new Uint8Array(n); db.ord = new Uint8Array(n);
+  db.core = new Array(n).fill(null); db.plain = new Array(n); db.pad = new Array(n); db.aux = new Array(n); db.grp = new Array(n); db.code = new Uint8Array(n); db.src = new Uint8Array(n); db.ord = new Uint8Array(n);
   for (let i = 0; i < n; i++) {
     const r = dbRec(db, db.items[i]), name = plainTxt(r.name), brand = r.brand ? pl(r.brand) : '', aka = r.aka.map(plainTxt).filter(Boolean);
     db.plain[i] = name; db.pad[i] = ' ' + name + ' '; db.aux[i] = (brand + ' ' + aka.join(' ')).trim(); db.grp[i] = r.group ? pl(r.group) : '';
+    if (r.source === 3) { const c = name.replace(PACK_TAIL, ''); if (c !== name && c) db.core[i] = c; }
     db.code[i] = Math.max(0, FOOD_CATS.indexOf(r.category)); db.src[i] = r.source;
     const k = r.barcode ? normBarcode(r.barcode) : null; if (k && !db.byBarcode.has(k)) db.byBarcode.set(k, i);
     db.ord[i] = k && k.slice(0, 3) === '480' ? 0 : /(^|,)PH(,|$)/.test(r.regions) ? 1 : 2;
@@ -934,6 +936,7 @@ function loadFoodDb(){
     state.foodDbBusy = true;
     try { const r = await fetch('./food-db.json'); if (r.ok) state.foodDb = prepFoodDb(await r.json()); } catch (e) {}
     state.foodDbBusy = false; foodDbLoading = null;
+    if (state.foodDb) (window.requestIdleCallback || (f => setTimeout(f, 800)))(() => foodWords()); /* the typo fallback's word list, built while nothing else happens */
     if (!state.foodDb || state.foodBusy) return;
     const res = state.foodResults, box = document.activeElement;
     if (res && !res.online) { state.foodResults = barcodeResults(res.q) || localResults(res.q, res.more); paintFoodResults(); }
@@ -994,7 +997,42 @@ function termScore(n, name, aka, cat, T){
 }
 /* Every word typed must appear. Your own foods rank first, then the curated Philippine foods (library and bundle), then the USDA tables, then other packaged products; shorter, closer names win.
    cat narrows the list to one category (default: the filter pill that is pressed). Favourites and recent foods only pass a narrower filter when their stored record says which category they are. */
+/* Typo fallback. Only when the search as typed finds fewer than three rows, each typed word of five letters or more that the food names and brands do not know, or know in at most two rows next to a word sixty times as common, is swapped for the word they know best that is one edit away (a letter missing, added, changed, or two neighbours swapped) or is its other spelling (yoghurt/yogurt; "crisps" and "chips" are different words, not spellings), and the search runs once more. The rows found as typed stay first (they hold every word typed), the rows found as corrected follow. The word list is built once, in idle time after the list loads or on the first fallback. */
+const SPELL = new Map([['yoghurt', 'yogurt'], ['flavour', 'flavor'], ['doughnut', 'donut'], ['savoury', 'savory'], ['fibre', 'fiber'], ['colour', 'color'], ['chilli', 'chili']].flatMap(p => [p, [p[1], p[0]]]));
+let foodVocab = { db: undefined, lib: 0, m: null };
+function foodWords(){
+  const db = state.foodDb; if (foodVocab.m && foodVocab.db === db && foodVocab.lib === state.foodLib.length) return foodVocab.m;
+  const m = new Map(), put = s => { const ws = s.split(' '); for (let k = 0; k < ws.length; k++) { const w = ws[k]; if (w.length >= 4 && ws.indexOf(w) === k) m.set(w, (m.get(w) || 0) + 1); } };
+  if (db) for (let i = 0; i < db.plain.length; i++) { put(db.plain[i]); if (db.aux[i]) put(db.aux[i]); }
+  state.foodLib.forEach(it => put(plainOf(it).n));
+  foodVocab = { db: db, lib: state.foodLib.length, m: m }; return m;
+}
+const TYPO_ABC = 'abcdefghijklmnopqrstuvwxyz';
+function typoFix(w, m){
+  if (w.length < 5 || /[^a-z]/.test(w)) return null;
+  let best = null, most = 0;
+  const tryW = c => { const k = m.get(c); if (k > most) { most = k; best = c; } };
+  if (SPELL.has(w)) { tryW(SPELL.get(w)); if (best) return best; }
+  const own = m.get(w) || 0; if (own > 2) return null; /* a word the list knows ("tango", "munch") is no typo */
+  for (let i = 0; i <= w.length; i++) {
+    const a = w.slice(0, i), b = w.slice(i);
+    if (b) tryW(a + b.slice(1));
+    if (b.length > 1) tryW(a + b.charAt(1) + b.charAt(0) + b.slice(2));
+    for (let k = 0; k < 26; k++) { const c = TYPO_ABC.charAt(k); if (b && c !== b.charAt(0)) tryW(a + c + b.slice(1)); tryW(a + c + b); }
+  }
+  return best && most >= Math.max(3, own * 60) ? best : null; /* a word in one or two names is a typo only next to a far commoner one: "chiken" 1 against "chicken" 1,586, but not "bihon" 1 against "bison" 18 or "horse" 2 against "house" 60 */
+}
 function foodSearch(q, limit, cat){
+  const r = foodSearchTyped(q, limit, cat); if (r.total >= 3) return r;
+  const m = foodWords(), words = plainTxt(q).split(' ').filter(Boolean); let fixed = false;
+  const q2 = words.map(w => { const f = typoFix(w, m); if (f) fixed = true; return f || w; }).join(' ');
+  if (!fixed) return r;
+  const r2 = foodSearchTyped(q2, limit, cat); if (!r2.total) return r;
+  const key = it => it.name + '|' + (it.brand || '') + '|' + Math.round(Number(it.kcal) || 0), seen = new Set(r.items.map(key));
+  const extra = r2.items.filter(it => !seen.has(key(it)));
+  return { items: r.items.concat(extra).slice(0, limit), total: r.total + r2.total, fixed: q2 };
+}
+function foodSearchTyped(q, limit, cat){
   const pq = plainTxt(q);
   const stem = w => w.length > 3 && w.charAt(w.length - 1) === 's' && w.charAt(w.length - 2) !== 's' ? (w.slice(-3) === 'oes' ? w.slice(0, -2) : w.slice(0, -1)) : w; /* eggs = egg, tomatoes = tomato; "swiss" stays; -ies is left alone (fries, cookies) */
   const terms = pq.split(' ').filter(Boolean).map(stem); if (!terms.length) return { items: [], total: 0 };
@@ -1006,7 +1044,7 @@ function foodSearch(q, limit, cat){
   const is = x => x === pqs || stemAll(x) === pqs; /* the same words, plural endings aside */
   const tails = n => { const m = stemAll(n); return m.length > pqs.length && m.slice(-pqs.length - 1) === ' ' + pqs; };
   /* named = the bonus the row just rated got for being named as typed. ref = a reference row (library, curated list, USDA) answers to what was typed. tailOnly = the bonus came from the "name ends with the words" rule. */
-  let named = 0, ref = false, tailOnly = false;
+  let named = 0, ref = false, tailOnly = false, home = false, core = null; /* core: the bundle row's plain name without a pack size at the end ("milo 24g" -> "milo"), null when it has none. home: a Philippine packaged product (480 barcode or tagged PH) begins with the words typed */
   /* The words typed are the food itself, not an ingredient or a side: +3 for "Rice, cooked" and "Fried egg", +2.75 for "Fish, salmon". The comma rule is the USDA way of naming; a product label with commas is a list of flavours, so an Open Food Facts row (off) gets 7 when its whole name is what was typed once brackets and plural endings are set aside, 3 when it ends with it, and nothing for commas. */
   const head = (raw, off) => {
     const bare = String(raw).replace(/\([^)]*\)/g, ' ');
@@ -1022,7 +1060,7 @@ function foodSearch(q, limit, cat){
   const rate = (n, name, aka, cat, bonus, raw, off) => {
     let sc = bonus, whole = true;
     for (let k = 0; k < T.length; k++) { const x = termScore(n, name, aka, cat, T[k]); if (x < -5) { named = 0; return -1; } if (x !== 6 && x !== 3.5) whole = false; sc += x; }
-    tailOnly = false; named = name === pq ? 8 : whole ? (!off && is(name) ? 7 : head(raw, off)) : 0;
+    tailOnly = false; named = name === pq || (off && core === pq) ? 8 : whole ? (!off && is(name) ? 7 : head(raw, off)) : 0;
     return Math.max(0, sc + named - Math.min(4, name.length / 22));
   };
   const alias = al => { for (let k = 0; k < al.length; k++) if (al[k] === pq || is(al[k])) return true; return false; }; /* one of the row's other names is exactly what was typed */
@@ -1044,9 +1082,10 @@ function foodSearch(q, limit, cat){
     const wc = all ? -1 : FOOD_CATS.indexOf(want), code = db.code, src = db.src, plain = db.plain, pad = db.pad, aux = db.aux, grp = db.grp, items = db.items, alt = db.alt, ord = db.ord, nameAt = db.nameAt;
     for (let i = 0; i < items.length; i++) {
       if (wc >= 0 && code[i] !== wc) continue;
-      const s = src[i], n = plain[i], place = atPlace(code[i] === 1, grp[i]); let sc = rate(pad[i], n, place ? (aux[i] + ' ' + grp[i]).trim() : aux[i], place ? '' : grp[i], DB_BONUS[s], items[i][nameAt], s === 3);
+      const s = src[i], n = plain[i], place = atPlace(code[i] === 1, grp[i]); core = db.core[i]; let sc = rate(pad[i], n, place ? (aux[i] + ' ' + grp[i]).trim() : aux[i], place ? '' : grp[i], DB_BONUS[s], items[i][nameAt], s === 3);
       if (sc < 0) continue;
       if (s === 3 && ord[i] === 2) sc = Math.max(0, sc - OFF_ABROAD);
+      else if (s === 3 && !home && (starts(pad[i]) || (aux[i] && starts(' ' + aux[i] + ' ')))) home = true; /* its name or its brand begins with the words typed ("robinsons", "lee kum kee") */
       /* which rows make "ref": a curated row named as typed, known by that other name (which also earns ALIAS_BONUS when its own name does not say it, else raises its name bonus to ALIAS_NAMED) or beginning with the words; a USDA row whose name or comma part is the words. A USDA row that only ends with them ("Egg sandwich on wheat bread", "Non-dairy milk") is no reference. */
       if (s !== 3) { const byAlias = s === 0 && alt.has(i) && alias(alt.get(i)); if (named > 0) { if (s === 0 || !tailOnly) ref = true; } else if (byAlias || (s === 0 && starts(pad[i]))) ref = true; if (byAlias) sc += viaAlias(n) ? (named ? 0 : ALIAS_BONUS) : Math.max(0, ALIAS_NAMED - named); }
       scored.push({ s: sc, row: items[i], n: n, o: ord[i] * 1e7 + i, e: s === 3 ? named : 0, f: s === 3 && ord[i] === 2 });
@@ -1054,6 +1093,8 @@ function foodSearch(q, limit, cat){
   }
   /* A food the reference tables know by this name: a product label gets no extra credit for carrying the same words, so "Egg" by a supermarket brand no longer outranks "Boiled egg" and "Egg, whole, raw". With no such reference row (Milo, Nutella, Coke Zero) the product named as typed keeps its bonus and leads. */
   if (ref) for (let i = 0; i < scored.length; i++) { const x = scored[i]; if (x.e > 0) x.s = Math.max(0, x.s - x.e); if (x.f) x.s = Math.max(0, x.s - OFF_ABROAD_REF); }
+  /* No reference row, but a Philippine product begins with the words typed ("milo 24g", "kopiko twin"): the brand is on Philippine shelves, so a product from another market loses OFF_ABROAD_REF too, as it would for an everyday food. */
+  else if (home) for (let i = 0; i < scored.length; i++) { const x = scored[i]; if (x.f) x.s = Math.max(0, x.s - OFF_ABROAD_REF); }
   /* equal score: the shorter name, then the alphabet, then your own and library foods, then the bundle rows in their fixed order (Philippine barcode, Philippine tag, the rest; inside each the order of the bundle) */
   scored.sort((x, y) => y.s - x.s || x.n.length - y.n.length || (x.n < y.n ? -1 : x.n > y.n ? 1 : x.o - y.o));
   /* Every bundle row is listed: the importer only keeps two rows of one name and brand when they are different foods. Your own and library foods are listed once per name and calories. */
@@ -1373,7 +1414,7 @@ async function foodAction(act, b){
     if (!state.foodDb) await loadFoodDb();
     const hit = barcodeResults(q); if (hit) { state.foodResults = hit; paintFoodResults(); return; } /* a barcode saved in the app needs no network */
     state.foodResults = localResults(q, false); paintFoodResults();
-    const found = state.foodCat === 'all' ? state.foodResults.items.length : foodSearch(q, 3, 'all').items.length; /* whether to look online does not depend on the filter pill */
+    const found = foodSearchTyped(q, 3, 'all').items.length; /* whether to look online depends neither on the filter pill nor on rows the typo fallback added */
     if (found < 3 || /^\d[\d\s]{7,15}$/.test(q)) await foodOnline(q);
     return;
   }
