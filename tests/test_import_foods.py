@@ -51,6 +51,7 @@ OFF_RULES = os.path.join(FIXTURES, "off_rules.csv")
 OFF_DEDUPE = os.path.join(FIXTURES, "off_dedupe.csv")
 OFF_GUARD = os.path.join(FIXTURES, "off_alias_guard.csv")
 OFF_SERVING = os.path.join(FIXTURES, "off_serving.csv")
+OFF_DOUBT = os.path.join(FIXTURES, "off_doubt.csv")
 USDA_FLAT = os.path.join(FIXTURES, "sample_usda.csv")
 USDA_FOLDER = os.path.join(FIXTURES, "usda_fdc_mini")
 CURATED = os.path.join(FIXTURES, "local_ph_curated.json")
@@ -82,6 +83,8 @@ V2_COLUMNS = ["id", "name", "brand", "group_label", "category", "region_tags", "
               "source", "source_priority", "source_ref", "popularity", "name_key"]
 V3_NEW_COLUMNS = ["foreign_tags", "completeness", "alt_barcodes"]
 V3_COLUMNS = V2_COLUMNS + V3_NEW_COLUMNS
+V4_NEW_COLUMNS = ["doubt"]
+V4_COLUMNS = V3_COLUMNS + V4_NEW_COLUMNS
 
 # Every column the importer reads from the Open Food Facts export that the fixtures must carry.
 OFF_COLUMNS = ["code", "product_name", "product_name_en", "generic_name", "brands", "categories_en",
@@ -462,6 +465,22 @@ def serving_import():
     return cached("serving", build)
 
 
+def doubt_import():
+    """off_doubt.csv alone (doubtful rows from other markets), imported twice and exported with the default quotas."""
+    def build():
+        d = new_dir("doubt")
+        db = os.path.join(d, "foods.sqlite")
+        bundle = os.path.join(d, "food-db.json")
+        args = ["--db", db, "--off-path", OFF_DOUBT, "--export-app", bundle, "--built", BUILT, "--quiet"]
+        first = import_ok(args)
+        rows1, doc1 = snapshot(db), read_json(bundle)
+        second = import_ok(args)
+        first.update(db=db, bundle=bundle, doc=doc1, rows1=rows1, rows2=snapshot(db), doc2=read_json(bundle),
+                     summary2=second["summary"])
+        return first
+    return cached("doubt", build)
+
+
 def dedupe_import():
     """off_dedupe.csv with the flat USDA file (which holds the Skippy twin), exported."""
     def build():
@@ -604,7 +623,8 @@ class FixtureFileTests(unittest.TestCase):
             self.assertNotIn(None, row.values(), "a row has fewer cells than the header")
 
     def test_rule_fixtures_have_their_row_counts_and_complete_rows(self):
-        for path, count in ((OFF_RULES, 36), (OFF_DEDUPE, 15), (OFF_GUARD, 1), (OFF_SERVING, 18)):
+        for path, count in ((OFF_RULES, 36), (OFF_DEDUPE, 15), (OFF_GUARD, 1), (OFF_SERVING, 18),
+                            (OFF_DOUBT, 23)):
             with self.subTest(file=os.path.basename(path)):
                 with open(path, encoding="utf-8", newline="") as f:
                     header = f.readline().rstrip("\r\n").split("\t")
@@ -622,7 +642,8 @@ class FixtureFileTests(unittest.TestCase):
         proc = subprocess.run([sys.executable, "-B", os.path.join(FIXTURES, "make_off_fixtures.py"), out],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
         self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8", "replace"))
-        for name in ("sample_off.csv", "off_rules.csv", "off_dedupe.csv", "off_alias_guard.csv", "off_serving.csv"):
+        for name in ("sample_off.csv", "off_rules.csv", "off_dedupe.csv", "off_alias_guard.csv", "off_serving.csv",
+                     "off_doubt.csv"):
             with self.subTest(file=name):
                 with open(os.path.join(out, name), "rb") as made, open(os.path.join(FIXTURES, name), "rb") as kept:
                     # line endings may differ after a git checkout on Windows
@@ -714,8 +735,8 @@ class SchemaModuleCase(unittest.TestCase):
 
 
 class SchemaConstantsTests(SchemaModuleCase):
-    def test_latest_version_is_3(self):
-        self.assertEqual(food_schema.LATEST_VERSION, 3)
+    def test_latest_version_is_4(self):
+        self.assertEqual(food_schema.LATEST_VERSION, 4)
 
     def test_categories(self):
         self.assertEqual(tuple(food_schema.CATEGORIES), ("supermarket", "dining_out", "whole_food"))
@@ -1060,17 +1081,17 @@ class FreshDatabaseMigrationTests(SchemaCase):
         conn = self.connect()
         self.assertIs(conn.row_factory, sqlite3.Row)
 
-    def test_fresh_database_reaches_version_3(self):
+    def test_fresh_database_reaches_version_4(self):
         conn = self.connect()
-        self.assertEqual(food_schema.migrate(conn), 3)
-        self.assertEqual(user_version(conn), 3)
+        self.assertEqual(food_schema.migrate(conn), 4)
+        self.assertEqual(user_version(conn), 4)
 
     def test_fresh_database_has_every_version_3_column(self):
         cols = column_names(self.fresh_v2())
         self.assertEqual(sorted(set(V3_COLUMNS) - set(cols)), [], "missing columns")
 
     def test_fresh_database_has_no_other_columns(self):
-        self.assertEqual(sorted(column_names(self.fresh_v2())), sorted(V3_COLUMNS))
+        self.assertEqual(sorted(column_names(self.fresh_v2())), sorted(V4_COLUMNS))
 
     def test_new_columns_have_the_documented_types(self):
         conn = self.fresh_v2()
@@ -1092,16 +1113,16 @@ class FreshDatabaseMigrationTests(SchemaCase):
     def test_migrating_twice_changes_nothing(self):
         conn = self.fresh_v2()
         before = schema_sql(conn)
-        self.assertEqual(food_schema.migrate(conn), 3)
+        self.assertEqual(food_schema.migrate(conn), 4)
         self.assertEqual(schema_sql(conn), before)
-        self.assertEqual(user_version(conn), 3)
+        self.assertEqual(user_version(conn), 4)
 
     def test_version_survives_closing_and_reopening(self):
         conn = food_schema.connect(self.db_path)
         food_schema.migrate(conn)
         conn.close()
         again = self.connect()
-        self.assertEqual(user_version(again), 3)
+        self.assertEqual(user_version(again), 4)
         self.assertIn("calories_kcal", column_names(again))
         self.assertIn("alt_barcodes", column_names(again))
 
@@ -1113,10 +1134,10 @@ class Version1UpgradeTests(SchemaCase):
         self.assertEqual(column_names(conn), V1_COLUMNS)
         self.assertEqual(user_version(conn), 1)
 
-    def test_upgrade_returns_and_stores_version_3(self):
+    def test_upgrade_returns_and_stores_version_4(self):
         conn = self.v1_with_rows()
-        self.assertEqual(food_schema.migrate(conn), 3)
-        self.assertEqual(user_version(conn), 3)
+        self.assertEqual(food_schema.migrate(conn), 4)
+        self.assertEqual(user_version(conn), 4)
 
     def test_upgrade_keeps_every_row(self):
         conn = self.upgraded()
@@ -1205,7 +1226,7 @@ class Version1UpgradeTests(SchemaCase):
         conn = self.upgraded()
         before_rows = dict_rows(conn, "SELECT * FROM food_items ORDER BY id")
         before_schema = schema_sql(conn)
-        self.assertEqual(food_schema.migrate(conn), 3)
+        self.assertEqual(food_schema.migrate(conn), 4)
         self.assertEqual(dict_rows(conn, "SELECT * FROM food_items ORDER BY id"), before_rows)
         self.assertEqual(schema_sql(conn), before_schema)
 
@@ -1219,7 +1240,7 @@ class Version1UpgradeTests(SchemaCase):
         food_schema.migrate(conn)
         conn.close()
         again = self.connect()
-        self.assertEqual(user_version(again), 3)
+        self.assertEqual(user_version(again), 4)
         self.assertEqual(sorted(self.by_id(again)), [1, 2, 7, 12])
 
     def test_rows_added_after_the_upgrade_get_new_ids(self):
@@ -1237,10 +1258,10 @@ class Version2UpgradeTests(SchemaCase):
         self.assertEqual(user_version(conn), 2)
         self.assertEqual(column_names(conn), V2_COLUMNS)
 
-    def test_upgrade_returns_and_stores_version_3(self):
+    def test_upgrade_returns_and_stores_version_4(self):
         conn = self.v2_with_rows()
-        self.assertEqual(food_schema.migrate(conn), 3)
-        self.assertEqual(user_version(conn), 3)
+        self.assertEqual(food_schema.migrate(conn), 4)
+        self.assertEqual(user_version(conn), 4)
 
     def test_upgrade_adds_the_three_new_columns(self):
         cols = column_names(self.upgraded_from_v2())
@@ -1275,7 +1296,7 @@ class Version2UpgradeTests(SchemaCase):
         conn = self.upgraded_from_v2()
         before_rows = dict_rows(conn, "SELECT * FROM food_items ORDER BY id")
         before_schema = schema_sql(conn)
-        self.assertEqual(food_schema.migrate(conn), 3)
+        self.assertEqual(food_schema.migrate(conn), 4)
         self.assertEqual(dict_rows(conn, "SELECT * FROM food_items ORDER BY id"), before_rows)
         self.assertEqual(schema_sql(conn), before_schema)
 
@@ -1285,7 +1306,7 @@ class Version2UpgradeTests(SchemaCase):
         conn.close()
         again = food_schema.connect(self.db_path)
         self.addCleanup(again.close)
-        self.assertEqual(user_version(again), 3)
+        self.assertEqual(user_version(again), 4)
         self.assertEqual(sorted(self.by_id(again)), [3, 4, 9])
 
     def test_rows_added_after_the_upgrade_get_new_ids(self):
@@ -1472,8 +1493,8 @@ class SummaryTests(FullImportCase):
     def test_total_rows_matches_the_database(self):
         self.assertEqual(self.n_rows(), 56)
 
-    def test_database_is_at_version_3(self):
-        self.assertEqual(self.db.execute("PRAGMA user_version").fetchone()[0], 3)
+    def test_database_is_at_version_4(self):
+        self.assertEqual(self.db.execute("PRAGMA user_version").fetchone()[0], 4)
 
     def test_the_last_line_is_still_one_json_object_with_the_old_keys(self):
         self.assertEqual(parse_summary(self.imp["stdout"]), self.summary)
@@ -3246,11 +3267,12 @@ class BundleTests(BundleCase):
     # ---- the 100 g default serving for Open Food Facts rows
     def test_packaged_rows_get_100_g_first(self):
         self.assertEqual(self.rec(name="Snickers")["portions"], [["100 g", 100], ["48 g", 48]])
-        self.assertEqual(self.rec(name="Weetabix Original")["portions"],
-                         [["100 g", 100], ["2 biscuits (37.5 g)", 37.5]])
-        self.assertEqual(self.rec(name="Baked Beans in Tomato Sauce")["portions"],
-                         [["100 g", 100], ["1/2 can (200 g)", 200]])
-        self.assertEqual(self.rec(name="Pocky Chocolate")["portions"], [["100 g", 100], ["1 pack (36 g)", 36]])
+
+    def test_packaged_rows_from_other_markets_open_on_a_unit_their_label_names(self):
+        # biscuits, a can, a pack: the label's own unit comes first (rows outside the Philippines)
+        self.assertEqual(self.rec(name="Weetabix Original")["portions"], [["2 biscuits (37.5 g)", 37.5]])
+        self.assertEqual(self.rec(name="Baked Beans in Tomato Sauce")["portions"], [["1/2 can (200 g)", 200]])
+        self.assertEqual(self.rec(name="Pocky Chocolate")["portions"], [["1 pack (36 g)", 36]])
 
     def test_a_packaged_drink_keeps_its_ml_serving_first(self):
         self.assertEqual(self.rec(name="Banana Flavored Milk")["portions"], [["240 ml", 240]])
@@ -3407,13 +3429,61 @@ class DefaultPortionTests(unittest.TestCase):
         self.assertHundredFirst("Soup, ramen noodle, any flavor, dry", "Soups, Sauces, and Gravies", [["1 package without flavor packet", 81]])
 
     # ---- Open Food Facts rows: no group label, category supermarket
-    def off(self, name, portions):
-        return self.apply(name, None, portions, "supermarket", source="off")
+    def off(self, name, portions, regions="", barcode=None, brand=None):
+        item = {"name": name, "group_label": None, "category": "supermarket", "per_unit": "100g",
+                "source": "off", "region_tags": regions, "barcode": barcode, "brand": brand}
+        return self.rule(item, portions)
 
     def test_off_a_packaged_food_gets_100_g_first(self):
         self.assertEqual(self.off("Snickers", [["48 g", 48]]), [["100 g", 100], ["48 g", 48]])
-        self.assertEqual(self.off("Weetabix Original", [["2 biscuits (37.5 g)", 37.5]]),
-                         [["100 g", 100], ["2 biscuits (37.5 g)", 37.5]])
+
+    def test_off_a_philippine_row_keeps_the_old_rule(self):
+        # the label rules below are for other markets; Philippine rows are exported as before
+        for regions, barcode in (("PH", None), ("US", "4800016644504")):
+            with self.subTest(regions=regions):
+                self.assertEqual(self.off("Biscuits Original", [["2 biscuits (37.5 g)", 37.5]], regions, barcode),
+                                 [["100 g", 100], ["2 biscuits (37.5 g)", 37.5]])
+                self.assertEqual(self.off("Lemon Soda", [["1 can (355 g)", 355]], regions, barcode),
+                                 [["100 g", 100], ["1 can (355 g)", 355]])
+
+    def test_off_a_label_naming_a_unit_keeps_it_first(self):
+        for name, label, grams in (("Weetabix Original", "2 biscuits (37.5 g)", 37.5), ("Nutella B-ready", "1 bar (22 g)", 22),
+                                   ("Turkey Pot Pie", "1 pie (198 g)", 198), ("Multi Grain Bread", "1 slice (40 g)", 40),
+                                   ("Whey", "1 scoop (31 g)", 31), ("Breakfast Bowl", "1 BOWL (198 g)", 198)):
+            with self.subTest(name=name):
+                self.assertEqual(self.off(name, [[label, grams]], "US"), [[label, grams]])
+
+    def test_off_a_unit_over_700_g_is_not_a_unit(self):
+        self.assertEqual(self.off("Family Lasagna", [["1 tray (900 g)", 900]], "US"), [["100 g", 100], ["1 tray (900 g)", 900]])
+
+    def test_off_a_drink_container_or_drink_name_in_grams_keeps_its_serving(self):
+        for name, label, grams in (("Red Bull Sugarfree", "1 can (355 g)", 355), ("Strawberry Banana", "1 bottle (207 g)", 207),
+                                   ("2% Reduced Fat Milk", "1 portion (247 g)", 247), ("IPA", "355.0g", 355)):
+            with self.subTest(name=name):
+                self.assertEqual(self.off(name, [[label, grams]], "US"), [[label, grams]])
+
+    def test_off_a_can_of_food_is_not_a_drink(self):
+        # "1 can" is a drink only when the name has no food word; a half can of beans is a unit, a whole can of hash is not
+        self.assertEqual(self.off("Corned Beef Hash", [["1 serving (425 g)", 425]], "US"),
+                         [["100 g", 100], ["1 serving (425 g)", 425]])
+        self.assertEqual(self.off("Chunk Light Tuna in Broth", [["1 serving (165 g)", 165]], "US"),
+                         [["100 g", 100], ["1 serving (165 g)", 165]])
+
+    def test_off_a_spoon_food_by_its_name_keeps_a_small_serving(self):
+        for name, label, grams in (("Natural Creamy Peanut Butter Spread", "1 serving (32 g)", 32),
+                                   ("REAL MAYONNAISE", "1 serving (14 g)", 14), ("Tomato Ketchup", "17g", 17),
+                                   ("Organic roasted chicken base", "1 tsp (6 g)", 6)):
+            with self.subTest(name=name):
+                self.assertEqual(self.off(name, [[label, grams]], "US"), [[label, grams]])
+
+    def test_off_a_snack_named_like_a_spoon_food_gets_100_g_first(self):
+        for name, label, grams in (("Peanut Butter Pretzels", "1 serving (28 g)", 28),
+                                   ("Sea Salt Kettle Chips", "1 serving (28 g)", 28), ("Honey Granola", "1 serving (40 g)", 40)):
+            with self.subTest(name=name):
+                self.assertEqual(self.off(name, [[label, grams]], "US"), [["100 g", 100], [label, grams]])
+
+    def test_off_a_spoon_food_over_40_g_gets_100_g_first(self):
+        self.assertEqual(self.off("Pasta Sauce", [["1/2 cup (125 g)", 125]], "US"), [["100 g", 100], ["1/2 cup (125 g)", 125]])
 
     def test_off_a_portion_in_ml_cl_l_or_fl_oz_marks_a_drink_that_keeps_its_serving(self):
         for label, amount in (("240 ml", 240), ("1 can (33 cl)", 330), ("1 bottle (1 l)", 1000),
@@ -3432,6 +3502,67 @@ class DefaultPortionTests(unittest.TestCase):
 
     def test_off_a_row_without_portions_has_none(self):
         self.assertEqual(self.off("Snickers", []), [])
+
+    def test_off_any_count_of_pieces_up_to_60_is_a_unit(self):
+        for name, label, grams in (("Frosted Strawberry Pop-Tarts", "2 pastries (96 g)", 96),
+                                   ("Goldfish Cheddar", "55 pieces (30 g)", 30), ("Original Crackers", "8 crackers (30 g)", 30),
+                                   ("belVita Breakfast", "4 biscuits (50 g)", 50), ("Babybel", "1 mini babybel (20 g)", 20),
+                                   ("Hawaiian Sweet Rolls", "1 roll (28 g)", 28),
+                                   ("Breakfast Sausage", "3 skillet-cooked links (55 g)", 55),
+                                   ("Pita Crackers", "10 CRACKERS | ABOUT (30 g)", 30), ("Half Pizza", "1/2 pizza (150 g)", 150),
+                                   ("Dark Chocolate Almond Coconut with Almonds", "1 bar (40 g)", 40),
+                                   ("Whole Natural Almonds", "1 bag (45 g)", 45), ("Twenty Four Grains and Seeds", "1 slice (28 g)", 28),
+                                   ("Chips Ahoy! Minis Cookies", "5 cookies (31 g)", 31)):
+            with self.subTest(name=name):
+                self.assertEqual(self.off(name, [[label, grams]], "US"), [[label, grams]])
+
+    def test_off_a_measure_a_share_of_a_pack_or_a_poured_food_is_no_unit(self):
+        for name, label, grams in (("Long Grain Rice", "0.25 cup (45 g)", 45), ("Corn Flakes", "1 cup (40 g)", 40),
+                                   ("Potato Chips", "13 CHIPS | ABOUT (28 g)", 28), ("Whole Almonds", "23 almonds (28 g)", 28),
+                                   ("Deluxe Mixed Nuts", "32 pieces (28 g)", 28), ("Salmon Wellington", "1/5 package (140 g)", 140),
+                                   ("Devil's Food Cake Mix", "0.11 package (42 g)", 42), ("Dark Chocolate 70%", "1/3 bar (30 g)", 30),
+                                   ("Popping Corn", "2 tbsps unpopped (25 g)", 25), ("Jelly Beans", "70 pieces (40 g)", 40),
+                                   ("Kettle Cooked Potato Chips", "15 chip (28 g)", 28), ("Cheese Puffs", "36 pieces (28 g)", 28),
+                                   ("Peruvian Lentils", "1/2 c (140 g)", 140), ("Smoked Turkey", "2 ounses (56.7 g)", 56.7),
+                                   ("Marinara", "1 jar (680 g)", 680)):
+            with self.subTest(name=name):
+                self.assertEqual(self.off(name, [[label, grams]], "US"), [["100 g", 100], [label, grams]])
+
+    def test_off_a_unit_named_in_the_brackets_of_a_weight_counts(self):
+        self.assertEqual(self.off("Snack Stacks", [["19 g (1 tub)", 19]], "US"), [["19 g (1 tub)", 19]])
+        self.assertEqual(self.off("Corn Thins", [["18 g (about 3 slices)", 18]], "US"), [["18 g (about 3 slices)", 18]])
+        self.assertEqual(self.off("Potato Chips", [["28 g (13 CHIPS | ABOUT)", 28]], "US"),
+                         [["100 g", 100], ["28 g (13 CHIPS | ABOUT)", 28]])
+
+    def test_off_a_bar_by_its_name_opens_on_its_serving(self):
+        self.assertEqual(self.off("Chocolate Chip", [["1 serving (68 g)", 68]], "US", brand="Clif Bar"), [["1 serving (68 g)", 68]])
+        self.assertEqual(self.off("Chewy Trail Mix Bar", [["35g", 35]], "US"), [["35g", 35]])
+        for name, brand, label, grams in (("Dark Chocolate Bar", "Hershey's", "30 g", 30),     # a share of a bar
+                                          ("Bologna", "Bar-S", "1 serving (32 g)", 32),
+                                          ("Lemon Bar Mix", None, "30 g", 30),
+                                          ("Sharing Bar", None, "150 g", 150)):
+            with self.subTest(name=name):
+                self.assertEqual(self.off(name, [[label, grams]], "US", brand=brand), [["100 g", 100], [label, grams]])
+
+    def test_off_words_inside_other_words_and_brands_do_not_make_a_snack(self):
+        # "bar" in barbecue, "pop" in poppyseed and in the brand Popeyes, "bar" in the brand Barney Butter
+        for name, brand, label, grams in (("Barbecue Sauce", None, "1 serving (36 g)", 36),
+                                          ("Poppyseed Dressing", None, "1 serving (30 g)", 30),
+                                          ("Hot Sauce", "Popeyes", "1 tsp (5 g)", 5),
+                                          ("Peanut Butter", "Barney Butter", "1 serving (32 g)", 32),
+                                          ("Chocolate Hazelnut Spread", None, "1 serving (37 g)", 37)):
+            with self.subTest(name=name):
+                self.assertEqual(self.off(name, [[label, grams]], "US", brand=brand), [[label, grams]])
+        for name, brand, label, grams in (("Dark Chocolate Sea Salt", None, "1 serving (30 g)", 30),
+                                          ("Caramel Almond & Sea Salt", "KIND", "1 serving (40 g)", 40),
+                                          ("Heavy Duty Foil", None, "1 serving (30 g)", 30)):
+            with self.subTest(name=name):
+                self.assertEqual(self.off(name, [[label, grams]], "US", brand=brand), [["100 g", 100], [label, grams]])
+
+    def test_off_a_container_over_a_litre_is_no_drink_serving(self):
+        self.assertEqual(self.off("Party Punch Base", [["1 bottle (3000 g)", 3000]], "US"),
+                         [["100 g", 100], ["1 bottle (3000 g)", 3000]])
+        self.assertEqual(self.off("Party Punch Base", [["1 bottle (500 g)", 500]], "US"), [["1 bottle (500 g)", 500]])
 
     # ---- e: "default_portion" in the curated list, end to end
     def curated_bundle(self, entries):
@@ -3659,12 +3790,12 @@ class CommandLineTests(unittest.TestCase):
         imp = import_ok(["--db", self.db, "--curated-json", CURATED, "--quiet"], isolated=True)
         self.assertEqual(imp["summary"]["kept"]["curated"], 8)
 
-    def test_creates_the_database_at_version_3(self):
+    def test_creates_the_database_at_version_4(self):
         self.assertFalse(os.path.exists(self.db))
         import_ok(["--db", self.db, "--curated-json", CURATED, "--quiet"])
         conn = open_db(self.db)
         try:
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 4)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM food_items").fetchone()[0], 8)
             self.assertEqual(sorted(set(V3_NEW_COLUMNS) - set(column_names(conn))), [])
         finally:
@@ -3681,7 +3812,7 @@ class CommandLineTests(unittest.TestCase):
         summary = import_ok(["--db", self.db, "--curated-json", CURATED, "--quiet"])["summary"]
         conn = open_db(self.db)
         try:
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 4)
             old = {r["id"]: r for r in conn.execute("SELECT * FROM food_items WHERE id IN (3, 4, 9)")}
         finally:
             conn.close()
@@ -3708,7 +3839,7 @@ class CommandLineTests(unittest.TestCase):
         summary = import_ok(["--db", self.db, "--curated-json", CURATED, "--quiet"])["summary"]
         conn = open_db(self.db)
         try:
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 4)
             old = conn.execute("SELECT name, calories_kcal, source_ref FROM food_items WHERE id = 5").fetchone()
         finally:
             conn.close()
@@ -4084,6 +4215,502 @@ class ServingTypedRuleTests(unittest.TestCase):
         self.assertEqual(row["calories_kcal"], 433)
 
 
+# ---------------------------------------------------------------------------------------
+# doubtful rows from other markets (pool_doubt) and the US pool's rules; off_doubt.csv, D1..D23
+# as in make_off_fixtures.py
+# ---------------------------------------------------------------------------------------
+
+class DoubtCase(DbCase):
+    @classmethod
+    def load(cls):
+        return doubt_import()
+
+    def code(self, n, prefix="001"):
+        return ean(prefix, n)
+
+    def off_names(self):
+        doc = self.imp["doc"]
+        return [r[0] for r in doc["items"] if r[doc["fields"].index("source")] == 3]
+
+
+class DoubtImportTests(DoubtCase):
+    def test_counts(self):
+        # 23 read; D3 merges into D2, D17 into D18, D19 into D20 and D22 into D23; the reasons are counted
+        # as they are found
+        self.assertEqual(self.summary["read"]["off"], 23)
+        self.assertEqual(self.summary["kept"]["off"], 19)
+        self.assertEqual(self.summary["doubts"], {"dry_coffee": 1, "juice_high": 1, "not_food": 1, "per_bottle": 1,
+                                                  "per_serving": 4, "zero_kcal": 1})
+
+    def test_each_doubtful_row_is_kept_with_its_reason_and_its_numbers(self):
+        for n, reason in ((8001, "per_serving"), (8004, "per_bottle"), (8005, "juice_high"), (8006, "zero_kcal"),
+                          (8007, "not_food")):
+            with self.subTest(reason=reason):
+                self.assertEqual(self.off_row(self.code(n))["doubt"], reason)
+        row = self.off_row(self.code(8001))
+        self.near(row["calories_kcal"], 260)                 # not re-based: the row is only kept out of the app
+        self.assertEqual(row["basis"], "database")
+
+    def test_philippine_british_and_plain_rows_have_no_doubt(self):
+        for code in (ean("480", 8011), ean("500", 8012), self.code(8013), self.code(8016), self.code(8008)):
+            with self.subTest(code=code):
+                self.assertIsNone(self.off_row(code)["doubt"])
+
+    def test_a_marked_row_that_takes_in_its_same_name_twin_stays_marked(self):
+        # D2 (more scans, more numbers) is the survivor, as it always was; D3 merges into it
+        row = self.one_row("name = 'Ground Coffee'")
+        self.assertEqual(row["barcode"], self.code(8002))
+        self.near(row["calories_kcal"], 396.6)
+        self.assertEqual(row["doubt"], "dry_coffee")
+        self.assertIn(self.code(8003), json.dumps(json.loads(row["alt_barcodes"])))
+        self.assertEqual(json.loads(row["portions"])[0][1], 10)   # the serving D2 lacked
+
+    def test_a_twin_with_the_same_calories_and_no_serving_takes_the_mark_with_the_serving(self):
+        # D18 has no serving size, so no pattern can be read from it; it survives the merge with D17
+        # (same name, brand and calories), takes D17's serving and, with it, D17's mark
+        row = self.one_row("name = 'Creamy Peanut Butter'")
+        self.assertEqual(row["barcode"], self.code(8018))
+        self.near(row["calories_kcal"], 190)
+        self.assertEqual(json.loads(row["portions"])[0][1], 32)
+        self.assertEqual(row["doubt"], "per_serving")
+        self.assertEqual(row["popularity"], 20)              # the higher scan count of the two
+
+    def test_a_twin_that_passed_the_test_with_its_own_serving_changes_places_with_the_marked_row(self):
+        # D22 (marked, more scans and numbers) would be the survivor; D23 has the same can worked out per 100 g
+        row = self.one_row("name = 'Cut Green Beans'")
+        self.assertEqual(row["barcode"], self.code(8023))
+        self.near(row["calories_kcal"], 16.5)
+        self.near(row["protein_g"], 0.83)
+        self.assertIsNone(row["doubt"])
+        self.assertIn(self.code(8022), json.dumps(json.loads(row["alt_barcodes"])))
+        self.assertEqual(row["popularity"], 21)              # the higher scan count of the two
+
+    def test_which_twin_stays(self):
+        import import_foods
+
+        def kept(doubt=None, portions='[["1 cup (240 ml)",240]]', regions="US", barcode="0012345678905", source="off"):
+            return import_foods._Kept((1, "k", source, "100g", 50.0, None, regions, barcode, 0, 0, portions, "[]",
+                                       doubt))
+
+        better = import_foods._better_twin
+        self.assertTrue(better(kept("per_serving"), kept()))
+        self.assertTrue(better(kept("macro_mismatch"), kept(portions="[]")))
+        self.assertFalse(better(kept("per_serving"), kept(portions="[]")))        # no serving: it was never tested
+        self.assertFalse(better(kept("dry_coffee"), kept()))                       # same name, same calories: same mistake
+        self.assertFalse(better(kept("per_serving"), kept("per_serving")))
+        self.assertFalse(better(kept(), kept()))
+        self.assertFalse(better(kept("per_serving"), kept(regions="PH,US")))       # Philippine rows are not tested
+        self.assertFalse(better(kept("per_serving"), kept(barcode="4800344001123")))
+        self.assertFalse(better(kept("per_serving", regions="PH,US"), kept()))
+        self.assertFalse(better(kept("per_serving", source="usda"), kept()))
+
+    def test_of_two_records_of_one_barcode_the_unmarked_one_is_kept(self):
+        # D19 (marked, 30 scans) and D20 (believable, 1 scan) share a barcode: D20 is the record that stays
+        row = self.off_row(self.code(8019))
+        self.near(row["calories_kcal"], 452.4)
+        self.assertIsNone(row["doubt"])
+
+    def test_a_philippine_row_never_takes_a_mark_in_a_merge(self):
+        import import_foods
+
+        def kept(regions, barcode, doubt=None, source="off"):
+            return import_foods._Kept((1, "k", source, "100g", 10.0, None, regions, barcode, 0, 0, "[]", "[]", doubt))
+
+        for regions, barcode, source, want in (("US", "0012345678905", "off", "per_serving"),
+                                               ("PH,US", "0012345678905", "off", None),
+                                               ("US", "4800344001123", "off", None),
+                                               ("US", "0012345678905", "usda", None)):
+            with self.subTest(regions=regions, barcode=barcode, source=source):
+                keeper = kept(regions, barcode, source=source)
+                import_foods._absorb(keeper, kept("US", "0012345678912", "per_serving"), True)
+                self.assertEqual(keeper.doubt, want)
+        keeper = kept("US", "0012345678905")
+        import_foods._absorb(keeper, kept("US", "0012345678912", "macro_mismatch"), True)
+        self.assertIsNone(keeper.doubt)                      # read from the other row's own macros: not passed on
+        keeper = kept("US", "0012345678905")
+        keeper.portions = '[["250 ml",250]]'
+        import_foods._absorb(keeper, kept("US", "0012345678912", "per_serving"), True)
+        self.assertIsNone(keeper.doubt)                      # it has a serving of its own and passed the test with it
+        import_foods._absorb(keeper, kept("US", "0012345678929", "dry_coffee"), True)
+        self.assertEqual(keeper.doubt, "dry_coffee")         # read from the name and the calories, which it shares
+        keeper = kept("US", "0012345678905")
+        import_foods._absorb(keeper, kept("US", "0012345678912", "per_serving"), False)
+        self.assertIsNone(keeper.doubt)                      # a barcode merge passes nothing on
+
+    def test_a_second_import_changes_nothing(self):
+        self.assertEqual(self.imp["rows1"], self.imp["rows2"])
+        self.assertEqual(self.imp["doc"], self.imp["doc2"])
+        self.assertEqual(self.imp["summary2"]["doubts"], self.summary["doubts"])
+
+
+class DoubtSelectionTests(DoubtCase):
+    def test_pools_leave_out_doubtful_rows_and_the_us_pool_leaves_out_british_packs(self):
+        self.assertEqual(self.off_names(), [
+            "Soy Sauce",                                     # PH: the Philippine row, never marked
+            "Cut Green Beans",                               # US, most scanned first (21, 5 and 4 scans) ...
+            "Classic Potato Chips", "Pretzel Twists",
+            "Real Mayonnaise",                               # ... a spoon food with no serving size: 8 scans count as 4
+            "Hazelnut Spread", "Whole Egg Mayonnaise", "Espresso Coffee Capsules", "Honey Oat Bar",
+            "Original Crumpets",                             # UK: the British pack tagged US and UK,
+            "Semi Skimmed Milk", "Oat Biscuits"])            # and the British shop's own pack tagged US only
+
+    def test_no_doubtful_row_is_exported(self):
+        names = self.off_names()
+        for gone in ("Crunchy Peanut Butter Bar", "Protein Plus Drink", "100% Apple Juice", "Fresh Strawberries",
+                     "Argan Oil Shampoo", "Ground Coffee", "Creamy Peanut Butter"):
+            self.assertNotIn(gone, names)
+
+
+class UnmarkedDatabaseTests(SchemaCase):
+    """A database upgraded from version 3 has no doubt marks: no market pool may be chosen from it."""
+
+    def filled(self, rows, marked=0):
+        import import_foods
+        conn = self.connect()
+        food_schema.migrate(conn)
+        conn.executemany(
+            "INSERT INTO food_items (name, brand, category, region_tags, barcode, calories_kcal, protein_g, carbs_g,"
+            " fat_g, source, source_priority, source_ref, popularity, name_key, completeness, doubt)"
+            " VALUES (?, 'Brand', 'supermarket', 'US', ?, 100, 5, 10, 4, 'off', 3, ?, 3, ?, 50, ?)",
+            (("Food %05d" % n, "%013d" % (10000000000 + n), "%013d" % (10000000000 + n), "brand|food %05d" % n,
+              "per_serving" if n < marked else None) for n in range(rows)))
+        conn.commit()
+        return import_foods, conn
+
+    def test_many_rows_from_other_markets_without_one_mark_are_refused(self):
+        m, conn = self.filled(10000)
+        self.assertTrue(m.unmarked_database(conn))
+        out = os.path.join(new_dir("unmarked"), "food-db.json")
+        with self.assertRaises(m.InputError) as caught:
+            m.export_app(conn, out, {"US": 50, "UK": 0, "JP": 0, "KR": 0, "AS": 0}, BUILT)
+        self.assertIn("doubtful numbers", str(caught.exception))
+        self.assertFalse(os.path.exists(out))
+        counts, details = m.export_app(conn, out, {"US": 0, "UK": 0, "JP": 0, "KR": 0, "AS": 0}, BUILT)
+        self.assertEqual(details["pools"]["US"], 0)                    # with every pool off there is nothing to guard
+
+    def test_a_marked_database_and_a_small_one_are_exported(self):
+        m, conn = self.filled(10000, marked=3)
+        self.assertFalse(m.unmarked_database(conn))
+        out = os.path.join(new_dir("marked"), "food-db.json")
+        counts, details = m.export_app(conn, out, {"US": 50, "UK": 0, "JP": 0, "KR": 0, "AS": 0}, BUILT)
+        self.assertEqual(details["pools"]["US"], 50)
+
+    def test_a_small_database_is_let_through(self):
+        m, conn = self.filled(200)
+        self.assertFalse(m.unmarked_database(conn))                    # test fixtures and small trials
+
+
+class UsPoolRuleTests(unittest.TestCase):
+    """The helpers pick_off_rows uses for the US pool (no file)."""
+
+    @classmethod
+    def setUpClass(cls):
+        import import_foods
+        cls.m = import_foods
+
+    def test_a_short_us_code_becomes_its_long_form(self):
+        self.assertEqual(self.m.upce_to_upca("04913207"), "049000001327")      # Sprite
+        self.assertEqual(self.m.upce_to_upca("01280504"), "012000008054")      # Diet Pepsi
+        for code in ("03276440", "00357937", "29440689", "80177173", "0491320", "0491320x", "04913208"):
+            with self.subTest(code=code):
+                self.assertIsNone(self.m.upce_to_upca(code))   # a shop's own code, an EAN-8, a wrong check digit
+
+    def test_which_rows_are_british_packs(self):
+        british = self.m.british_pack
+        for barcode, brand, regions in (("5000159407236", "Mars", "US"),                    # a British barcode
+                                        ("0000050137992", "McVitie's", "US,UK"),            # a British EAN-8
+                                        ("0000003276440", "Tesco", "US,UK"), (None, "TESCO", "US"),
+                                        ("0000000357937", "Sainsbury's", "US"), ("0000029494774", "M&S Food", "US"),
+                                        ("0000029512355", "Marks & Spencers", "US"),
+                                        ("0000020724696", "Alesto", "US,UK"),               # an in-store code tagged UK
+                                        ("0000000514316", "Trader Joe's", "US,UK")):
+            with self.subTest(barcode=barcode, brand=brand):
+                self.assertEqual(british(barcode, brand, regions), 1)
+        for barcode, brand, regions in (("0000080177173", "Ferrero", "US,UK"),              # Nutella: an Italian EAN-8
+                                        ("0000001280504", "Pepsi", "US,UK"),                # a US UPC-E
+                                        ("0000000514316", "Trader Joe's", "US"),            # Trader Joe's own code
+                                        ("0041331024969", "Goya", "US"), ("0028400006057", "M&M's", "US"),
+                                        ("3017620425035", "Nutella", "US,UK"), (None, None, "US")):
+            with self.subTest(barcode=barcode, brand=brand):
+                self.assertEqual(british(barcode, brand, regions), 0)
+
+    def test_which_rows_without_a_serving_count_for_half(self):
+        for name in ("Tabasco Pepper Sauce", "Real Mayonnaise", "Sichuan Chili Crisp", "Barista Edition Oat Drink",
+                     "Instant Coffee", "Chewy Granola Bars"):
+            with self.subTest(name=name):
+                self.assertEqual(self.m.needs_serving(name, 120), 1)
+        for name in ("Sardines Skinless & Boneless In Pure Olive Oil", "Red Kidney Beans in water",
+                     "Movie Theater Butter Flavored Premium Popcorn", "Chicken breast slices roasted with brown sugar",
+                     "No Salt Tortilla Chips", "Oats And Honey Granola Cereal", "Pineapple Rings in syrup",
+                     "Sharp Cheddar Cheese"):
+            with self.subTest(name=name):
+                self.assertEqual(self.m.needs_serving(name, 120), 0)
+        self.assertEqual(self.m.needs_serving("Purified Water", 0), 0)       # no calories: a serving changes nothing
+        self.assertEqual(self.m.needs_serving(None, None), 0)
+
+
+class PoolDoubtRuleTests(unittest.TestCase):
+    """pool_doubt on single rows (no file)."""
+
+    @classmethod
+    def setUpClass(cls):
+        import import_foods
+        cls.m = import_foods
+
+    def row(self, name, kcal, protein, carbs, fat, regions="US", barcode="0012345678905", brand=None, fibre=None,
+            sugars=None):
+        row = self.m.blank_row("off")
+        row.update({"name": name, "brand": brand, "calories_kcal": kcal, "protein_g": protein, "carbs_g": carbs,
+                    "fat_g": fat, "fibre_g": fibre, "sugars_g": sugars, "region_tags": regions, "barcode": barcode})
+        return row
+
+    def doubt(self, row, serving_size="", serving_g=None, categories="", alcohol=None):
+        return self.m.pool_doubt(row, serving_size, serving_g, categories, alcohol)
+
+    def test_per_serving_needs_round_figures_and_an_uneven_share_for_the_serving(self):
+        bar = self.row("Peanut Butter Bar", 260, 9, 42, 7)
+        self.assertEqual(self.doubt(bar, "1 bar (68 g)", 68), "per_serving")
+        self.assertEqual(self.doubt(bar, "1 bar (68 g)", None), "per_serving")            # weight read from the text
+        self.assertEqual(self.doubt(bar, "1 bar (40 g)", 40), "")                         # 104 kcal: round too
+        self.assertEqual(self.doubt(bar, "1 serving (95 g)", 95), "")                     # near 100 g tells nothing
+        self.assertEqual(self.doubt(self.row("Peanut Butter Bar", 382.4, 13.2, 61.8, 10.3), "1 bar (68 g)", 68), "")
+
+    def test_per_serving_is_not_asked_when_the_re_based_figures_are_impossible(self):
+        self.assertEqual(self.doubt(self.row("Mayonnaise", 700, 1, 1, 78), "1 tbsp (14 g)", 14), "")
+
+    def test_per_serving_is_for_us_labels_only(self):
+        bar = self.row("Peanut Butter Bar", 260, 9, 42, 7, regions="US,UK")
+        self.assertEqual(self.doubt(bar, "1 bar (68 g)", 68), "")
+        for regions, barcode in (("UK", "0012345678905"), ("US", "5012345678900"), ("US", "4901234567894")):
+            with self.subTest(regions=regions, barcode=barcode):
+                self.assertEqual(self.doubt(self.row("Peanut Butter Bar", 260, 9, 42, 7, regions, barcode),
+                                            "1 bar (68 g)", 68), "")
+
+    def test_per_bottle_needs_a_liquid_serving_and_too_many_calories_for_a_drink(self):
+        self.assertEqual(self.doubt(self.row("Lemon Soda", 150, 0, 41, 0), "12 fl oz (360 ml)", 360), "per_bottle")
+        self.assertEqual(self.doubt(self.row("Lemon Soda", 150, 0, 41, 0), "360 g", 360), "")      # no liquid unit
+        self.assertEqual(self.doubt(self.row("Whole Milk", 125, 8, 12, 5), "1 cup (240 ml)", 240), "")  # milk: up to 130
+        self.assertEqual(self.doubt(self.row("Whole Milk", 150, 8, 12, 8), "1 cup (240 ml)", 240), "per_bottle")
+        self.assertEqual(self.doubt(self.row("Protein Shake", 160, 9, 20, 5), "1 bottle (325 ml)", 325), "")  # shakes: 165
+        self.assertEqual(self.doubt(self.row("Chocolate Syrup", 260, 2, 63, 0.5), "1 bottle (750 ml)", 750), "")
+        self.assertEqual(self.doubt(self.row("Huile de table", 900, 0, 0, 100), "1 l", 1000), "")
+
+    def test_per_bottle_is_also_a_drink_with_more_protein_than_any_drink_has(self):
+        # a 325 ml shake's label (160 kcal, 30 g protein) typed per 100 ml: 160 x 3.25 = 520 is round, 160 is under 165
+        shake = self.row("Nutritional Shake", 160, 30, 5, 3)
+        self.assertEqual(self.doubt(shake, "1 shake (325 ml)", 325), "per_bottle")
+        self.assertEqual(self.doubt(shake, "1 scoop (325 g)", 325), "")                    # no liquid unit
+        self.assertEqual(self.doubt(self.row("Protein Shake", 50, 9.2, 1.5, 0.9), "1 shake (325 ml)", 325), "")
+
+    def test_juice_high_needs_a_drinks_category_and_a_drink_name(self):
+        juice = self.row("100% Apple Juice", 170, 0, 41, 0)
+        self.assertEqual(self.doubt(juice, "", None, "Beverages,Fruit juices"), "juice_high")
+        self.assertEqual(self.doubt(juice, "", None, "Plant-based foods and beverages"), "")       # not a drinks category
+        self.assertEqual(self.doubt(juice, "1 packet (20 g)", 20, "Beverages"), "")               # a powder's serving
+        self.assertEqual(self.doubt(self.row("Strawberry Milk Juice", 170, 3, 30, 3), "", None, "Beverages"), "")
+        self.assertEqual(self.doubt(self.row("Apple Juice Concentrate", 170, 0, 41, 0), "", None, "Beverages"), "")
+        self.assertEqual(self.doubt(self.row("Apple Juice", 46, 0, 11, 0), "", None, "Beverages"), "")
+
+    def test_dry_coffee_is_the_powder_figure_on_coffee(self):
+        self.assertEqual(self.doubt(self.row("Classic Roast Ground Coffee", 396.6, 14.4, 40.2, 15.4), "177ml", 177),
+                         "dry_coffee")
+        self.assertEqual(self.doubt(self.row("Instant Coffee", 352, 12.2, 75.4, 0.5)), "")
+        # the exact figures of the reference record count under any name; near figures need the word coffee
+        self.assertEqual(self.doubt(self.row("French Roast", 396.6, 14.4, 40.2, 15.4)), "dry_coffee")
+        self.assertEqual(self.doubt(self.row("Hazelnut Wafer", 400, 14.4, 44, 16)), "")
+
+    def test_zero_kcal_on_a_caloric_food(self):
+        zero = lambda name: self.row(name, 0, 0, 0, 0)
+        self.assertEqual(self.doubt(zero("Fresh Strawberries")), "zero_kcal")
+        self.assertEqual(self.doubt(zero("Light Mayonnaise")), "zero_kcal")                # "mayo" outweighs "light"
+        for name in ("Diet Ginger Ale", "Strawberry Sparkling Water", "Kosher Dill Pickle Chips", "Hot Sauce",
+                     "Cotton Candy Energy Drink"):
+            with self.subTest(name=name):
+                self.assertEqual(self.doubt(zero(name)), "")
+        self.assertEqual(self.doubt(self.row("Fresh Strawberries", 0, 0, 0, None)), "")    # a blank is not a zero
+        # the words that excuse a zero are read in the brand too; teas and vinegars have no calories
+        self.assertEqual(self.doubt(self.row("Tangerine & Wild Strawberry", 0, 0, 0, 0, brand="S. Pellegrino Essenza")), "")
+        self.assertEqual(self.doubt(self.row("Sugar Cookie Sleigh Ride Herbal Tea", 0, 0, 0, 0)), "")
+        self.assertEqual(self.doubt(self.row("Seasoned Rice Vinegar", 0, 0, 0, 0)), "")
+        self.assertEqual(self.doubt(self.row("Blue cheese dressing", 0, 0, 0, 0, brand="Walden Farms")), "")
+
+    def test_thin_oil_is_a_plain_oil_with_a_spoonful_of_fat(self):
+        self.assertEqual(self.doubt(self.row("Olive oil", 120, 0, 0, 14)), "thin_oil")
+        self.assertEqual(self.doubt(self.row("Extra Virgin Olive Oil", 824, 0, 0, 91.6)), "")
+        self.assertEqual(self.doubt(self.row("Butter with Olive Oil & Sea Salt Spread", 643, 0, 0, 71.4)), "")
+        self.assertEqual(self.doubt(self.row("Olive Oil Cooking Spray", 0, 0, 0, 0)), "")
+        self.assertEqual(self.doubt(self.row("Sardines in Olive Oil", 235, 25.9, 0, 14.1)), "")
+
+    def test_macro_mismatch_is_calories_a_quarter_away_from_the_rows_own_macros(self):
+        # too few: popcorn at 380 kcal next to 35.8 g of fat (the macros give 559)
+        popcorn = self.row("White Cheddar Popcorn", 380, 9.4, 52.7, 35.8, fibre=5.7)
+        self.assertEqual(self.doubt(popcorn, "1 package (53.1 g)", 53.1), "macro_mismatch")
+        # too many: a cereal carrying its with-milk calories (the macros give 404)
+        cereal = self.row("Lucky Charms", 556, 8.3, 83.3, 4.2, fibre=5.6)
+        self.assertEqual(self.doubt(cereal, "1 serving (36 g)", 36), "macro_mismatch")
+        # within a quarter, or within what rounding a small serving's label explains: no mark
+        self.assertEqual(self.doubt(self.row("Froot Loops", 469, 5.1, 87.2, 3.9), "1 cup (39 g)", 39), "")
+        self.assertEqual(self.doubt(self.row("Hot Sauce", 0, 0, 20, 0), "1 tsp (5 g)", 5), "")
+        self.assertEqual(self.doubt(self.row("Chia Seeds", 393, 20.7, 1.3, 22.7, fibre=48)), "")   # fibre at 2 kcal
+        self.assertEqual(self.doubt(self.row("High Fibre Wrap", 163, 6, 44, 3.5, fibre=35)), "")   # fibre at 0 kcal
+        # fewer calories than the macros give is expected of sugar-free products and of sweetened water
+        self.assertEqual(self.doubt(self.row("Sugar Free Hard Candy", 240, 0, 96, 0)), "")
+        self.assertEqual(self.doubt(self.row("Hard Candy", 240, 0, 96, 0, sugars=60)), "macro_mismatch")
+        self.assertEqual(self.doubt(self.row("Sparkling Peach Water", 0, 0, 5, 0, sugars=0)), "")
+        # alcohol has calories that are in no macro
+        beer = self.row("Extra Lager Beer", 42, 0.3, 3.9, 0)
+        self.assertEqual(self.doubt(beer, "330ml", 330), "")
+        self.assertEqual(self.doubt(self.row("Malt Drink", 42, 0.3, 3.9, 0), "330ml", 330, alcohol=4.5), "")
+        self.assertEqual(self.doubt(self.row("Malt Drink", 42, 0.3, 3.9, 0), "330ml", 330), "macro_mismatch")
+        self.assertEqual(self.doubt(self.row("Fresh Strawberries", 57, 0.7, None, 0)), "")         # a blank: not asked
+
+    def test_not_food_is_found_by_name_but_coffee_capsules_are_food(self):
+        for name in ("Argan Oil Shampoo", "Men's Multivitamin", "Omega 3 Fish Oil", "Magnesium Capsules",
+                     "Infant Formula Powder", "Dog Food Chicken"):
+            with self.subTest(name=name):
+                self.assertEqual(self.doubt(self.row(name, 0, 0, 0, 0)), "not_food")
+        self.assertEqual(self.doubt(self.row("Espresso Coffee Capsules", 0, 0, 0, 0)), "")
+        self.assertEqual(self.doubt(self.row("Magnesium Tablets", 0, 0, 0, 0)), "")         # bouillon tablets exist
+        self.assertEqual(self.doubt(self.row("Whey Protein Supplement", 380, 75, 8, 5)), "")
+
+    def test_a_row_read_by_hand_and_found_wrong_is_listed_by_its_barcode(self):
+        doritos = self.row("Doritos Nacho Cheese", 210, 3, 25, 11, barcode="0028400006057")
+        self.assertEqual(self.doubt(doritos), "listed")
+        self.assertEqual(self.doubt(self.row("Doritos Nacho Cheese", 210, 3, 25, 11, barcode="0028400516464")), "")
+        for barcode, reason in self.m.KNOWN_WRONG.items():
+            with self.subTest(barcode=barcode):
+                self.assertRegex(barcode, r"^[0-9]{13}$")                # canonical, as normalize_barcode writes them
+                self.assertEqual(food_schema.normalize_barcode(barcode), barcode)
+                self.assertNotEqual(food_schema.barcode_origin(barcode), "PH")
+                self.assertRegex(reason, r"[0-9] kcal")
+
+    def test_a_row_stored_per_serving_is_only_checked_by_name(self):
+        row = self.row("Peanut Butter Bar", 260, 9, 42, 7)
+        row["per_unit"] = "serving"
+        self.assertEqual(self.doubt(row, "1 bar (68 g)", 68), "")
+
+
+class TidyLabelTests(unittest.TestCase):
+    """tidy_label: serving labels of Open Food Facts rows from other markets, as exported."""
+
+    @classmethod
+    def setUpClass(cls):
+        import import_foods
+        cls.tidy = staticmethod(import_foods.tidy_label)
+
+    def test_label_codes_repeats_float_noise_and_lost_slashes(self):
+        for raw, want in (("2 ONZ (56 g)", "2 oz (56 g)"), ("8 OZA (240 ml)", "8 fl oz (240 ml)"),
+                          ("5 crackers (16 g) (16 g)", "5 crackers (16 g)"), ("236.58799999999997g", "236.6g"),
+                          ("355.0g", "355g"), ("1 package (28.349 g)", "1 package (28.3 g)"),
+                          ("23 cup (68 g)", "2/3 cup (68 g)"), ("14 cup (28 g)", "1/4 cup (28 g)"),
+                          ("1 thsp (15 ml)", "1 tbsp (15 ml)"), ("1.5 z (40 g)", "1.5 oz (40 g)"),
+                          ("4 SLICES (56 g)", "4 slices (56 g)"), ("8 FL OZ (240 ML)", "8 fl oz (240 ml)"),
+                          ("1 portion (30 g)", "1 serving (30 g)"), ("1 CAN (360 ml)", "1 can (360 ml)"),
+                          ("0.667 cup (170 g)", "2/3 cup (170 g)"), ("0.5 cookie (57 g)", "1/2 cookie (57 g)")):
+            with self.subTest(raw=raw):
+                self.assertEqual(self.tidy(raw), want)
+
+    def test_the_about_after_a_bar_sign_goes_and_the_weight_stays(self):
+        for raw, want in (("15.0 g (15 g | g)", "15 g"), ("17 PIECES | ABOUT (40 g)", "17 pieces (40 g)"),
+                          ("2 DATES | PER (46 g)", "2 dates (46 g)"), ("1 SCOOP | ABOUT (34 g)", "1 scoop (34 g)"),
+                          ("28 g (13 CHIPS | ABOUT)", "28 g (13 chips)"), ("3 PRETZELS) | (ABOUT (30 g)", "3 pretzels (30 g)"),
+                          ("500 ml (1 bottle | ml)", "500 ml (1 bottle)"), ("1 BAR) | ( (40 g)", "1 bar (40 g)")):
+            with self.subTest(raw=raw):
+                self.assertEqual(self.tidy(raw), want)
+
+    def test_a_tidied_label_never_has_a_bracket_without_its_partner(self):
+        for raw in ("15.0 g (15 g | g)", "3 PRETZELS) | (ABOUT (30 g)", "1 cup) (30 g", "2 tbsp ((32 g)", "1 bar )(",
+                    "0.5 PACKET) (1 PACKET EQUAL TO 2 TSP. OF SUGAR) | ( (0.4 g)", "500 ml (1.05 PT), 1 BOTTLE | ()"):
+            with self.subTest(raw=raw):
+                tidy = self.tidy(raw)
+                depth = 0
+                for letter in tidy:
+                    depth += (letter == "(") - (letter == ")")
+                    self.assertGreaterEqual(depth, 0, tidy)
+                self.assertEqual(depth, 0, tidy)
+
+    def test_a_lost_slash_is_only_put_back_when_the_weight_is_too_little_for_the_count(self):
+        self.assertEqual(self.tidy("12 cup (120 g)", 120), "1/2 cup (120 g)")
+        self.assertEqual(self.tidy("12 cups (2880 g)", 2880), "12 cups (2880 g)")          # twelve real cups
+        self.assertEqual(self.tidy("12 tbsp (170 g)"), "12 tbsp (170 g)")
+        self.assertEqual(self.tidy("12 tbsp (8 g)"), "1/2 tbsp (8 g)")
+        self.assertEqual(self.tidy("18 tsp"), "18 tsp")                                    # no weight: left alone
+
+    def test_small_weights_keep_their_decimals(self):
+        self.assertEqual(self.tidy("1.25 g"), "1.25 g")
+        self.assertEqual(self.tidy("0.04 g"), "0.04 g")
+        self.assertEqual(self.tidy("1 serving (56.699 g)"), "1 serving (56.7 g)")
+
+    def test_ordinary_labels_are_left_alone(self):
+        for label in ("1 bar (40 g)", "2 tbsp (32 g)", "12 crackers (30 g)", "1 TEA BAG, MAKES 8 fl. oz. (2 g)",
+                      "100 g", "1/2 can (200 g)", "BBQ sauce 2 tbsp (34 g)"):
+            with self.subTest(label=label):
+                self.assertEqual(self.tidy(label), label)
+
+    def test_which_rows_count_as_philippine(self):
+        import import_foods
+        self.assertEqual(import_foods._philippine({"region_tags": "PH,US", "barcode": None}), True)
+        self.assertEqual(import_foods._philippine({"region_tags": "US", "barcode": "4800016644504"}), True)
+        self.assertEqual(import_foods._philippine({"region_tags": "US", "barcode": "0012345678905"}), False)
+
+    def test_the_exported_label_of_a_us_row_is_tidied_but_not_a_philippine_one(self):
+        # one US row and one Philippine row (480 barcode) with the same raw label, imported and exported
+        folder = new_dir("tidy_export")
+        source = os.path.join(folder, "off.csv")
+        tab, end = chr(9), chr(10)
+        with open(OFF_DOUBT, encoding="utf-8", newline="") as handle:
+            header = handle.readline().rstrip(end).split(tab)
+
+        def line(code, name, country):
+            cells = dict.fromkeys(header, "")
+            cells.update({"code": code, "product_name": name, "brands": "Crispy Co", "countries_tags": country,
+                          "serving_size": "2 ONZ (56 g)", "serving_quantity": "56", "unique_scans_n": "5",
+                          "energy-kcal_100g": "536", "proteins_100g": "7.1", "carbohydrates_100g": "53.6",
+                          "fat_100g": "33.9", "completeness": "0.5"})
+            return tab.join(cells[column] for column in header)
+
+        with open(source, "w", encoding="utf-8", newline="") as handle:
+            handle.write(tab.join(header) + end + line("0012345678905", "Ridged Potato Chips", "en:united-states")
+                         + end + line("4800123456780", "Cassava Chips", "en:philippines") + end)
+        bundle = os.path.join(folder, "food-db.json")
+        import_ok(["--db", os.path.join(folder, "foods.sqlite"), "--off-path", source, "--export-app", bundle,
+                   "--built", BUILT, "--quiet"])
+        doc = read_json(bundle)
+        at = doc["fields"].index
+        labels = {item[at("name")]: [portion[0] for portion in item[at("portions")]] for item in doc["items"]}
+        self.assertEqual(labels["Ridged Potato Chips"], ["100 g", "2 oz (56 g)"])
+        self.assertEqual(labels["Cassava Chips"], ["100 g", "2 ONZ (56 g)"])
+
+
+class Version3UpgradeTests(SchemaCase):
+    """A version 3 file (as the scripts wrote it before version 4) gains the doubt column and keeps its rows."""
+
+    def v3_with_a_row(self):
+        conn = self.connect()
+        for step in (food_schema._upgrade_0_to_1, food_schema._upgrade_1_to_2, food_schema._upgrade_2_to_3):
+            step(conn)
+        conn.execute("PRAGMA user_version = 3")
+        conn.execute("INSERT INTO food_items (name, calories_kcal, source, source_priority, category, region_tags,"
+                     " barcode, completeness) VALUES ('Old Chips', 536, 'off', 3, 'supermarket', 'US',"
+                     " '0012345678905', 80)")
+        conn.commit()
+        return conn
+
+    def test_upgrade_adds_doubt_and_keeps_the_row(self):
+        conn = self.v3_with_a_row()
+        self.assertNotIn("doubt", column_names(conn))
+        self.assertEqual(food_schema.migrate(conn), 4)
+        self.assertEqual(user_version(conn), 4)
+        self.assertEqual(column_names(conn), ["id"] + V4_COLUMNS[1:])
+        rows = dict_rows(conn, "SELECT name, barcode, completeness, doubt FROM food_items")
+        self.assertEqual(rows, [{"name": "Old Chips", "barcode": "0012345678905", "completeness": 80, "doubt": None}])
+
+    def test_an_unstamped_version_4_table_is_recognised(self):
+        conn = self.fresh_v2()
+        conn.execute("PRAGMA user_version = 0")
+        conn.commit()
+        self.assertEqual(food_schema.migrate(conn), 4)
+        self.assertEqual(sorted(column_names(conn)), sorted(V4_COLUMNS))
 
 
 if __name__ == "__main__":

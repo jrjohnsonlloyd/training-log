@@ -1466,6 +1466,45 @@ async function suiteRanking(){
     return pick.length + ' of ' + plan.codes.length + ' alias barcodes tried';
   }, { show: true });
 
+  /* A restaurant in the library is found by its name: its own menu rows come before the packaged products of a brand of the same name (Starbucks PH drinks before bottled Starbucks drinks from the US). */
+  const HOME_CATS = ['home dish', 'street food & snacks', 'noodles', 'rice & staples', 'breakfast (silog)', 'bread & bakery', 'dessert', 'drinks'];
+  const places = new Map(); lib.forEach(it => { const c = String(it.cat || '').trim(); if (c && !HOME_CATS.includes(c.toLowerCase())) places.set(c, (places.get(c) || 0) + 1); });
+  const PLACES = 'typing a restaurant\'s name lists its own menu rows before any packaged product';
+  const placeList = Array.from(places).filter(([c, k]) => k >= 2).map(([c]) => c);
+  if (!placeList.length) notRun(PLACES, 'the library has no restaurant with two or more rows');
+  else await step(PLACES, async () => {
+    const bad = []; let done = 0;
+    for (const c of placeList) {
+      const word = plain(c).replace(/ ph$/, ''); if (word.length < 3) continue;
+      const rows = await typed(word), firstOff = rows.findIndex(r => r.src === 'off'), own = rows.filter((r, i) => r.cat === c && (firstOff < 0 || i < firstOff)).length;
+      done++;
+      if (own < Math.min(2, places.get(c))) bad.push('"' + word + '" -> ' + names(rows));
+    }
+    expect(!bad.length, bad.length + ' of ' + done + ': ' + some(bad, 4));
+    return done + ' restaurants typed';
+  }, { show: true });
+
+  /* A small US can or bottle prints an 8-digit UPC-E; the same product's 12-digit UPC-A (multipacks, receipts, other apps) must find the row stored under the short code, and the short code typed must find it too. */
+  const upcA = c => {   /* the 12-digit UPC-A of a canonical 13-digit code that holds a valid UPC-E, else null (written apart from the app's own upceToUpca) */
+    const s = String(c).padStart(13, '0'); if (!/^00000[01]/.test(s) || s.slice(5, 7) === '00') return null;
+    const e = s.slice(5), m = e.slice(1, 7), x = +m[5], ns = e[0];
+    const a = ns + (x <= 2 ? m.slice(0, 2) + x + '0000' + m.slice(2, 5) : x === 3 ? m.slice(0, 3) + '00000' + m.slice(3, 5) : x === 4 ? m.slice(0, 4) + '00000' + m[4] : m.slice(0, 5) + '0000' + x);
+    const sum = a.split('').reduce((t, d, i) => t + (+d) * (i % 2 ? 1 : 3), 0);
+    return (10 - sum % 10) % 10 === +e[7] ? a + e[7] : null;
+  };
+  const known = new Set(); db.items.forEach(r => { if (r[ix.barcode]) known.add(String(r[ix.barcode]).padStart(13, '0')); }); (db.alias || []).forEach(a => a.slice(1).forEach(c => known.add(String(c).padStart(13, '0'))));
+  const shortRows = []; db.items.forEach(r => { const a = r[ix.barcode] ? upcA(r[ix.barcode]) : null; if (a && !known.has('0' + a) && !shortRows.some(x => x.name === nameOf(r))) shortRows.push({ a: a, e: String(r[ix.barcode]).padStart(13, '0').slice(5), name: nameOf(r) }); });
+  const UPCE = 'a 12-digit UPC-A finds the row stored under its 8-digit UPC-E, and the UPC-E finds it too';
+  if (!shortRows.length) notRun(UPCE, 'the served bundle has no row stored under a UPC-E');
+  else await step(UPCE, async () => {
+    const pick = shortRows.filter((x, i) => i % Math.max(1, Math.floor(shortRows.length / 10)) === 0).slice(0, 10);
+    for (const x of pick) for (const code of [x.a, x.e]) {
+      const rows = await typed(code);
+      expect(rows.length === 1 && rows[0].name === x.name, code + ' should find "' + x.name + '", the list shows: ' + names(rows));
+    }
+    return pick.length + ' of ' + shortRows.length + ' rows stored under a UPC-E, e.g. ' + pick[0].a + ' and ' + pick[0].e + ' -> ' + pick[0].name;
+  }, { show: true });
+
   await step('no script errors were raised during the run', async () => {
     type('#ff-name', ''); await wait(200);
     expect(!appErrors.length, appErrors.join(' | '));

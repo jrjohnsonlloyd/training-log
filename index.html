@@ -872,6 +872,14 @@ function normBarcode(raw){
   const c = s.padStart(13, '0');
   return c.charAt(0) === '2' || c.slice(0, 2) === '02' ? null : c;
 }
+/* Small US cans and bottles print an 8-digit UPC-E ("04913207"); multipacks, receipts and other apps show the same product's 12-digit UPC-A ("049000001327"). Leading zeros cannot turn one into the other, so a canonical code (see normBarcode) that holds a UPC-E is expanded by the UPC rules: the long form, canonical too, or null when the code is no UPC-E or its check digit does not fit. */
+function upceToUpca(c){
+  if (!c || c.length !== 13 || c.slice(0, 5) !== '00000') return null;
+  const e = c.slice(5), d = e.slice(1, 7), x = d.charAt(5); if ((e.charAt(0) !== '0' && e.charAt(0) !== '1') || e.slice(0, 2) === '00') return null;
+  const a = e.charAt(0) + (x <= '2' ? d.slice(0, 2) + x + '0000' + d.slice(2, 5) : x === '3' ? d.slice(0, 3) + '00000' + d.slice(3, 5) : x === '4' ? d.slice(0, 4) + '00000' + d.charAt(4) : d.slice(0, 5) + '0000' + x);
+  let s = 0; for (let i = 0; i < 11; i++) s += Number(a.charAt(i)) * (i % 2 ? 1 : 3);
+  return (10 - s % 10) % 10 === Number(e.charAt(7)) ? normBarcode(a + e.charAt(7)) : null;
+}
 /* The big offline table, bundled as food-db.json. Two shapes load:
    version 1 (the first USDA build): about 12,600 USDA rows [name, category index, kcal, protein, carbs, fat, portions, source, fdcId] with the category names in "cats";
    version 2 (scripts/import_foods.py): curated, USDA and Open Food Facts rows, each value at the position its name has in "fields", with "brands" and "groups" as string tables.
@@ -915,6 +923,8 @@ function prepFoodDb(j){
     if (!Array.isArray(a) || !Number.isInteger(a[0]) || a[0] < 0 || a[0] >= n) return;
     for (let k = 1; k < a.length; k++) { const c = normBarcode(String(a[k]).padStart(13, '0')); if (c && !db.byBarcode.has(c)) { db.byBarcode.set(c, a[0]); db.altCode.add(c); } }
   });
+  /* a row stored under a UPC-E is also found by its UPC-A, unless that code is some row's own */
+  Array.from(db.byBarcode).forEach(([c, i]) => { const a = upceToUpca(c); if (a && !db.byBarcode.has(a)) { db.byBarcode.set(a, i); if (db.altCode.has(c)) db.altCode.add(a); } });
   return db;
 }
 let foodDbLoading = null;
@@ -968,6 +978,7 @@ function recentFoods(){ /* what you logged before, newest first, one row per nam
   recentMemo = { key: key, list: out }; return out;
 }
 const ALIAS_BONUS = 3; /* a curated bundle row found through one of its other names typed in full ("carne norte", "kanin") */
+const OFF_ABROAD = 0.5; /* taken off every packaged product from another market (neither tagged Philippines nor with a 480 barcode), so a Philippine product that matches as well comes first ("granola", "nescafe", "quaker"). All such rows lose the same, so their own order stays as it was: "Cheerios" by General Mills before "Cheerios minis", the most scanned "Nutella" first. */
 const ALIAS_NAMED = 7; /* ...and when its own name already holds every word ("steak" for "Beef steak, cooked", "potatoes" for "Boiled potato"), its name bonus is raised to the 7 of a whole name typed */
 /* n is ' ' + name + ' ', T the typed word with its padded forms. In the name: whole word beats start of a word beats inside a word, and a word also counts as whole when the name has it with -s or -es ("egg" in "Eggs", "tomato" in "Tomatoes, raw"); then the brand and other names for the food; a match only on the category counts least. One scan of the name settles the usual case of no match. */
 function termScore(n, name, aka, cat, T){
@@ -1016,8 +1027,11 @@ function foodSearch(q, limit, cat){
   const alias = al => { for (let k = 0; k < al.length; k++) if (al[k] === pq || is(al[k])) return true; return false; }; /* one of the row's other names is exactly what was typed */
   const viaAlias = name => { for (let k = 0; k < T.length; k++) if (name.indexOf(T[k].t) < 0) return true; return false; }; /* ...and its own name does not hold every word */
   const starts = n => n.indexOf(' ' + pq + ' ') === 0 || n.indexOf(' ' + pqs + ' ') === 0; /* a hand-written row that begins with the words typed: "San Miguel Pale Pilsen" for "san miguel" */
+  /* A restaurant's own menu row is found by the restaurant's name like a product by its brand, when every word typed is a word of that name ("starbucks", "max's"), not only as a display group (-2). */
+  const atPlace = (dining, c) => { if (!dining || !c) return false; const pc = ' ' + c + ' '; for (let k = 0; k < T.length; k++) if (pc.indexOf(T[k].we) < 0 && pc.indexOf(T[k].ws) < 0 && pc.indexOf(T[k].wes) < 0) return false; return true; }; /* "starbucks" is typed, and searched, as "starbuck" */
   const add = (it, bonus, own) => {
-    if (!all && it.category !== want) return; const p = plainOf(it), n = ' ' + p.n + ' ', sc = rate(n, p.n, p.a, p.c, bonus, it.name, false); if (sc < 0) return;
+    if (!all && it.category !== want) return; const p = plainOf(it), n = ' ' + p.n + ' ', place = !own && atPlace(it.category === 'dining_out', p.c);
+    const sc = rate(n, p.n, place ? (p.a + ' ' + p.c).trim() : p.a, place ? '' : p.c, bonus, it.name, false); if (sc < 0) return;
     if (!own && (named > 0 || (p.al.length && alias(p.al)) || starts(n))) ref = true;
     scored.push({ s: sc, it: it, n: p.n, o: -1, e: 0 });
   };
@@ -1029,8 +1043,9 @@ function foodSearch(q, limit, cat){
     const wc = all ? -1 : FOOD_CATS.indexOf(want), code = db.code, src = db.src, plain = db.plain, pad = db.pad, aux = db.aux, grp = db.grp, items = db.items, alt = db.alt, ord = db.ord, nameAt = db.nameAt;
     for (let i = 0; i < items.length; i++) {
       if (wc >= 0 && code[i] !== wc) continue;
-      const s = src[i], n = plain[i]; let sc = rate(pad[i], n, aux[i], grp[i], DB_BONUS[s], items[i][nameAt], s === 3);
+      const s = src[i], n = plain[i], place = atPlace(code[i] === 1, grp[i]); let sc = rate(pad[i], n, place ? (aux[i] + ' ' + grp[i]).trim() : aux[i], place ? '' : grp[i], DB_BONUS[s], items[i][nameAt], s === 3);
       if (sc < 0) continue;
+      if (s === 3 && ord[i] === 2) sc = Math.max(0, sc - OFF_ABROAD);
       /* which rows make "ref": a curated row named as typed, known by that other name (which also earns ALIAS_BONUS when its own name does not say it, else raises its name bonus to ALIAS_NAMED) or beginning with the words; a USDA row whose name or comma part is the words. A USDA row that only ends with them ("Egg sandwich on wheat bread", "Non-dairy milk") is no reference. */
       if (s !== 3) { const byAlias = s === 0 && alt.has(i) && alias(alt.get(i)); if (named > 0) { if (s === 0 || !tailOnly) ref = true; } else if (byAlias || (s === 0 && starts(pad[i]))) ref = true; if (byAlias) sc += viaAlias(n) ? (named ? 0 : ALIAS_BONUS) : Math.max(0, ALIAS_NAMED - named); }
       scored.push({ s: sc, row: items[i], n: n, o: ord[i] * 1e7 + i, e: s === 3 ? named : 0 });
@@ -1062,7 +1077,8 @@ function localResults(q, more){
 /* A typed barcode is looked up in the bundle first: a hit is shown at once, with no network call. alias = the code belongs to another pack of the product shown, so the serving and the picture may be that other pack's. */
 function barcodeResults(q){
   const db = state.foodDb; if (!db || !db.byBarcode.size || !/^[\d\s-]+$/.test(q)) return null;
-  const code = normBarcode(q), i = code ? db.byBarcode.get(code) : undefined; if (i == null) return null;
+  let code = normBarcode(q), i = code ? db.byBarcode.get(code) : undefined;
+  if (i == null) { const a = upceToUpca(code); i = a ? db.byBarcode.get(a) : undefined; if (i == null) return null; code = a; } /* a UPC-E typed for a row stored under its UPC-A */
   return { q: q, items: [dbItem(db.items[i])], total: 1, more: false, online: false, barcode: code, alias: db.altCode.has(code), msg: '' };
 }
 /* What the list shows while typing: a barcode saved in the app, else the foods matching the words; nothing for one letter.
