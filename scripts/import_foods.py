@@ -11,7 +11,10 @@ Usage
         [--usda-path PATH]...      an unzipped FoodData Central CSV folder, or one flat CSV file
         [--off-path FILE]          the Open Food Facts "CSV" export (tab-separated, may be .gz)
         [--export-app OUT.json]    also write the app's food list ("version 2" of food-db.json)
-        [--max-off N]              how many non-Philippine Open Food Facts rows to export (default 20000)
+        [--off-quota POOLS]        how many Open Food Facts rows to export per market, e.g.
+                                   "US=12000,UK=2500,JP=3500,KR=2500,AS=1500" (these are the defaults;
+                                   a pool left out keeps its default, 0 switches a pool off;
+                                   Philippine rows are always exported in full)
         [--built YYYY-MM-DD]       date written into the exported file
         [--quiet]                  print only the final summary line
 
@@ -22,22 +25,36 @@ What one run does
 1. Every row that is read is cleaned and checked, then parked in a temporary table
    ("cand", short for candidates). Input files are read one line at a time and written
    in small batches, so even the 10 GB Open Food Facts export needs little memory.
+   Open Food Facts is typed in by volunteers, so its rows pass extra checks first (see
+   "Open Food Facts: checks and repairs" below): unusable names, sodium that disagrees
+   with salt, calories that contradict the row's own protein, carbs and fat.
 2. Rows already in the database join the candidates. A row read again (same source and
    same source_ref) replaces its older self and keeps its id.
 3. Duplicates collapse: first rows sharing a barcode, then rows sharing the same
    name + brand key. A curated row always beats a USDA row, which always beats an Open
-   Food Facts row. The winner keeps its own numbers but takes the loser's picture and
-   regions (and barcode, when it has none).
+   Food Facts row. The winner keeps its own numbers.
+   - Same barcode: always one product. The winner takes the loser's picture and regions.
+   - Same name + brand: an Open Food Facts row is only merged when its calories agree
+     with the row it would disappear into (within 10 %, or 5 kcal); otherwise it is a
+     different food that happens to share a name and it stays. The barcode of a merged
+     row is kept in the winner's alt_barcodes, so typing it still finds the food.
+     Curated and USDA rows never take a pack photo or barcode from such a merge.
 4. food_items is brought in line with the surviving candidates in one all-or-nothing step.
 
 Running the same command twice leaves the same rows. The last line printed is a JSON
 summary of the run.
+
+The rules for merging and choosing Open Food Facts rows changed with database version 3.
+A database filled by an older version of this script still carries the old merges (for
+example pack photos on USDA rows), so build a new one from an empty file; the export
+refuses a database whose Open Food Facts rows were all imported the old way.
 """
 import argparse
 import csv
 import datetime
 import gzip
 import hashlib
+import html
 import json
 import math
 import os
@@ -45,13 +62,14 @@ import re
 import sqlite3
 import sys
 import time
+import unicodedata
 import zlib
 
 # "python -I" (isolated mode) does not put this folder on the import path, so add it by hand.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import food_schema  # noqa: E402  (must come after the line above)
-from food_schema import (CATEGORIES, REGIONS, SOURCE_PRIORITY, kcal_from_kj,  # noqa: E402
-                         name_key, normalize_barcode, sodium_mg_from_salt_g)
+from food_schema import (CATEGORIES, REGIONS, SOURCE_PRIORITY, barcode_origin,  # noqa: E402
+                         kcal_from_kj, name_key, normalize_barcode, sodium_mg_from_salt_g)
 
 BATCH = 2000                    # rows written to SQLite at a time
 MAX_KCAL_PER_100G = 950         # pure fat is about 900; anything above is a data error
@@ -64,12 +82,23 @@ ITEM_COLUMNS = (
     "name", "brand", "group_label", "category", "region_tags", "barcode", "thumbnail_url",
     "per_unit", "calories_kcal", "protein_g", "carbs_g", "sugars_g", "fat_g", "saturates_g",
     "fibre_g", "sodium_mg", "portions", "aka", "basis", "source", "source_priority",
-    "source_ref", "popularity", "name_key",
+    "source_ref", "popularity", "name_key", "foreign_tags", "completeness", "alt_barcodes",
 )
 _COLUMN_LIST = ", ".join(ITEM_COLUMNS)
 
 # How many of the seven optional numbers a row has. Used to pick the fuller of two duplicates.
 FILLED_SQL = "(" + " + ".join(f"({column} IS NOT NULL)" for column in GRAM_COLUMNS + ("sodium_mg",)) + ")"
+
+# 1 when a row's calories fit its own protein, carbs and fat (4, 4 and 9 kcal per gram) to
+# within 20 % or 15 kcal. Used to prefer the believable one of two Open Food Facts duplicates.
+_MACRO_KCAL_SQL = "(4 * protein_g + 4 * carbs_g + 9 * fat_g)"
+MACRO_OK_SQL = ("(protein_g IS NOT NULL AND carbs_g IS NOT NULL AND fat_g IS NOT NULL"
+                f" AND ABS(calories_kcal - {_MACRO_KCAL_SQL})"
+                f" <= MAX(0.20 * MAX(calories_kcal, {_MACRO_KCAL_SQL}), 15.0))")
+
+# When are two same-name rows the same food? When their calories are this close.
+MERGE_KCAL_SHARE = 0.10         # 10 % of the larger figure ...
+MERGE_KCAL_FLOOR = 5.0          # ... or 5 kcal, whichever is more
 
 # Open Food Facts: the only columns read out of roughly 200, and the countries that are kept.
 OFF_COLUMNS = (
@@ -77,9 +106,28 @@ OFF_COLUMNS = (
     "serving_size", "serving_quantity", "unique_scans_n", "energy-kcal_100g", "energy-kj_100g",
     "energy_100g", "proteins_100g", "carbohydrates_100g", "sugars_100g", "fat_100g",
     "saturated-fat_100g", "fiber_100g", "sodium_100g", "salt_100g",
+    "completeness", "carbohydrates-total_100g", "alcohol_100g", "categories_en", "generic_name", "quantity",
+    "image_small_url",      # keep last: the bulk export's name for the small front photo
 )
 OFF_COUNTRIES = {"en:philippines": "PH", "en:united-states": "US", "en:united-kingdom": "UK",
                  "en:japan": "JP", "en:south-korea": "KR"}
+# Country tags that say nothing about where a product is sold: catch-all tags and parts of
+# the United Kingdom or the United States. They are not counted as "also sold abroad".
+OFF_NEUTRAL_TAGS = frozenset((
+    "en:world", "en:europe", "en:european-union", "en:scotland", "en:england", "en:wales",
+    "en:northern-ireland", "en:puerto-rico", "en:guam", "en:american-samoa",
+    "fr:angleterre", "fr:angle", "fr:international",
+))
+
+# The export takes every Philippine Open Food Facts row and then fills one pool per market.
+# A pool is filled in this order (so a Korean product also tagged "US" lands in the Korean
+# pool) up to these row counts; --off-quota changes the counts.
+OFF_POOLS = ("KR", "JP", "AS", "US", "UK")
+DEFAULT_OFF_QUOTA = {"US": 12000, "UK": 2500, "JP": 3500, "KR": 2500, "AS": 1500}
+OFF_WRITE_ORDER = ("US", "UK", "JP", "KR", "AS")    # the order the pools are written in, after PH
+# A merged barcode is passed on to the app when the pack it came from was scanned at least
+# once, or is tagged with one of these regions (home, and the two 2027 trips).
+ALIAS_REGIONS = ("PH", "JP", "KR")
 
 # USDA: the flat one-file layout, and how a data type shows up in source_ref.
 USDA_FLAT_COLUMNS = (
@@ -176,6 +224,65 @@ def regions_union(first, second):
     return ",".join(code for code in REGIONS if code in have)
 
 
+def plain_words(text):
+    """Lower-case words of plain letters and digits: "Crème  Brûlée (2x)" -> "creme brulee 2x".
+
+    This is how the app compares what the user types with a food's name, with accents
+    folded as well. Text in other alphabets gives "".
+    """
+    text = unicodedata.normalize("NFKD", str(text or ""))       # "é" -> "e" + accent mark
+    text = "".join(ch for ch in text if not unicodedata.combining(ch)).lower()
+    text = re.sub(r"['’`.]", "", text).replace("&", " and ")
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+
+def aliases_add(aliases, code, popularity, regions):
+    """Note one merged barcode in aliases, a dictionary {barcode: [popularity, region_tags]}.
+
+    A barcode noted twice keeps the higher popularity and all regions, so the result does
+    not depend on the order things are added in.
+    """
+    known = aliases.get(code)
+    if known is None:
+        aliases[code] = [int(popularity or 0), regions or ""]
+    else:
+        known[0] = max(known[0], int(popularity or 0))
+        known[1] = regions_union(known[1], regions)
+
+
+def aliases_read(text):
+    """The alt_barcodes column -> {barcode: [popularity, region_tags]}. Unreadable text -> {}.
+
+    A bare barcode (a list written by another tool) counts as never scanned, no region.
+    """
+    aliases = {}
+    try:
+        entries = json.loads(text or "[]")
+    except ValueError:
+        return aliases
+    for entry in entries if isinstance(entries, list) else []:
+        if isinstance(entry, str):
+            entry = [entry, 0, ""]
+        if isinstance(entry, list) and len(entry) == 3 and isinstance(entry[0], str) and entry[0]:
+            aliases_add(aliases, entry[0], to_number(entry[1]) or 0, entry[2] if isinstance(entry[2], str) else "")
+    return aliases
+
+
+def aliases_text(aliases):
+    """{barcode: [popularity, region_tags]} -> the JSON stored in alt_barcodes, sorted by barcode."""
+    return compact_json([[code, aliases[code][0], aliases[code][1]] for code in sorted(aliases)])
+
+
+def aliases_union(first, second):
+    """Two alt_barcodes texts -> one holding the barcodes of both."""
+    if (second or "[]") == "[]":
+        return first or "[]"
+    aliases = aliases_read(first)
+    for code, (popularity, regions) in aliases_read(second).items():
+        aliases_add(aliases, code, popularity, regions)
+    return aliases_text(aliases)
+
+
 def blank_row(source):
     """A food_items row with nothing filled in yet, as a dictionary keyed by column name."""
     return {
@@ -184,16 +291,16 @@ def blank_row(source):
         "protein_g": None, "carbs_g": None, "sugars_g": None, "fat_g": None, "saturates_g": None,
         "fibre_g": None, "sodium_mg": None, "portions": [], "aka": [], "basis": "database",
         "source": source, "source_priority": SOURCE_PRIORITY[source], "source_ref": None,
-        "popularity": 0,
+        "popularity": 0, "foreign_tags": 0, "completeness": None, "alt_barcodes": [],
     }
 
 
-def apply_rules(row):
-    """Check and round the numbers of one row (rules b to e of the data contract).
+def numbers_possible(row):
+    """False when a row's numbers cannot be true: no calories, a negative figure, or more
+    than 100 g of something in 100 g of food.
 
-    Returns False when the row must be thrown away. The upper limits only make sense for
-    numbers per 100 g, so a row stored per serving is only checked for missing or negative
-    values.
+    The upper limits only make sense for numbers per 100 g, so a row stored per serving is
+    only checked for missing or negative values.
     """
     per_100g = row["per_unit"] == "100g"
     kcal = row["calories_kcal"]
@@ -206,6 +313,17 @@ def apply_rules(row):
     # 100 g of food cannot hold more than 100 g of protein + carbs + fat; 105 allows for rounding.
     if per_100g and (row["protein_g"] or 0) + (row["carbs_g"] or 0) + (row["fat_g"] or 0) > 105 + 1e-9:
         return False
+    return True
+
+
+def apply_rules(row):
+    """Check and round the numbers of one row (rules b to e of the data contract).
+
+    Returns False when the row must be thrown away (see numbers_possible).
+    """
+    if not numbers_possible(row):
+        return False
+    kcal = row["calories_kcal"]
     sodium = row["sodium_mg"]
     if sodium is not None and not 0 <= sodium <= MAX_SODIUM_MG:
         sodium = None                               # a wrong sodium figure is dropped, the row is kept
@@ -277,6 +395,25 @@ def csv_records(path, columns, found=None):
 # The importer: running totals, the candidates table, de-duplication, saving
 # ---------------------------------------------------------------------------------------
 
+class _Kept:
+    """One surviving row while a group of duplicates is walked (see Importer.collapse).
+
+    The fields that a merge can change are plain attributes; "before" remembers what they
+    were, so only rows that really changed are written back.
+    """
+    __slots__ = ("rid", "source", "per_unit", "kcal", "thumbnail", "regions", "barcode",
+                 "foreign_tags", "popularity", "portions", "aliases", "before")
+
+    def __init__(self, record):
+        (self.rid, _, self.source, self.per_unit, self.kcal, self.thumbnail, self.regions, self.barcode,
+         self.foreign_tags, self.popularity, self.portions, self.aliases) = record
+        self.before = self.changeable()
+
+    def changeable(self):
+        return (self.thumbnail, self.regions, self.barcode, self.foreign_tags, self.popularity,
+                self.portions, self.aliases)
+
+
 class Importer:
     def __init__(self, conn, quiet=False):
         self.conn = conn
@@ -285,9 +422,16 @@ class Importer:
         self.filtered_region = 0
         self.invalid = 0
         self.duplicates = 0
+        self.repaired = 0                                   # Open Food Facts rows kept after a repair
+        self.filled = 0                                     # ... and rows given one missing macro
+        self.off_dropped = {"name": 0, "numbers": 0, "calories": 0}    # why Open Food Facts rows were invalid
+        # Philippine rows whose label was typed per serving (see serving_typed_fix): re-based to
+        # 100 g with the serving first, stored per serving, or dropped (counted in invalid too).
+        self.serving_typed = {"rebased": 0, "per_serving": 0, "drop_zero": 0, "drop_high": 0}
         self._waiting = []                                  # cleaned rows not yet written
         self._order = 0                                     # 1, 2, 3 ... in the order rows are read
         conn.create_function("regions_union", 2, regions_union)
+        conn.create_function("aliases_union", 2, aliases_union)
         conn.create_function("food_name_key", 2, name_key)
         # The candidates table lives in SQLite's temporary area (a scratch file that
         # disappears when the script ends), so the real database is untouched until save().
@@ -316,6 +460,7 @@ class Importer:
         row["name_key"] = name_key(row["name"], row["brand"])
         row["portions"] = compact_json(row["portions"])
         row["aka"] = compact_json(row["aka"])
+        row["alt_barcodes"] = compact_json(row["alt_barcodes"])
         self._waiting.append((self._order,) + tuple(row[column] for column in ITEM_COLUMNS))
         if len(self._waiting) >= BATCH:
             self.flush()
@@ -329,58 +474,75 @@ class Importer:
 
     # -- de-duplication ------------------------------------------------------------------
 
-    def collapse(self, key_sql):
+    def collapse(self, key_sql, by_name=False):
         """Candidates sharing the same value of key_sql become one row (section 4 of the contract).
 
-        The winner is the row with the lowest source_priority number; then the one with more
-        of the optional numbers filled in; then the more popular one; then the one imported
-        first. It keeps its own values, except: an empty thumbnail or barcode is taken from
-        the best loser that has one, and its regions become everybody's regions together.
+        The rows of a group are walked best first: the lowest source_priority number; then
+        the one with more of the optional numbers filled in; then the more popular one; then
+        the one imported first. The first row is kept. It keeps its own numbers and takes a
+        few things from the rows merged into it (see _absorb).
+
+        by_name=False (same source row, same barcode): the rows are one product, so every
+        later row is merged into the first.
+
+        by_name=True (same name + brand): the name alone does not prove it is the same food
+        ("Butter Coconut" exists at 68 and at 500 kcal), so an Open Food Facts row is merged
+        only into a kept row with matching calories (see _same_food) and otherwise stays as
+        a row of its own. Among Open Food Facts rows, one whose calories fit its own protein,
+        carbs and fat is walked before one whose numbers contradict each other. Curated and
+        USDA rows are merged into the first row regardless, as they always were.
+
         Rows whose key is NULL are left alone. Returns how many rows were removed.
         """
         conn = self.conn
+        order = "source_priority, "
+        if by_name:
+            order += f"(source <> 'off' OR {MACRO_OK_SQL}) DESC, "
+        order += f"{FILLED_SQL} DESC, popularity DESC, ord"
+        facts = ("source, per_unit, calories_kcal, thumbnail_url, region_tags, barcode,"
+                 " foreign_tags, popularity, portions, alt_barcodes")      # what _Kept reads, in its order
         # List the rows of every group of two or more, best row first, in a table of their own
         # so that it can be read while the candidates table is being changed.
         conn.execute("DROP TABLE IF EXISTS temp.dup")
         conn.execute(f"""
             CREATE TEMP TABLE dup AS
-            SELECT rid, ({key_sql}) AS k, thumbnail_url, region_tags, barcode
+            SELECT rid, ({key_sql}) AS k, {facts}
             FROM cand
             WHERE ({key_sql}) IN (SELECT ({key_sql}) FROM cand WHERE ({key_sql}) IS NOT NULL
                                   GROUP BY 1 HAVING COUNT(*) > 1)
-            ORDER BY 2, source_priority, {FILLED_SQL} DESC, popularity DESC, ord""")
+            ORDER BY 2, {order}""")
 
         updates, deletes, removed = [], [], 0
 
         def write():
-            conn.executemany("UPDATE cand SET thumbnail_url = ?, region_tags = ?, barcode = ?, changed = 1"
-                             " WHERE rid = ?", updates)
+            conn.executemany("UPDATE cand SET thumbnail_url = ?, region_tags = ?, barcode = ?, foreign_tags = ?,"
+                             " popularity = ?, portions = ?, alt_barcodes = ?, changed = 1 WHERE rid = ?", updates)
             conn.executemany("DELETE FROM cand WHERE rid = ?", deletes)
             updates.clear()
             deletes.clear()
 
-        def close_group(winner, before):
-            if winner is not None and winner[1:] != before:
-                updates.append((winner[1], winner[2], winner[3], winner[0]))
+        def close_group(kept):
+            for keeper in kept:
+                if keeper.changeable() != keeper.before:
+                    updates.append(keeper.changeable() + (keeper.rid,))
+            if len(updates) + len(deletes) >= BATCH:
+                write()
 
-        winner, before, group = None, None, None            # winner = [rid, thumbnail, regions, barcode]
-        for rid, key, thumbnail, regions, barcode in conn.execute(
-                "SELECT rid, k, thumbnail_url, region_tags, barcode FROM dup ORDER BY rowid"):
-            if winner is None or key != group:              # first row of a group: the winner
-                close_group(winner, before)
-                if len(updates) + len(deletes) >= BATCH:
-                    write()
-                winner, group = [rid, thumbnail, regions, barcode], key
-                before = winner[1:]
+        kept, group = [], None                              # the rows kept so far in the current group
+        for record in conn.execute(f"SELECT rid, k, {facts} FROM dup ORDER BY rowid"):
+            row = _Kept(record)
+            if not kept or record[1] != group:              # first row of a group: always kept
+                close_group(kept)
+                kept, group = [row], record[1]
                 continue
-            if winner[1] is None and thumbnail:
-                winner[1] = thumbnail
-            winner[2] = regions_union(winner[2], regions)
-            if winner[3] is None and barcode:
-                winner[3] = barcode
-            deletes.append((rid,))
+            keeper = _same_food(kept, row, group) if by_name else kept[0]
+            if keeper is None:
+                kept.append(row)                            # same name, different food: it stays
+                continue
+            _absorb(keeper, row, by_name)
+            deletes.append((row.rid,))
             removed += 1
-        close_group(winner, before)
+        close_group(kept)
         write()
         conn.execute("DROP TABLE temp.dup")
         return removed
@@ -392,18 +554,32 @@ class Importer:
 
         # The same source row read twice in this run (for example one barcode on two lines).
         self.duplicates += self.collapse("source || ':' || source_ref")
+        conn.execute("CREATE INDEX temp.cand_barcode ON cand (barcode)")
 
         # A row read again replaces the row saved earlier and keeps its id. What the saved
-        # row had picked up from duplicates on an earlier run (picture, barcode, regions) is
-        # carried over, so re-importing one source alone does not lose it.
+        # row had picked up from duplicates on an earlier run (picture, regions, merged
+        # barcodes) is carried over, so re-importing one source alone does not lose it.
+        # Popularity is a scan count that only Open Food Facts supplies: an Open Food Facts
+        # row brings its own, a curated or USDA row keeps what merged rows had given it.
         conn.execute("""
             UPDATE cand SET item_id = f.id,
                             thumbnail_url = COALESCE(cand.thumbnail_url, f.thumbnail_url),
-                            barcode = COALESCE(cand.barcode, f.barcode),
-                            region_tags = regions_union(cand.region_tags, f.region_tags)
+                            region_tags = regions_union(cand.region_tags, f.region_tags),
+                            alt_barcodes = aliases_union(cand.alt_barcodes, f.alt_barcodes),
+                            popularity = CASE WHEN cand.source = 'off' THEN cand.popularity
+                                              ELSE MAX(cand.popularity, f.popularity) END
             FROM food_items AS f
             WHERE f.source = cand.source AND f.source_ref = cand.source_ref AND f.source_ref IS NOT NULL""")
         conn.execute("CREATE INDEX temp.cand_item_id ON cand (item_id)")
+        # The same goes for a barcode the saved row had taken from a duplicate, unless the row
+        # that barcode came from was read again in this run: then the steps below decide
+        # afresh (and reach the same result when nothing changed), instead of two candidates
+        # carrying one barcode.
+        conn.execute("""
+            UPDATE cand SET barcode = f.barcode
+            FROM food_items AS f
+            WHERE f.id = cand.item_id AND cand.barcode IS NULL AND f.barcode IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM cand AS other WHERE other.barcode = f.barcode)""")
 
         # Every other saved row joins the candidates unchanged. They were imported before
         # this run, so they get the lowest order numbers (all negative, oldest first).
@@ -415,11 +591,10 @@ class Importer:
             WHERE NOT EXISTS (SELECT 1 FROM cand WHERE cand.item_id = f.id)""", (above,))
         # A saved row without a key (added by another tool) gets one, or all such rows would look alike.
         conn.execute("UPDATE cand SET name_key = food_name_key(name, brand), changed = 1 WHERE name_key = ''")
-        conn.execute("CREATE INDEX temp.cand_barcode ON cand (barcode)")
         conn.execute("CREATE INDEX temp.cand_name_key ON cand (name_key)")
 
-        self.duplicates += self.collapse("barcode")         # step 1: same barcode
-        self.duplicates += self.collapse("name_key")        # step 2: same name + brand
+        self.duplicates += self.collapse("barcode")                     # step 1: same barcode
+        self.duplicates += self.collapse("name_key", by_name=True)      # step 2: same name + brand
 
         # Write the result. Everything below is one transaction: all of it or none of it.
         try:
@@ -452,8 +627,80 @@ class Importer:
             if source in kept:
                 kept[source] = count
         total = self.conn.execute("SELECT COUNT(*) FROM food_items").fetchone()[0]
+        aliases = sum(len(aliases_read(text)) for (text,) in self.conn.execute(
+            "SELECT alt_barcodes FROM food_items WHERE alt_barcodes <> '[]'"))
         return {"read": dict(self.read), "kept": kept, "filtered_region": self.filtered_region,
-                "invalid": self.invalid, "duplicates": self.duplicates, "total_rows": total}
+                "invalid": self.invalid, "duplicates": self.duplicates, "total_rows": total,
+                "repaired": self.repaired, "filled": self.filled, "off_dropped": dict(self.off_dropped),
+                "aliases": aliases, "serving_typed": dict(self.serving_typed)}
+
+
+def _same_food(kept, row, key):
+    """Which of the kept rows of a same-name group is the same food as row? None when none is.
+
+    kept is in winner order, so the first match is the best one.
+    """
+    if row.source != "off":
+        return kept[0]              # curated and USDA duplicates were always merged by name alone
+    for keeper in kept:
+        if keeper.per_unit != "100g" and keeper.source != "off":
+            # A curated row stored per serving cannot be compared in calories. It takes the
+            # row when the key names a brand ("mcdonalds|big mac"), not for a bare food name.
+            if not key.startswith("|"):
+                return keeper
+        elif keeper.per_unit != row.per_unit:
+            continue                # an Open Food Facts row per serving and one per 100 g: not comparable
+        elif abs(keeper.kcal - row.kcal) <= max(MERGE_KCAL_SHARE * max(keeper.kcal, row.kcal), MERGE_KCAL_FLOOR):
+            return keeper
+    return None
+
+
+def _absorb(keeper, loser, by_name):
+    """Merge loser into keeper: keeper keeps its own name and numbers and takes the following.
+
+    Both kinds of merge
+      - an empty picture or barcode is taken from the first merged row that has one
+      - its regions become both rows' regions together
+      - it counts as "sold abroad" only as much as the least foreign of the rows
+      - a barcode it does not take, and the barcodes the loser had collected itself, are
+        noted in alt_barcodes
+    Exceptions for curated and USDA keepers
+      - a curated keeper's regions are never changed, in either kind of merge: they are
+        what the owner wrote in the curated file
+      - in a merge by name + brand (by_name) a curated or USDA keeper takes no picture and
+        no barcode: the merged row is some pack that shares its name, not a picture of
+        "Banana". The barcode becomes an alt_barcode instead. (A USDA keeper still takes
+        the regions, as it always did: the same food is sold there too.)
+    Merges by name + brand only (by_name)
+      - popularity becomes the higher of the two, so a product is not ranked by its least
+        scanned pack
+      - an Open Food Facts keeper without a serving size takes the merged row's
+    """
+    protected = by_name and keeper.source != "off"
+    if keeper.thumbnail is None and loser.thumbnail and not protected:
+        keeper.thumbnail = loser.thumbnail
+    if keeper.source != "curated":
+        keeper.regions = regions_union(keeper.regions, loser.regions)
+    keeper.foreign_tags = min(keeper.foreign_tags or 0, loser.foreign_tags or 0)
+
+    # Barcodes. The alt_barcodes text is only decoded when there is something to add.
+    extra = aliases_read(loser.aliases) if loser.aliases != "[]" else {}
+    if loser.barcode and loser.barcode != keeper.barcode:
+        if keeper.barcode is None and not protected:
+            keeper.barcode = loser.barcode
+        else:
+            aliases_add(extra, loser.barcode, loser.popularity, loser.regions)
+    if extra:
+        aliases = aliases_read(keeper.aliases)
+        for code, (popularity, regions) in extra.items():
+            aliases_add(aliases, code, popularity, regions)
+        aliases.pop(keeper.barcode, None)                   # never its own barcode
+        keeper.aliases = aliases_text(aliases)
+
+    if by_name:
+        keeper.popularity = max(keeper.popularity or 0, loser.popularity or 0)
+        if keeper.source == "off" and keeper.portions == "[]" and loser.portions != "[]":
+            keeper.portions = loser.portions
 
 
 # ---------------------------------------------------------------------------------------
@@ -985,6 +1232,766 @@ def import_usda_folder(importer, folder):
 # Open Food Facts
 # ---------------------------------------------------------------------------------------
 
+# --- Open Food Facts: checks and repairs ------------------------------------------------
+# Open Food Facts is typed in from the pack by volunteers, and a few rows in every hundred
+# are wrong in ways the row itself gives away. The helpers below are used by import_off
+# only, in the order they appear there; curated and USDA rows never pass through them.
+# The thresholds were measured on the real export (1.04 million usable rows).
+
+# --- names ---
+
+_CJK = re.compile("[぀-ヿ㐀-鿿가-힯豈-﫿ｦ-ﾟ]")   # kana, Chinese characters, hangul
+_PLACEHOLDER_NAME = re.compile(r"unknown|unnamed|untitled|test|n/a|none|null|no name|product|food|item"
+                               r"|undefined|x+|a{3,}|abc", re.I)
+_PLACEHOLDER_BRAND = re.compile(r"unknown|undefined|none|null|n/a|na|no brand|nobrand|no name|generic"
+                                r"|sans marque|test|\?|-|x", re.I)
+# Text copied from the back of the pack into the name field.
+_LABEL_TEXT = re.compile(r"\b(?:best before|use by|store in a|keep refrigerated|keep frozen|nutrition info"
+                         r"|calories per)", re.I)
+_INGREDIENTS = re.compile(r"ingredients:", re.I)
+# The website's placeholder saved as a name ("Loading…", "Loading..."), a slogan copied from
+# the pack ("Mi sedaap. Mi segara. Jelas terasa sedapnya. ..."), and text that starts in the
+# middle of a sentence ("at seasonings, kaya bagay sa kahit"; 36 names in the whole export,
+# none of them a usable name).
+_LOADING = re.compile(r"loading\s*(?:…|\.{2,})?", re.I)
+_SLOGAN = re.compile(r"jelas terasa|we'?re here to help|is this halal", re.I)
+_MID_SENTENCE = re.compile(r"(?:at|and|or|of|to|for|is|are|kaya|sa|ng)\s")      # lower case on purpose
+
+
+def decode_entities(value):
+    """Clean text with HTML entities turned back into characters.
+
+    Some names were escaped more than once on their way into the export:
+    "Oats &amp;amp; Honey" -> "Oats &amp; Honey" -> "Oats & Honey". Three rounds are plenty.
+    """
+    text = clean_text(value)
+    for _ in range(3):
+        decoded = html.unescape(text) if "&" in text else text
+        if decoded == text:
+            break
+        text = decoded
+    return clean_text(text)
+
+
+def letter_count(text):
+    return sum(1 for ch in text if ch.isalpha())
+
+
+def junk_name(name):
+    """True for text that is not a food name: a barcode, a stray letter, "test", label text."""
+    core = "".join(ch for ch in name if ch.isalnum())       # letters and digits only
+    if not core or core.isdigit():
+        return True
+    if not _CJK.search(name):
+        # One character, or two plain letters ("h", "xx"). Short names with a digit are real
+        # ("c2", "R-1"), and so is a single Japanese, Chinese or Korean character.
+        if len(core) == 1 or (len(core) == 2 and core.isascii() and core.isalpha()):
+            return True
+    # "Unknown", "N/A", "test." ... (stray punctuation around the word does not save it)
+    bare = name.strip(" .,;:!?-_*'\"()[]")
+    if _LOADING.fullmatch(bare) or _SLOGAN.search(name) or _MID_SENTENCE.match(name):
+        return True
+    return bool(_PLACEHOLDER_NAME.fullmatch(bare) or _LABEL_TEXT.search(name))
+
+
+def usable_name(*choices):
+    """The first of the given texts that works as a food name, or "" when none does.
+
+    "SWEET PICKLE INGREDIENTS: CUCUMBER, ..." keeps the part before "ingredients:" when
+    that is at least four letters long.
+    """
+    for name in choices:
+        found = _INGREDIENTS.search(name)
+        if found:
+            name = name[:found.start()].rstrip(" -,;:.(")
+            if letter_count(name) < 4:
+                continue
+        if name and not junk_name(name):
+            return name
+    return ""
+
+
+def adds_search_words(generic, name):
+    """Is the product's "generic name" worth keeping as another name to search by?
+
+    Till-style Philippine names such as "nc bulalo 40g" come with a readable generic name
+    ("Nissin Cup Noodles Bulalo"). It is kept when it is short, in Latin letters and not
+    already part of the name.
+    """
+    if not 4 <= len(generic) <= 60 or not re.search("[A-Za-z]", generic):
+        return False
+    plain = plain_words(generic)
+    return bool(plain) and plain not in plain_words(name)
+
+
+# --- sodium ---
+
+def off_sodium_mg(sodium_g, salt_g):
+    """Milligrams of sodium from the file's two fields (grams of sodium, grams of salt), or None.
+
+    The two should say the same thing (salt is 40 % sodium). When only one is usable it is
+    taken. When they disagree and one of them is next to nothing, that one is a unit slip
+    and the other is taken. When they disagree otherwise there is no telling which is
+    right, and the row gets no sodium figure.
+    """
+    from_sodium = None if sodium_g is None else sodium_g * 1000
+    from_salt = None if salt_g is None else sodium_mg_from_salt_g(salt_g)
+    sodium_ok = from_sodium is not None and 0 <= from_sodium <= MAX_SODIUM_MG
+    salt_ok = from_salt is not None and 0 <= from_salt <= MAX_SODIUM_MG
+    if sodium_ok and salt_ok:
+        low, high = min(from_sodium, from_salt), max(from_sodium, from_salt)
+        if high - low <= max(0.25 * high, 50):
+            return from_sodium
+        if low < 5 and 50 <= high <= 2000:
+            return high
+        return None
+    if sodium_ok:
+        return from_sodium
+    if salt_ok and (from_sodium is None or from_salt > 0):
+        return from_salt            # an impossible sodium figure is only replaced by real salt, not by 0
+    return None
+
+
+def sodium_typed_in_mg(sodium_mg, serving_g):
+    """True when a high sodium figure is milligrams typed where grams were asked for.
+
+    More than 3 500 mg per 100 g is real for seasonings, but then one serving is a few
+    grams. When one stated serving alone would hold over 4 000 mg, the figure is wrong.
+    Nothing can be said when the serving is unknown or is simply 100 g.
+    """
+    return (sodium_mg is not None and sodium_mg > 3500 and serving_g is not None
+            and not 95 <= serving_g <= 105 and sodium_mg * serving_g / 100 > 4000)
+
+
+# --- calories against protein, carbs and fat ---
+
+_ALCOHOL_WORDS = re.compile(
+    r"\b(?:beer|lager|ale|stout|wine|vodka|whisky|whiskey|rum|gin|tequila|brandy|liqueur|sake|soju|cider"
+    r"|seltzer|chu-hi)\b"
+    r"|ビール|酒|チューハイ|サワー|맥주|소주"                 # beer, sake, chu-hi, sour; beer, soju
+    r"|(?<!\d)\d{1,2}\s?[%％]", re.I)                         # "7%" on a can
+
+
+def is_alcoholic(row, alcohol, categories):
+    """Alcohol carries calories that are in none of the macros, so such a drink is expected
+    to have "too many" calories. A name alone only counts for something with next to no
+    protein and fat ("86% cacao" is not a drink)."""
+    if alcohol is not None and alcohol > 0.5:
+        return True
+    if "alcoholic beverages" in [token.strip().lower() for token in categories.split(",")]:
+        return True
+    return ((row["protein_g"] or 0) < 2 and (row["fat_g"] or 0) < 1
+            and _ALCOHOL_WORDS.search(row["name"]) is not None)
+
+
+def calorie_conflict(row, kcal, serving_g, alcohol, categories):
+    """Do kcal calories contradict the row's own protein, carbs and fat? "" when they do not.
+
+    Protein and carbs give about 4 kcal per gram and fat 9, so the macros put a floor and
+    a ceiling on the calories:
+      "a"  fewer calories than protein, sugars and fat alone account for
+      "b"  fewer than protein, carbs (less fibre) and fat account for; not asked of items
+           that are nearly all sweetener or water, whose carbs carry few calories
+      "c"  more than everything together explains (all three macros must be known);
+           not asked of alcoholic drinks
+    Each test allows 30 to 40 % plus 10 to 20 kcal of slack. A label rounded for one small
+    serving and scaled up to 100 g can be off by more: then the slack is 1 400 kcal divided
+    by the serving weight, when that is larger. Missing numbers count as 0.
+    """
+    protein, carbs, sugars = row["protein_g"] or 0, row["carbs_g"] or 0, row["sugars_g"] or 0
+    fat, fibre = row["fat_g"] or 0, row["fibre_g"] or 0
+    sure_sugars = min(sugars, carbs) if row["carbs_g"] is not None else sugars
+    alcohol_g = alcohol if alcohol is not None and 0 < alcohol <= 100 else 0
+    floor_sugars = 4 * protein + 4 * sure_sugars + 9 * fat
+    floor_carbs = 4 * protein + 4 * max(carbs - fibre, 0) + 9 * fat
+    ceiling = 4 * protein + 4 * max(carbs, sugars) + 9 * fat + 2 * fibre + 5.5 * alcohol_g
+    rounding = 1400 / serving_g if serving_g is not None and serving_g < 100 else 0
+
+    if kcal < floor_sugars - max(0.30 * floor_sugars + 10, rounding):
+        return "a"
+    if not (protein < 1 and fat < 1 and sugars < 5) and kcal < floor_carbs - max(0.40 * floor_carbs + 10, rounding):
+        return "b"
+    if (kcal > ceiling + max(0.30 * ceiling + 20, rounding)
+            and None not in (row["protein_g"], row["carbs_g"], row["fat_g"])
+            and not is_alcoholic(row, alcohol, categories)):
+        return "c"
+    return ""
+
+
+def _label_round(grams):
+    """Is this a figure as printed on a label: a multiple of half a gram (or missing)?"""
+    return grams is None or abs(grams * 2 - round(grams * 2)) <= 0.04
+
+
+def repair_calories(row, conflict, serving_g, kilojoules, alcohol, categories):
+    """Try the two safe repairs on a row that failed calorie_conflict. True when one worked.
+
+    1. "0 kcal" next to a real kilojoule figure: take the calories from the kilojoules,
+       when all three macros are known and agree with the result. Marked as an estimate.
+    2. Calories per 100 g but protein, carbs and fat typed per serving, exactly as printed
+       (multiples of half a gram): scale the macros up (or, for a bottle or a whole meal,
+       down) to 100 g. Only done when the calories then fit within 15 %. Sodium is scaled
+       too when it is a round label figure, otherwise it is dropped. Calories are kept.
+    Anything else stays unrepaired: there is no telling which of its numbers is wrong.
+    """
+    kcal, protein, carbs, fat = row["calories_kcal"], row["protein_g"], row["carbs_g"], row["fat_g"]
+    if (kcal == 0 and kilojoules is not None and kilojoules > 0
+            and None not in (protein, carbs, fat) and protein + carbs + fat <= 100):
+        from_kilojoules = kcal_from_kj(kilojoules)
+        if (from_kilojoules <= MAX_KCAL_PER_100G
+                and not calorie_conflict(row, from_kilojoules, serving_g, alcohol, categories)):
+            row["calories_kcal"], row["basis"] = from_kilojoules, "estimate"
+            return True
+
+    if serving_g is None or kcal <= 0:
+        return False
+    small_serving = conflict == "c" and 5 <= serving_g <= 60            # a handful, a slice, a bar
+    large_serving = conflict in ("a", "b") and 125 <= serving_g <= 1000   # a bottle, a ready meal
+    from_macros = 4 * (protein or 0) + 4 * (carbs or 0) + 9 * (fat or 0)
+    if not (small_serving or large_serving) or from_macros < 5:
+        return False
+    if not (_label_round(protein) and _label_round(carbs) and _label_round(fat)):
+        return False
+    scale = 100.0 / serving_g
+    if abs(kcal / from_macros - scale) > 0.15 * scale:
+        return False
+    scaled = {column: row[column] * scale for column in GRAM_COLUMNS if row[column] is not None}
+    if any(value > 100 for value in scaled.values()):
+        return False
+    if scaled.get("protein_g", 0) + scaled.get("carbs_g", 0) + scaled.get("fat_g", 0) > 105:
+        return False
+    row.update(scaled)
+    sodium = row["sodium_mg"]
+    if sodium is not None:
+        on_the_label = abs(sodium / 5 - round(sodium / 5)) < 0.002      # a multiple of 5 mg
+        row["sodium_mg"] = sodium * scale if on_the_label else None
+    return True
+
+
+def fill_missing_macro(row, alcohol, categories):
+    """When exactly one of protein, carbs and fat is blank, work it out from the calories.
+
+    The app shows a blank macro as 0 g, which is wrong for instant noodles with no carbs
+    figure. The missing one is what the calories leave over after the other two; it is
+    only filled when that comes to between 1 and 100 g. Marked as an estimate. Returns
+    True when a figure was filled in. Alcoholic drinks are left alone (their spare
+    calories are alcohol, not carbs).
+    """
+    macros = ("protein_g", "carbs_g", "fat_g")
+    blank = [column for column in macros if row[column] is None]
+    if len(blank) != 1 or is_alcoholic(row, alcohol, categories):
+        return False
+    known_kcal = 4 * (row["protein_g"] or 0) + 4 * (row["carbs_g"] or 0) + 9 * (row["fat_g"] or 0)
+    grams = (row["calories_kcal"] - known_kcal) / (9 if blank[0] == "fat_g" else 4)
+    if not 1 <= grams <= 100 or grams + sum(row[column] or 0 for column in macros) > 105:
+        return False
+    row[blank[0]], row["basis"] = grams, "estimate"
+    return True
+
+
+def reconcile_parts(row):
+    """Sugars are part of the carbs and saturates part of the fat: a part cannot exceed its whole.
+
+    A small excess (up to 1 g or 10 %) is rounding and the part is set to the whole. A
+    larger one means one of the two is wrong: the part is dropped, unless the calories show
+    that it is the carbs figure that is wrong (a soft drink with "carbs 0, sugars 10.6"),
+    in which case carbs become the sugars. Nothing is done when the whole is missing.
+    """
+    carbs, sugars = row["carbs_g"], row["sugars_g"]
+    if carbs is not None and sugars is not None and sugars > carbs:
+        if sugars <= carbs + max(1, 0.10 * carbs):
+            row["sugars_g"] = carbs
+        else:
+            protein, fat, kcal = row["protein_g"] or 0, row["fat_g"] or 0, row["calories_kcal"]
+
+            def explains_calories(carbohydrate):
+                expected = 4 * protein + 4 * carbohydrate + 9 * fat
+                return abs(kcal - expected) <= max(0.15 * expected, 10)
+
+            if explains_calories(sugars) and not explains_calories(carbs) and protein + sugars + fat <= 105:
+                row["carbs_g"] = sugars
+            else:
+                row["sugars_g"] = None
+    fat, saturates = row["fat_g"], row["saturates_g"]
+    if fat is not None and saturates is not None and saturates > fat:
+        row["saturates_g"] = fat if saturates <= fat + max(1, 0.10 * fat) else None
+
+
+# --- serving size ---
+
+_COMMA_THOUSANDS = re.compile(r"\d{1,3},\d{3}\s*(?:g|ml)", re.I)                    # "1,330g"
+_BARE_NUMBER = re.compile(r"\d+(?:\.\d+)?")                                        # "30"
+_NUMBER_AND_UNIT = re.compile(r"\d+(?:\.\d+)?\s*(?:g|ml)", re.I)                    # "1 g"
+_PLAIN_100 = re.compile(r"(?:1 )?(?:portion|serving)? ?\(?100 ?(?:g|ml)\)?", re.I)  # "1 portion (100 g)"
+
+
+def off_portions(serving_size, serving_g, kcal):
+    """The portions list for an Open Food Facts row: [] or one [label, grams] entry.
+
+    The first portion is the amount the app logs by default, so a wrong one does harm:
+      - "1,330g" read by the source as 1.33 is put right
+      - a bare "30" with no weight is taken as 30 g
+      - no portion is kept when it would be over 1 000 kcal (a whole jar or pack, or a
+        typing slip), when it is just "100 g" (the app offers that anyway), or when it is
+        "1 g" or less with no household measure
+    """
+    label = clean_text(serving_size)
+    if not label:
+        return []
+    grams = serving_g
+    if grams is None:
+        if not (_BARE_NUMBER.fullmatch(label) and 5 <= float(label) <= 500):
+            return []
+        grams = float(label)
+        label = f"{tidy_number(grams)} g"
+    elif grams < 10 and _COMMA_THOUSANDS.fullmatch(label):
+        grams *= 1000
+    if kcal * grams / 100 > 1000:
+        return []
+    if grams == 100 and _PLAIN_100.fullmatch(label):
+        return []
+    if grams <= 1 and _NUMBER_AND_UNIT.fullmatch(label):
+        return []
+    return [[label[:60], tidy_number(round(grams, 2))]]
+
+
+# --- labels typed per serving ---
+# Many Philippine rows hold the label's PER SERVING column in the per-100 g fields: the
+# calories agree with the macros, so nothing above catches them, but they are 2 to 6 times
+# too low ("fish crackers 117 kcal", "bread 141") or, for a bottle, too high ("cola 72 per
+# 100 ml"). Such a row is recognised by its kind of food, read from words in its name and
+# categories, and the range real labels of that kind fall in (SERVING_KINDS). The ranges
+# were measured on the Philippine rows of the real export (per 100 g; per 100 ml for drinks):
+# a dry snack, cookie or cracker is 340 to 620 kcal, bread 200 to 500, a soft drink 15 to 60.
+# A row is suspect when its calories are below the kind's floor (above its ceiling for a
+# drink); a real low-calorie product of a kind that is not listed (soup, pickles, fresh
+# noodles, a coffee drink, a diet soda) is never suspect.
+#
+# A suspect row must also look like a label column copied whole: its calories agree with
+# its own protein, carbs and fat (to 20 % or 10 kcal). What is then done (serving_typed_fix):
+#   1. the serving's weight is looked for: serving_quantity (or a weight in serving_size),
+#      then a weight written in the name ("cm cookies 33g", "c2 lemon 455ml"), then the
+#      pack's "quantity". The first weight (5 to 2000 g, not 90 to 110) that puts the
+#      calories back in the plausible range, with no more than 100 g of anything in 100 g,
+#      is taken: the numbers are re-based to per 100 g, the row is marked an estimate, and
+#      that serving becomes the default portion (pinned first like a curated
+#      "default_portion": "serving"). It may be more than 100 g (a 500 ml bottle).
+#   2. when no stated weight works and the calories are far enough off (the kind's "sure"
+#      figure; noodles and drink powders have none, as their low figures may honestly be
+#      "as prepared"):
+#      a. a dry food (crackers, chips, chocolate, candy, nuts, nut spread, cereal, oil) is nearly
+#         all protein, carbs and fat, so the serving the numbers describe weighs about
+#         their sum (divided by the kind's "solids" share, 0.90 to 1). The row is re-based
+#         on that weight and the serving is called "1 serving (about 29 g)".
+#      b. any other kind (bread, cheese, mayonnaise, a drink) is stored per serving (at
+#         least 15 kcal), labelled with its serving text when that text names no weight,
+#         else "1 serving (as on the pack)".
+#   3. otherwise the row is left as it is: there is no telling.
+# Whatever is done, the default portion shows the calories the label gives for a serving.
+#
+# One more case. Open Food Facts lets a contributor type the label "per serving" and works
+# the per-100 g figures out from the serving size typed next to it. When that size was the
+# whole pack ("90g" for a 22 g serving of fish crackers), the file holds 117 kcal, 1.11 g,
+# 17.8 g, 4.44 g: not label figures, but they become the label's own (105 kcal, 1, 16, 4 g)
+# when taken back to 90 g. Such a row (_typed_for_serving) is put back to its label figures
+# first, its stated serving is known to be wrong and is not tried, and step 2 applies without
+# the "sure" test for a dry food. Drinks are not read this way.
+# Separately, a dry food (any kind except drinks; ice cream under 5 kcal) showing under
+# 10 kcal is dropped, and so is one above 1.5 times the top of its range. Drinks are never
+# dropped for 0 kcal: water, diet and zero drinks are real.
+#
+# Ice cream has no range of its own, but Philippine tubs print their numbers per 100 ml,
+# and 100 ml of ice cream weighs about 60 g (it is half air): "129 kcal" is then shown for
+# 100 g when 100 g holds about 215. A row with 80 to 160 kcal, at least 2 g of fat (not a
+# water ice) and a "100 ml" serving, or no serving at all and "ice cream" in its name, is
+# re-based on that weight with "100 ml (about 60 g)" first (_ice_cream_by_volume). Bars,
+# cones, sticks and anything light or with a serving in grams are left as they are.
+# import_off applies all of this to Philippine rows only (tagged PH or a 480 barcode).
+
+_LIQUID_UNIT = re.compile(r"\d\s*(?:ml|cl|l|ltrs?|liters?|litres?|fl\.?\s*oz)\b", re.I)
+# Words that make a food wet, frozen, a meal, a seasoning or a drink: such a row is never one of the dry kinds.
+_WET = re.compile(
+    r"ice cream|gelato|sorbet|sundae|popsicle|frozen|\bdrinks?\b|drinking|juice|beverage|shake|smoothie|latte"
+    r"|coffee|\btea\b|yogh?urt|soup|sauce|syrup|cornetto|\bcones?\b|ready.?to.?(?:eat|drink)|\bmeals?\b|\bdip\b"
+    r"|\bmilk\b(?! ?(?:chocolate|choco|biscuits?|cookies?|crackers?|candy|candies|tablets?|bars?|bread|buns?))"
+    r"|chicken|beef|bacon|\bham\b|sau[sd]ages?|hot ?dogs?|longganisa|tocino|tuna|sardines?|corned|\bmeat|turkey"
+    r"|pepperoni|salami|mortadella|prosciutto|salmon|\bcod\b|breast|fillets?|nuggets?|embutido|siomai|dumplings?"
+    r"|pierogi|krainer|bratwurst|franks?|frankfurters?|fries|\bmash|salad|sandwich(?:es)?\b(?! ?(?:cookies?"
+    r"|biscuits?|crackers?|wafers?|spread|chocolate))|\bsubs?\b|pizza|burrito|pickles?|seasoning|spice|\bblend\b"
+    r"|vinegar|bread (?:&|and) butter|\bbrats?\b|steak|grits|scramble|casserole|\bbakes\b|pudding|mousse|jell-?o"
+    r"|\bmole\b|green beans|happy apples|apples? (?:&|and)", re.I)
+_DRINK_PLACE = re.compile(r"beverages|drinks|sodas|\bteas\b|juices|nectars", re.I)    # categories of drinks
+_DRINK_NOT = (
+    r"milk|latte|coffee|cappuccino|mocha|macchiato|yogh?urt|yakult|probiotic|cultured|\bsoy|\boat|almond|choco"
+    r"|cocoa|malt|collagen|protein|powder|\bmix\b|concentrate|cordial|syrup|crackers?|biscuits?|cand(?:y|ies)"
+    r"|gumm|jelly(?! drink)|ice cream|cake|cookies?|oreo|zero|diet|light|lite|no sugar|sugar.?free|unsweetened"
+    r"|\bwater\b|vinegar|sauce|seasoning|tuna|instant")
+_ZERO_CUE = re.compile(r"sugar.?free|no sugar|zero|diet|\blite?\b|light", re.I)
+
+
+class _Kind:
+    """One kind of food: the range its real labels fall in and what happens outside it.
+
+    words: matched in the name (and, with by_brand, in "name | brand"); places: matched in
+    categories_en, only when no kind's words matched the name; skip: words in the name or
+    the serving text that rule the kind out. low, high: the plausible range per 100 g (per
+    100 ml for drinks); a kind without one (ice cream) is only checked for 0 kcal. flag:
+    suspect below this (above it for drinks). sure: below this a row is stored per serving
+    even when no weight explains it (at or above it for drinks); None = never, a weight is
+    always needed. dry: a wet word or a liquid amount rules the kind out. max_carbs: per
+    100 g, after re-basing. solids: the share of the food's weight that is protein, carbs
+    and fat, for the kinds dry enough that a serving's weight can be told from them.
+    """
+    __slots__ = ("name", "words", "places", "skip", "low", "high", "flag", "sure", "drink", "dry", "by_brand",
+                 "max_carbs", "solids")
+
+    def __init__(self, name, words, places, skip, low, high, flag, sure, drink=False, dry=None, by_brand=False,
+                 max_carbs=None, solids=None):
+        self.solids = solids
+        self.name, self.low, self.high, self.flag, self.sure = name, low, high, flag, sure
+        self.words = re.compile(words, re.I)
+        self.places = re.compile(places, re.I) if places else None
+        self.skip = re.compile(skip, re.I) if skip else None
+        self.drink, self.by_brand, self.max_carbs = drink, by_brand, max_carbs
+        self.dry = (not drink) if dry is None else dry              # a drink is never dry
+
+
+# In the order they are tried; the first kind that matches decides (so "peanut butter
+# cookies" are cookies, not peanut butter, and "cheese peanuts" are nuts).
+SERVING_KINDS = (
+    _Kind("ice cream", r"ice cream|gelato|helado|sorbet|sundae|popsicle|ice pops?|ice bars?|ice lolly|ice lollies"
+                       r"|ice candy|frozen dessert|frozen yogh?urt|cornetto|\b(?:selecta|big scoop|creamline|aice"
+                       r"|carmen'?’?s best|arce dairy|dan eric'?’?s|btic|melona|binggrae|magnum|halo top|yasso|tofutti"
+                       r"|dipping dots|jude'?’?s|ben & jerry'?’?s|h[aä]agen|breyers|talenti|goodpop)\b",
+          r"ice creams|frozen desserts|ice pops|sorbets", r"hydration|energy|performance|\bdrink|\bprime\b|\bc4\b",
+          None, None, None, None, dry=False, by_brand=True),
+    _Kind("soda", r"\b(?:colas?|coke|coca.?cola|sodas?|soft drinks?|sprite|royal|tru.?orange|7.?up|seven up"
+                  r"|mountain dew|pepsi|mirinda|sarsi|root ?beer|ginger ale|fanta|carbonated)\b",
+          r"sodas|soft drinks|carbonated drinks|colas", _DRINK_NOT, 15, 60, 60, 60, drink=True),
+    _Kind("tea", r"\b(?:iced tea|ice tea|green tea|lemon tea|c2|nestea|tea drink|black tea|oolong|jasmine tea"
+                 r"|honey tea)\b", r"iced teas|tea-based beverages|ready-to-drink teas", _DRINK_NOT,
+          10, 55, 55, 60, drink=True),
+    _Kind("juice", r"\b(?:juices?|nectar|fruit drink|lemonade|dalandan|energy drinks?|sports drinks?|isotonic"
+                   r"|gatorade|pocari|zesto|minute maid)\b",
+          r"juices|nectars|fruit-based beverages|energy drinks|sports drinks",
+          _DRINK_NOT + r"|\bin\b|slices|halves|drained|canned|cocktail|tidbits|chunks|segments", 15, 75, 75, 85,
+          drink=True),
+    # Milk, chocolate milk and coffee drinks in a bottle, can or carton (a liquid amount is required):
+    # 100 ml of any of them stays under 95 kcal; evaporated, condensed and coconut milk and cream do not.
+    _Kind("milk drink", r"\b(?:milk|choco(?:late)? drink|coffee drink|latte|cappuccino|mocha|macchiato|chuckie"
+                        r"|nutri ?boost|milk tea)\b", None,
+          r"evaporad[ao]|evaporated|condensed|condensada|kremdensada|\bcream\b(?! ?milk)|creamer|coconut|\bgata\b"
+          r"|powder|ensure|pediasure|supplement|formula|shake|smoothie|yogh?urt|yakult|kefir|butter|concentrate"
+          r"|syrup|ice cream|liqueur|\bmix\b|instant|3 ?in ?1|sachet|protein|collagen|whey|zero|diet|no sugar"
+          r"|sugar.?free", 25, 95, 100, None, drink=True),
+    _Kind("drink powder", r"\b(?:3 ?in ?1|3-in-1|2 ?in ?1|coffee mix|creamer|coffee.?mate|milk powder"
+                          r"|powdered milk|powdered (?:chocolate|choco|juice|drink|milk drink)|milo|ovaltine"
+                          r"|energen|tang|juice powder|choco(?:late)? drink mix|chocolate malt|malt drink)\b",
+          r"powdered milk|dried milks|milk powders|creamers|powdered (?:chocolate|juice|drink)",
+          r"ready.?to.?drink|\brtd\b|bottle|\bcan\b|\buht\b|sterili[sz]ed|liquid|\bblack\b|\bpure\b|classic|baking"
+          r"|seasoning|protein|whey|collagen|creatine|pre.?workout|bcaa|cocoa powder|tablea|ice cream|electrolyte"
+          r"|hydration|sugar.?free|zero|diet|light|lite|\btea\b|lemonade", 330, 580, 250, None, dry=False),
+    _Kind("bakery", r"\b(?:bread|breads|pandesal|pan de sal|ensaymada|ensaimada|monay|muffins?|cupcakes?|brownies?"
+                    r"|donuts?|doughnuts?|croissants?|eclairs?|brioche|mamon|pastry|pastries|buns?|bagels?|toast"
+                    r"|crinkles|cakes?|swiss roll|chiffon|pianono|brazo|hopia|hopiang|neu ?bake|gardenia)\b",
+          r"\b(?:breads|muffins|pastries|brioches)\b|(?<!biscuits and )\bcakes\b",
+          r"crumbs|breading|\bmix\b|flour|rice cakes?|fish cakes?|crab cakes?|yam cakes?(?! bar)|cheesecake"
+          r"|\bloaf\b(?! bread)|pancakes?|mochi|tikoy|kakanin|puto|bibingka|kutsinta|suman|sapin|cassava|halaya"
+          r"|leche|flan|cream puff|custard|fruit ?cake|stuffing|tortillas?|spread|wraps?\b|egg white|dipper"
+          r"|panera|einstein|seltzer|roaster|blend", 200, 500, 200, 150),
+    _Kind("crackers", r"\b(?:crackers?|biscuits?|cookies?|wafers?|pretzels?|biscocho|galletas?|otap|sky ?flakes"
+                      r"|polvoron|rosquillos|barquillos|uraro|broas|piaya)\b",
+          r"\b(?:biscuits|crackers|cookies|wafers)\b(?! and cakes)",
+          r"cookie dough|egg ?roll wrappers?|spring roll|soft|flapjack|buttermilk|homestyle|home style|southern"
+          r"|flaky|grands|dough|waffles?|layers|jumbo|cheesecake", 340, 600, 300, 230, solids=0.95),
+    _Kind("chips", r"\b(?:chips|crisps|curls|chicharr?ons?|cornicks?|corniks|nachos|puffs|popcorn|cracklets"
+                   r"|cracklin|crackling|kropek|kropeck|taco shells?|cheese rings|potato sticks|corn (?:snacks?|bits)"
+                   r"|pork rinds?|chippy|piattos|tortillos|tostillas)\b", r"\b(?:chips|crisps|popcorn|puffed)\b",
+          r"fruit|mango|banana|apple|jackfruit|dried|kale|pickles?|shrimp(?! (?:crackers?|chips))|chocolate chips?"
+          r"|choco chips?|baking chips|chips delight|\boven\b|triple cook|thick cut|chunky|steak|crinkle|curly"
+          r"|hash|shredded|potato curls|cream puffs?|pancake|cereal|cauliflower|\bsalt\b|wetherspoon|side plate",
+          350, 620, 350, 230, solids=0.95),
+    _Kind("nut spread", r"\b(?:peanut butter|nut butter|almond butter|cashew butter|hazelnut spread"
+                        r"|chocolate spread|choco spread|nutella|choco hazelnut|cocoa spread)\b", None,
+          r"cookies?|crackers?|biscuits?|wafers?|\bbars?\b|cups?|sandwich|cand(?:y|ies)|powder|protein|whey"
+          r"|filled|flavou?r|cereal|oat|chips|pretzels?|light|reduced", 450, 700, 450, 250, solids=0.95),
+    _Kind("mayonnaise", r"\b(?:mayonnaise|mayo|sandwh?ich spread)\b", None,
+          r"light|lite|low.?fat|reduced|fat.?free|onigiri|potato|vegan|half", 250, 760, 250, 150),
+    _Kind("oil", r"\b(?:cooking|vegetable|coconut|olive|canola|palm|corn|soybean|soya|sesame|sunflower|rice bran"
+                 r"|avocado|peanut|grapeseed|safflower)\s+oil\b|\bolein\b", None,
+          r"\bin\b|spray|fish|flakes|chunks|capsules?|softgels?|chil[il]|garlic|infused|chips|loaf|bread|ciabatta"
+          r"|focaccia|crackers?|dressing|mayo", 700, 950, 700, 400, solids=1.0),
+    _Kind("nuts", r"\b(?:peanuts?|cashews?|almonds?|pistachios?|macadamias?|walnuts?|hazelnuts?|pecans?|pili"
+                  r"|kasoy|mixed nuts|nuts|sunflower seeds|pumpkin seeds|melon seeds|watermelon seeds"
+                  r"|butong pakwan|kuaci)\b", r"salted nuts|roasted nuts|mixed nuts|\bpeanuts\b|cashews|almonds"
+          r"|pistachios", r"butter|spread|\boil\b|flour|\bbars?\b|cookies?|coconut|paste|cream|unsweetened|vanilla"
+          r"|beverage|alpro|so nice|\bsilk\b|foam|\bdates?\b|cupcakes?|cakes?|brioche|rolls?|baklava"
+          r"|carrots?|broccoli", 430, 720, 400, 260, solids=0.93),
+    _Kind("butter", r"\b(?:margarine|ghee|shortening|lard|butter)\b", None,
+          r"peanut|\bnut\b|almond|cashew|cocoa|shea|cakes?|bread|buns?|rolls?|mochi|popcorn|\bcorn\b|garlic|rice"
+          r"|flavou?r|scotch|cream|cand(?:y|ies)|toffee|caramel|honey|\bbars?\b|cups?|shrimp|crab|prawn|squid"
+          r"|cinnamon|sugar|beans?|squash|lemon|tarts?|\bpie\b|coconut(?! butter)|\bube\b|\byam\b|cheese"
+          r"|oats?|granola|fried|fish|spread|apple|fruit|pumpkin|pear|plum|chick|light|lite|reduced|potato"
+          r"|carrot|r[oœ]sti|\bau lard|cherry|berry|peach|apricot|vanilla|emuls|extract|olive", 500, 900, 500, 200),
+    _Kind("cheese", r"\b(?:cheese|cheddar|mozzarella|parmesan|gouda|edam|queso|quezo|cheez|cheezee|kesong)\b", None,
+          r"cream cheese|cottage|ricotta|feta|light|lite|low.?fat|reduced|vegan|plant|flavou?re?d?|curls|rings"
+          r"|balls|sticks|cake|ensaymada|dressing|mayo|lasagna|macaroni|\bmac\b|burger|\bpie\b|tart|pastillas"
+          r"|tomato|spaghetti|pasta|stuffed|bites|snack|\bcorn\b|powder|\bbars?\b|yema|\boil\b|butter|popped"
+          r"|cheesies|crisps|chocolate|gateau|seasoned|potato|onion|nacho|queso dip|no dairy|dairy.?free|broccoli"
+          r"|pistachio", 230, 480, 230, 100, max_carbs=15),
+    _Kind("cereal", r"\b(?:cereals?|granola|corn ?flakes|muesli|koko krunch|oats|rolled oats|oatmeal|cheerios"
+                    r"|froot loops|honey stars)\b", r"breakfast cereals|cereal flakes|granolas|mueslis|rolled oats",
+          r"\bbars?\b|\bjars?\b|bites|porridge|cups?\b|prepared|cooked|with milk|ready", 330, 520, 300, 200,
+          solids=0.93),
+    _Kind("noodles", r"\b(?:instant noodles?|noodles?|pancit canton|ramen|ramyun|ramyeon|ramyon|mami|bihon"
+                     r"|sotanghon|canton|spaghetti|pasta|macaroni|vermicelli|misua|miswa|udon|soba|lomi|miki"
+                     r"|odong|chow mein|yakisoba|mi goreng|fettuccine|penne|linguine|lm pc|lm)\b",
+          r"instant noodles|pastas|noodles",
+          r"fresh|cooked|ready|tteokbokki|stir.?fry mix|strips|\bkit\b|baked|carbonara|salad|meatballs|chilled"
+          r"|soup base|prepared|bowl|konjac|shirataki|keto|zero|slim|miracle|kelp|palmini|palm|zucchini|veggie"
+          r"|vegetable|squash|lentil|chickpea|bean|edamame|soy", 330, 520, 300, None),
+    _Kind("chocolate", r"\b(?:chocolates?|choco bars?|pralines?|bonbons?|truffles)\b",
+          r"\bchocolates\b|chocolate candies",
+          r"sugar.?free|no sugar|zero|creatine|vitamins?|supplement|collagen|protein|cakes?|mochi|pudding|spread"
+          r"|cereal|flan|gateau|g[aâ]teau|mousse|\bpots?\b|dessert|custard|matcha|bomb pop|\bpops?\b|non.?dairy"
+          r"|keto|fresh milk|jell-?o", 420, 620, 300, 250, solids=0.97),
+    _Kind("candy", r"\b(?:candy|candies|lollipops?|lollies|gumm(?:y|ies)|jelly beans|marshmallows?|mallows"
+                   r"|tic ?tac|toffees?|pastillas|yema|nougat|caramels)\b",
+          r"confectioner|candies|gummies|marshmallows",
+          r"sugar.?free|no sugar|zero|\bgum\b|creatine|vitamins?|supplement|collagen|protein|cakes?|mochi|pudding"
+          r"|jelly cups?|gulaman|gelatin|spread|cereal|grapes?|matcha|\btea\b|vinegar|elderberry|melatonin|biotin"
+          r"|probiotic|fib(?:er|re)|cotton candy|xylitol|flan|custard|rice|\briz\b|g[aâ]teau|dessert|powder"
+          r"|\bc gummies", 280, 450, 280, 180, solids=0.90),
+)
+# "Cookies and Cream" names a flavour (of an ice cream, a chocolate bar, a drink), not a cookie.
+_FLAVOUR_NAME = re.compile(r"\bcookies?\s*(?:and|&|n|['’‘]?n['’]?)\s*cream\b", re.I)
+
+
+def serving_kind(name, brand, categories, serving_size, quantity):
+    """The _Kind a row belongs to, or None.
+
+    The name's words are tried first, then (only when no kind's words match the name) the
+    categories. Drinks also need a liquid amount or a drink category; the dry kinds never
+    take a row with a wet word or a liquid amount; drink powders take no liquid amount.
+    """
+    name, categories = _FLAVOUR_NAME.sub(" ", name or ""), categories or ""
+    liquid = bool(_LIQUID_UNIT.search(serving_size or "") or _LIQUID_UNIT.search(quantity or "")
+                  or _LIQUID_UNIT.search(name))
+    wet = liquid or bool(_WET.search(name))
+    own_words = name + " | " + (serving_size or "")
+
+    def fits(kind):
+        if kind.skip is not None and kind.skip.search(own_words):
+            return False
+        if kind.drink and not (liquid or (_DRINK_PLACE.search(categories) and kind.name != "milk drink")):
+            return False
+        return True
+
+    branded = name + " | " + (brand or "")
+    found = ([kind for kind in SERVING_KINDS if kind.words.search(branded if kind.by_brand else name)]
+             or [kind for kind in SERVING_KINDS if kind.places is not None and kind.places.search(categories)])
+    for kind in found:
+        if not fits(kind):
+            continue
+        if (kind.dry and wet) or (kind.name == "drink powder" and liquid):
+            return None
+        return kind
+    return None
+
+
+_WEIGHT_IN_TEXT = re.compile(r"(\d+(?:[.,]\d+)?)\s*(kg|g|gm|gms|grams?|ml|cl|l|ltrs?|liters?|litres?)\b", re.I)
+_UNIT_FACTOR = {"kg": 1000, "cl": 10, "l": 1000, "ltr": 1000, "ltrs": 1000, "liter": 1000, "liters": 1000,
+                "litre": 1000, "litres": 1000}
+
+
+def text_weight(text):
+    """The first weight or volume written in a text, in g or ml: "cm cookies 33g" -> 33,
+    "Zesto 1.5L" -> 1500, "4 x 110 ml" -> 110. None when there is none."""
+    found = _WEIGHT_IN_TEXT.search(text or "")
+    if not found:
+        return None
+    unit = found.group(2).lower()
+    return float(found.group(1).replace(",", ".")) * _UNIT_FACTOR.get(unit, 1)
+
+
+def _typed_for_serving(row, serving_g):
+    """True when the per-100 g figures were worked out from numbers typed for one serving.
+
+    The file's figures are then not label figures (117 kcal, 1.11 g, 17.8 g, 4.44 g with a
+    "90g" serving) but become ones when taken back to that serving (105 kcal, 1, 16, 4 g):
+    whole calories and protein, carbs and fat in half grams, allowing for the three
+    significant digits the file keeps. At least one of the four figures must be off the
+    label grid as it stands, so that a plain round row is never read this way.
+    """
+    if serving_g is None:
+        return False
+    odd = False
+    for column, step in (("calories_kcal", 1.0), ("protein_g", 0.5), ("carbs_g", 0.5), ("fat_g", 0.5)):
+        value = row[column]
+        if value is None:
+            continue
+        if abs(value / step - round(value / step)) * step > 0.02:
+            odd = True
+        back = value * serving_g / 100.0
+        if abs(back / step - round(back / step)) * step > max(0.03, 0.006 * back):
+            return False
+    return odd
+
+
+SERVING_SODIUM_MAX = 2500       # mg per 100 g after re-basing; more is a typing slip, and the figure is dropped
+
+
+def _rebased(figures, factor, kind):
+    """The figures (calories and grams) times factor, or None when they would be impossible for 100 g."""
+    scaled = {column: figures[column] * factor for column in ("calories_kcal",) + GRAM_COLUMNS
+              if figures[column] is not None}
+    if not kind.low <= scaled["calories_kcal"] <= kind.high:
+        return None
+    if any(scaled.get(column, 0) > 100 for column in GRAM_COLUMNS):
+        return None
+    if scaled.get("protein_g", 0) + scaled.get("carbs_g", 0) + scaled.get("fat_g", 0) > 105:
+        return None
+    if kind.max_carbs is not None and scaled.get("carbs_g", 0) > kind.max_carbs:
+        return None
+    return scaled
+
+
+ICE_CREAM_G_PER_ML = 0.6        # a tub of ordinary ice cream: 100 ml weighs about 60 g
+_ICE_CREAM_NAME = re.compile(r"ice ?cream|gelato|sundae|sorbetes", re.I)
+_NOT_TUB_ICE_CREAM = re.compile(
+    r"sugar.?free|no sugar|zero|diet|\blite?\b|light|low.?fat|reduced|yogh?urt|\bmilk\b(?! ?choco)|latte|shake|soda"
+    r"|sorbet\b|pops?\b|popsicle|loll(?:y|ies)|ice (?:candy|bars?|sticks?|drops?)|sandwich|\bcones?\b|\bbars?\b"
+    r"|sticks?\b|powder|\bmix\b|syrup|topping", re.I)
+
+
+def _ice_cream_by_volume(row, name, label_text, serving_g):
+    """Re-base a tub ice cream whose numbers are per 100 ml on the weight of 100 ml. True when done."""
+    kcal = row["calories_kcal"]
+    if not 80 <= kcal < 160 or (row["fat_g"] or 0) < 2 or _NOT_TUB_ICE_CREAM.search(name):
+        return False
+    from_macros = 4 * (row["protein_g"] or 0) + 4 * (row["carbs_g"] or 0) + 9 * (row["fat_g"] or 0)
+    if abs(kcal - from_macros) > max(0.20 * max(kcal, from_macros), 10):
+        return False
+    if label_text:
+        if not (_LIQUID_UNIT.search(label_text) and serving_g is not None and 90 <= serving_g <= 110):
+            return False                                        # a serving in grams, a bar, a cup, a whole tub
+    elif not _ICE_CREAM_NAME.search(name):
+        return False
+    for column in ("calories_kcal",) + GRAM_COLUMNS + ("sodium_mg",):
+        if row[column] is not None:
+            row[column] = row[column] / ICE_CREAM_G_PER_ML
+    grams = tidy_number(round(100 * ICE_CREAM_G_PER_ML, 2))
+    row["basis"] = "estimate"
+    row["portions"] = [[f"100 ml (about {grams} g)", grams, PIN_MARK]]
+    return True
+
+
+def serving_typed_fix(row, name, brand, categories, serving_size, serving_g, quantity):
+    """Find and repair a row whose label was typed per serving (see the notes above).
+
+    row: the cleaned row (its portions already set by off_portions). Returns what was done:
+    "" nothing, "rebased" (numbers now per 100 g, the serving pinned first), "per_serving"
+    (numbers kept, stored per serving), "drop_zero" or "drop_high" (the row must be thrown away).
+    """
+    kind = serving_kind(name, brand, categories, serving_size, quantity)
+    if kind is None:
+        return ""
+    kcal = row["calories_kcal"]
+    if kind.low is None:                                        # ice cream: 0 kcal, and numbers per 100 ml
+        if kcal < 5 and not _ZERO_CUE.search(name):
+            return "drop_zero"
+        label_text = clean_text(serving_size)
+        by_volume = _ice_cream_by_volume(row, name, label_text,
+                                         text_weight(label_text) if serving_g is None else serving_g)
+        return "rebased" if by_volume else ""
+    if kind.drink:
+        if kcal <= kind.flag or kcal > 250:                     # above 250 it is a syrup or powder, not a bottle
+            return ""
+    else:
+        if kcal < 10:                                           # no dry snack, bread or powder is that light
+            return "drop_zero"
+        if kcal > 1.5 * kind.high:
+            return "drop_high"
+        if kcal >= kind.flag:
+            return ""
+    # The pattern looked for is a label column copied whole: calories that agree with the
+    # row's own protein, carbs and fat (to 20 %, or 10 kcal). Otherwise the calories figure
+    # itself may be the wrong one, and re-basing would scale the error.
+    from_macros = 4 * (row["protein_g"] or 0) + 4 * (row["carbs_g"] or 0) + 9 * (row["fat_g"] or 0)
+    if abs(kcal - from_macros) > max(0.20 * max(kcal, from_macros), 10):
+        return ""
+
+    label_text = clean_text(serving_size)
+    if serving_g is None:
+        serving_g = text_weight(label_text)                     # "1 pack (25 g)" without serving_quantity
+    # The label's own figures for one serving: the row's numbers as they stand, or, when
+    # they were worked out from a serving typed with the wrong weight, taken back to it.
+    columns = ("calories_kcal",) + GRAM_COLUMNS + ("sodium_mg",)
+    figures = {column: row[column] for column in columns}
+    derived = not kind.drink and _typed_for_serving(row, serving_g)
+    if derived:
+        figures = {column: None if value is None else value * serving_g / 100.0 for column, value in figures.items()}
+
+    def rebase(grams, label, others=()):
+        """Store the figures per 100 g with this serving first. False when grams cannot be their weight."""
+        scaled = _rebased(figures, 100.0 / grams, kind)
+        if scaled is None:
+            return False
+        row.update(scaled)
+        sodium = figures["sodium_mg"]
+        row["sodium_mg"] = None if sodium is None or sodium * 100.0 / grams > SERVING_SODIUM_MAX \
+            else sodium * 100.0 / grams
+        row["basis"] = "estimate"
+        amount = tidy_number(round(grams, 2))
+        row["portions"] = [[label[:60], amount, PIN_MARK]] + [p for p in others if p[1] != amount]
+        return True
+
+    # 1. A stated weight that explains the numbers: the serving, the name, the pack size.
+    weights = [] if derived or serving_g is None else [("serving", serving_g)]
+    for source, text in (("name", name), ("pack", quantity)):
+        grams = text_weight(text)
+        if grams is not None:
+            weights.append((source, grams))
+    tried = derived
+    for source, grams in weights:
+        if not 5 <= grams <= 2000 or 90 <= grams <= 110:        # a weight near 100 g changes nothing
+            continue
+        tried = True
+        amount = tidy_number(round(grams, 2))
+        unit = "ml" if kind.drink else "g"
+        if source == "serving" and label_text and re.search(r"\d", label_text):
+            label = label_text if re.search(r"[A-Za-z]", label_text) else f"{amount} {unit}"
+        elif source == "serving":
+            label = f"{amount} {unit}"
+        else:
+            label = f"1 {'bottle' if kind.drink else 'pack'} ({amount} {unit})"
+        others = [] if derived else off_portions(serving_size, serving_g, row["calories_kcal"] * 100.0 / grams)
+        if rebase(grams, label, others):
+            return "rebased"
+
+    # 2. No stated weight explains them. Only when they are far enough off to be sure
+    #    (for numbers known to be typed for a serving of a dry food it is enough that the
+    #    serving typed with them is at least half again as heavy as they allow).
+    plain_label = label_text if label_text and not tried and not _NUMBER_AND_UNIT.search(label_text) \
+        and re.search(r"[A-Za-z]", label_text) else ""
+    far_off = kind.sure is not None and (kcal >= kind.sure if kind.drink else kcal < kind.sure)
+    if kind.solids is not None and (far_off or derived):
+        # a. A dry food: the serving weighs about its protein, carbs and fat together.
+        macros = (figures["protein_g"] or 0) + (figures["carbs_g"] or 0) + (figures["fat_g"] or 0)
+        grams = math.floor(macros / kind.solids + 0.5)
+        if (far_off or grams * 1.5 <= serving_g) and 5 <= grams <= 2000 \
+                and rebase(grams, f"{plain_label or '1 serving'} (about {grams} g)"):
+            return "rebased"
+    if not far_off or figures["calories_kcal"] < 15:            # under 15 kcal: not even one serving of anything
+        return ""
+    # b. Per serving, as the label has it.
+    row.update({column: value for column, value in figures.items() if value is not None})
+    row["per_unit"] = "serving"
+    row["basis"] = "estimate"
+    row["portions"] = [[(plain_label or "1 serving (as on the pack)")[:60], None]]
+    return "per_serving"
+
+
 def import_off(importer, path):
     """The Open Food Facts product export: one product per line, roughly 200 columns, numbers per 100 g."""
     count = kept = 0
@@ -995,49 +2002,113 @@ def import_off(importer, path):
             importer.invalid += 1
             continue
         (code, product_name, product_name_en, brands, countries, image, serving_size, serving_quantity,
-         scans, kcal, kj, energy, protein, carbs, sugars, fat, saturates, fibre, sodium, salt) = record
+         scans, kcal, kj, energy, protein, carbs, sugars, fat, saturates, fibre, sodium, salt,
+         completeness, carbs_total, alcohol, categories, generic_name, quantity, image_small) = record
+        # The website and its API call the small front photo "image_front_small_url"; the bulk CSV
+        # export calls the same photo "image_small_url". Take whichever the file has.
+        image = image or image_small
 
         # Region first: most of the file is sold elsewhere and is skipped right here.
-        sold_in = {OFF_COUNTRIES.get(tag.strip().lower()) for tag in countries.split(",")}
+        tags = {tag.strip().lower() for tag in countries.split(",")}
+        sold_in = {OFF_COUNTRIES.get(tag) for tag in tags}
         regions = ",".join(region for region in REGIONS if region in sold_in)
         if not regions:
             importer.filtered_region += 1
             continue
 
         row = blank_row("off")
-        row["name"] = clean_text(product_name) or clean_text(product_name_en)
+
+        # Name and brand: decode "&amp;", refuse text that is not a name, drop placeholder brands.
+        generic = decode_entities(generic_name)
+        row["name"] = usable_name(decode_entities(product_name), decode_entities(product_name_en),
+                                  generic if letter_count(generic) >= 4 else "")
         if not row["name"]:
             importer.invalid += 1
+            importer.off_dropped["name"] += 1
             continue
-        row["brand"] = clean_text(brands.split(",")[0]) or None
+        brand = decode_entities(brands.split(",")[0])
+        row["brand"] = None if not brand or _PLACEHOLDER_BRAND.fullmatch(brand) else brand
+        if adds_search_words(generic, row["name"]):
+            row["aka"] = [generic]
+
         row["category"] = "supermarket"
         row["region_tags"] = regions
         row["barcode"] = normalize_barcode(code)
         row["thumbnail_url"] = http_url(image)
         row["popularity"] = max(0, int(to_number(scans) or 0))
+        # Facts used later to choose rows for the app: in how many other countries the product
+        # is sold, and how complete Open Food Facts itself rates the record (as a whole percent,
+        # so that 0.7874999 and 0.7875 are the same).
+        tags.discard("")
+        row["foreign_tags"] = sum(1 for tag in tags if tag not in OFF_COUNTRIES and tag not in OFF_NEUTRAL_TAGS)
+        complete = to_number(completeness)
+        row["completeness"] = None if complete is None else int(math.floor(100 * complete + 0.5))
 
         # Energy: kcal when given, otherwise from kilojoules.
+        kilojoules = to_number(kj)
         row["calories_kcal"] = to_number(kcal)
         if row["calories_kcal"] is None:
-            kilojoules = to_number(kj)
-            if kilojoules is None:
-                kilojoules = to_number(energy)
-            if kilojoules is not None:
-                row["calories_kcal"] = kcal_from_kj(kilojoules)
-        row["protein_g"], row["carbs_g"], row["sugars_g"] = to_number(protein), to_number(carbs), to_number(sugars)
+            any_kilojoules = kilojoules if kilojoules is not None else to_number(energy)
+            if any_kilojoules is not None:
+                row["calories_kcal"] = kcal_from_kj(any_kilojoules)
+        row["protein_g"], row["sugars_g"] = to_number(protein), to_number(sugars)
         row["fat_g"], row["saturates_g"], row["fibre_g"] = to_number(fat), to_number(saturates), to_number(fibre)
-        # Sodium: this file gives it in grams. When it is missing, work it out from salt.
-        sodium_g, salt_g = to_number(sodium), to_number(salt)
-        if sodium_g is not None:
-            row["sodium_mg"] = sodium_g * 1000
-        elif salt_g is not None:
-            row["sodium_mg"] = sodium_mg_from_salt_g(salt_g)
+        # Carbs: newer records keep them in a column of their own.
+        row["carbs_g"] = to_number(carbs)
+        if row["carbs_g"] is None:
+            row["carbs_g"] = to_number(carbs_total)
+        # Without usable calories nothing below can be checked. The gram figures are checked
+        # at the end (apply_rules), after the repairs below have had their chance: macros
+        # typed for a whole bottle can be over 100 g and are scaled back to 100 g there.
+        kcal_now = row["calories_kcal"]
+        if kcal_now is None or kcal_now < 0 or kcal_now > MAX_KCAL_PER_100G:
+            importer.invalid += 1
+            importer.off_dropped["numbers"] += 1
+            continue
+        serving_g = to_number(serving_quantity)
+        if serving_g is not None and serving_g <= 0:
+            serving_g = None
+        alcohol_g = to_number(alcohol)
 
-        label, amount = clean_text(serving_size), to_number(serving_quantity)
-        if label and amount and amount > 0:
-            row["portions"] = [[label[:60], tidy_number(round(amount, 2))]]
+        # Sodium: the file gives grams of sodium and grams of salt; they have to agree.
+        row["sodium_mg"] = off_sodium_mg(to_number(sodium), to_number(salt))
+        if sodium_typed_in_mg(row["sodium_mg"], serving_g):
+            row["sodium_mg"] = None
+
+        # Calories have to fit the row's own protein, carbs and fat. A row that fails is
+        # repaired when that is safe and thrown away otherwise.
+        conflict = calorie_conflict(row, row["calories_kcal"], serving_g, alcohol_g, categories)
+        if conflict:
+            if not repair_calories(row, conflict, serving_g, kilojoules, alcohol_g, categories):
+                importer.invalid += 1
+                importer.off_dropped["calories"] += 1
+                continue
+            importer.repaired += 1
+        # One blank macro is worked out from the calories (the app would show it as 0 g).
+        if fill_missing_macro(row, alcohol_g, categories):
+            importer.filled += 1
+        # Sugars cannot exceed carbs, nor saturates fat.
+        reconcile_parts(row)
+
+        row["portions"] = off_portions(serving_size, serving_g, row["calories_kcal"])
+
+        # Labels typed per serving (Philippine rows only). Calories and macros agree, so the
+        # checks above pass them, but the numbers are for one serving (or one bottle), not
+        # 100 g. Re-based to 100 g with that serving first when its weight can be found,
+        # otherwise stored per serving; a food that plainly has calories showing none is
+        # dropped. Measured on other markets the same words misjudged one row in five
+        # (restaurant items, US biscuits, oven chips), so those rows are left as they are.
+        if "PH" in regions.split(",") or barcode_origin(row["barcode"]) == "PH":
+            fixed = serving_typed_fix(row, row["name"], row["brand"], categories, serving_size, serving_g, quantity)
+            if fixed:
+                importer.serving_typed[fixed] += 1
+                if fixed.startswith("drop"):
+                    importer.invalid += 1
+                    continue
+
         if not apply_rules(row):
             importer.invalid += 1
+            importer.off_dropped["numbers"] += 1
             continue
         code = code.strip()
         row["source_ref"] = row["barcode"] or code or "name:" + name_key(row["name"], row["brand"])
@@ -1047,6 +2118,8 @@ def import_off(importer, path):
     missing = {"code", "product_name", "countries_tags"} - found
     if count and missing:
         importer.warn(f"{path}: column(s) {', '.join(sorted(missing))} not found; is this an Open Food Facts export?")
+    elif count and "completeness" not in found:
+        importer.warn(f"{path}: no 'completeness' column; the app's food list cannot be chosen without it")
     importer.flush()
     importer.say(f"off      {path}: read {count}, accepted {kept}")
 
@@ -1131,15 +2204,171 @@ def default_portions(item, portions):
         return [p[:2] for p in portions]
     if _keeps_serving(item["category"], item["group_label"], item["name"], *portions[0]):
         return portions
+    if item["source"] == "off" and _off_drink(item["name"], portions[0][0]):
+        return portions                                         # b. drinks, for Open Food Facts rows
     return [["100 g", 100]] + [p for p in portions if p[1] != 100]
 
 
-def export_app(conn, out_path, max_off, built):
-    """Write food-db.json "version 2" (section 6 of the data contract). Returns the row counts.
+# Open Food Facts rows have no food group, which is where _keeps_serving recognises most
+# drinks. For them a drink is also recognised by its serving ("1 can (330 ml)", "8 fl oz")
+# or by a drink word in the name ("Iced Tea", "Coconut Water"). The unit and spoon rules of
+# _keeps_serving already work on the name alone.
+_LIQUID_SERVING = re.compile(r"\d\s*(?:ml|cl|l|fl\.?\s*oz)\b", re.I)
 
-    Order: curated, USDA survey foods, other USDA foods, then Open Food Facts (Philippine
-    products first, then the most scanned). Rows are written one at a time.
+
+def _off_drink(name, label):
+    name = (name or "").lower()
+    if _NOT_A_DRINK.search(name) and not _MADE_UP.search(name):
+        return False                                            # "milk powder", "dried mango juice"
+    return bool(_LIQUID_SERVING.search(label or "") or _DRINK_GROUP.search(name))
+
+
+def old_rules_database(conn):
+    """True when the database holds Open Food Facts rows and not one has a completeness figure.
+
+    That is what a database filled before version 3 looks like after its upgrade. Its rows
+    were merged by the old rules (any same-name product, whatever its calories; pack photos
+    and barcodes handed to USDA and curated rows) and a new import would carry those merges
+    forward, so the app's food list must not be built from it.
     """
+    with_figure, total = conn.execute(
+        "SELECT COUNT(completeness), COUNT(*) FROM food_items WHERE source = 'off'").fetchone()
+    return total > 0 and with_figure == 0
+
+
+OLD_RULES_MESSAGE = (
+    "{db}: none of the Open Food Facts rows in this database has a completeness figure, so it "
+    "was filled by an older version of this script (or from a file without a 'completeness' "
+    "column). The app's food list cannot be chosen from it. Build a new database: give --db a "
+    "file that does not exist yet and import the curated lists, USDA and Open Food Facts again.")
+
+_TYPEABLE = re.compile("[A-Za-z]{3,}")      # a name the owner can type: three plain letters in a row
+_LATIN = re.compile("[A-Za-z0-9]")
+
+
+def pick_off_rows(conn, quota):
+    """Choose the Open Food Facts rows for the app. Returns {pool: [id, ...]} with the keys
+    "PH" and the five pools of OFF_POOLS; each list of food_items ids is in the order to write.
+
+    Scan counts cannot be compared across countries (British shoppers scan far more than
+    Filipino or Japanese ones), so one global "most scanned" list fills up with whatever
+    Europe scans most. Instead:
+
+    PH    every row tagged Philippines, or whose barcode was registered in the Philippines.
+          No other test: this is the owner's home market.
+    then, in this order, each from the rows not taken yet and up to its quota:
+    KR    barcode registered in South Korea          JP    barcode registered in Japan
+    AS    barcode registered in Thailand, Malaysia, Singapore, Indonesia, Vietnam,
+          Hong Kong, Taiwan or China (what fills Philippine import shelves)
+    US    tagged United States                       UK    tagged United Kingdom
+
+    A row can enter a pool only when it is
+      - local: tagged with no other country (foreign_tags = 0), or carrying a barcode from
+        one of the markets above (a product scanned in 30 countries is usually the French
+        or Moroccan pack, not the one on a Manila shelf);
+      - typeable: the name has three plain letters in a row (the app has no camera scanner,
+        so a name in Japanese script could never be found);
+      - complete: protein, carbs and fat are all known (the app would log a blank as 0 g);
+      - wanted by somebody: scanned at least once, or it has a photo and a brand in Latin
+        letters.
+    Inside a pool the order is: rank, completeness, has a photo, has a brand, has a serving
+    size, id. Rank is the scan count, times three for a brand seen on at least two
+    Philippine rows (a brand that is on Philippine shelves). While a pool is filled, a row
+    is skipped when a chosen row already has the same plain name and the same calories:
+    that is the same product under another spelling of its brand.
+    """
+    conn.create_function("barcode_origin", 1, barcode_origin, deterministic=True)
+    conn.create_function("typeable", 1, lambda name: 1 if _TYPEABLE.search(name or "") else 0,
+                         deterministic=True)
+    conn.create_function("latin_text", 1, lambda text: 1 if _LATIN.search(text or "") else 0,
+                         deterministic=True)
+
+    # Brands on Philippine shelves: the brand half of name_key ("lucky me|pancit canton"),
+    # seen on two or more rows tagged Philippines first.
+    conn.execute("DROP TABLE IF EXISTS temp.ph_brand")
+    conn.execute("""
+        CREATE TEMP TABLE ph_brand AS
+        SELECT substr(name_key, 1, instr(name_key, '|') - 1) AS brand_key FROM food_items
+        WHERE source = 'off' AND substr(region_tags, 1, 2) = 'PH' AND instr(name_key, '|') > 1
+        GROUP BY 1 HAVING COUNT(*) >= 2""")
+    conn.execute("CREATE UNIQUE INDEX temp.ph_brand_key ON ph_brand (brand_key)")
+
+    # One line of facts per Open Food Facts row that is Philippine or may enter a pool.
+    # Innermost: the plain facts. Middle: the entry test. Outermost: drop the rest.
+    conn.execute("DROP TABLE IF EXISTS temp.off_facts")
+    conn.execute("""
+        CREATE TEMP TABLE off_facts AS
+        SELECT id, name, calories_kcal, popularity, region_tags, origin, rank, completeness,
+               has_photo, has_brand, has_serving, is_ph, may_enter
+        FROM (SELECT *, ((foreign_tags = 0 OR origin IS NOT NULL) AND typeable AND has_macros
+                         AND (rank > 0 OR (has_photo AND latin_brand))) AS may_enter
+              FROM (SELECT f.id, f.name, f.calories_kcal, f.popularity, f.region_tags, f.foreign_tags,
+                           f.completeness,
+                           barcode_origin(f.barcode) AS origin,
+                           f.popularity * (CASE WHEN b.brand_key IS NULL THEN 1 ELSE 3 END) AS rank,
+                           (f.thumbnail_url IS NOT NULL) AS has_photo,
+                           (f.brand IS NOT NULL) AS has_brand,
+                           (f.portions <> '[]') AS has_serving,
+                           (f.protein_g IS NOT NULL AND f.carbs_g IS NOT NULL AND f.fat_g IS NOT NULL) AS has_macros,
+                           typeable(f.name) AS typeable,
+                           latin_text(f.brand) AS latin_brand,
+                           (substr(f.region_tags, 1, 2) = 'PH') AS is_ph
+                    FROM food_items AS f
+                    LEFT JOIN ph_brand AS b ON b.brand_key = substr(f.name_key, 1, instr(f.name_key, '|') - 1)
+                    WHERE f.source = 'off'))
+        WHERE is_ph OR origin = 'PH' OR may_enter""")
+
+    taken_ids, taken_foods = set(), set()       # chosen rows; their (plain name, whole kcal)
+    picked = {"PH": []}
+    for row_id, name, kcal in conn.execute("""SELECT id, name, calories_kcal FROM off_facts
+                                              WHERE is_ph OR origin = 'PH' ORDER BY popularity DESC, id"""):
+        picked["PH"].append(row_id)
+        taken_ids.add(row_id)
+        taken_foods.add((plain_words(name), int(round(kcal))))
+
+    members = {"KR": "origin = 'KR'", "JP": "origin = 'JP'", "AS": "origin = 'AS'",
+               "US": "instr(region_tags, 'US') > 0", "UK": "instr(region_tags, 'UK') > 0"}
+    for pool in OFF_POOLS:
+        chosen = picked[pool] = []
+        wanted = quota.get(pool, DEFAULT_OFF_QUOTA[pool])
+        if wanted <= 0:
+            continue
+        candidates = conn.execute(f"""
+            SELECT id, name, calories_kcal FROM off_facts WHERE may_enter AND {members[pool]}
+            ORDER BY rank DESC, completeness DESC, has_photo DESC, has_brand DESC, has_serving DESC, id""")
+        for row_id, name, kcal in candidates:
+            if row_id in taken_ids:
+                continue
+            food = (plain_words(name), int(round(kcal)))
+            if food in taken_foods:
+                continue
+            chosen.append(row_id)
+            taken_ids.add(row_id)
+            taken_foods.add(food)
+            if len(chosen) >= wanted:
+                break
+        candidates.close()                      # a full pool leaves rows unread; let go of the table
+    conn.execute("DROP TABLE temp.off_facts")
+    conn.execute("DROP TABLE temp.ph_brand")
+    return picked
+
+
+def export_app(conn, out_path, off_quota, built):
+    """Write food-db.json "version 2" (section 6 of the data contract).
+
+    Order: curated, USDA survey foods, other USDA foods, then Open Food Facts: Philippine
+    products (most scanned first), then the US, UK, Japan, Korea and Asia pools (see
+    pick_off_rows). Rows are written one at a time.
+
+    Besides the rows, the file gets "alias": [[row number, barcode, barcode, ...], ...],
+    the barcodes of other packs that were merged into a row (as whole numbers; the app puts
+    the leading zeros back). Typing one of them finds that row.
+
+    Returns (row counts by source, {"pools": rows per Open Food Facts pool, "aliases": count}).
+    """
+    if old_rules_database(conn):
+        raise InputError(OLD_RULES_MESSAGE.format(db=conn.execute("PRAGMA database_list").fetchone()[2] or "database"))
+
     conn.execute("DROP TABLE IF EXISTS temp.export_pick")
     conn.execute("CREATE TEMP TABLE export_pick (pos INTEGER PRIMARY KEY AUTOINCREMENT, id INTEGER, code INTEGER)")
     pick = "INSERT INTO export_pick (id, code) SELECT id, {code} FROM food_items WHERE {where} ORDER BY {order}"
@@ -1147,21 +2376,39 @@ def export_app(conn, out_path, max_off, built):
     conn.execute(pick.format(code=1, where="source = 'usda' AND substr(source_ref, 1, 7) = 'survey:'", order="id"))
     conn.execute(pick.format(code=2, where="source = 'usda' AND (source_ref IS NULL"
                                            " OR substr(source_ref, 1, 7) <> 'survey:')", order="id"))
-    conn.execute(pick.format(code=3, where="source = 'off' AND substr(region_tags, 1, 2) = 'PH'",
-                             order="popularity DESC, id"))
-    conn.execute(pick.format(code=3, where="source = 'off' AND substr(region_tags, 1, 2) <> 'PH'",
-                             order="popularity DESC, id") + " LIMIT ?", (max_off,))
+    off_rows = pick_off_rows(conn, off_quota)
+    for pool in ("PH",) + OFF_WRITE_ORDER:
+        conn.executemany("INSERT INTO export_pick (id, code) VALUES (?, 3)", ((row_id,) for row_id in off_rows[pool]))
 
-    # First pass: the two lists of repeated texts (brands, groups) and the counts.
+    # First pass: the two lists of repeated texts (brands, groups), the counts and the aliases.
     brands, groups = {}, {}
     counts = {"curated": 0, "usda": 0, "off": 0}
-    for brand, group, code in conn.execute("""SELECT f.brand, f.group_label, p.code FROM export_pick AS p
-                                              JOIN food_items AS f ON f.id = p.id ORDER BY p.pos"""):
+    aliases, alias_codes = [], set()
+    listing = conn.execute("""SELECT f.brand, f.group_label, p.code, f.alt_barcodes FROM export_pick AS p
+                              JOIN food_items AS f ON f.id = p.id ORDER BY p.pos""")
+    for number, (brand, group, code, alt_barcodes) in enumerate(listing):     # number = the row's place in "items"
         if brand and brand not in brands:
             brands[brand] = len(brands)
         if group and group not in groups:
             groups[group] = len(groups)
         counts[("curated", "usda", "usda", "off")[code]] += 1
+        if alt_barcodes == "[]":
+            continue
+        # A merged barcode is passed on when its own pack was scanned at least once or is
+        # tagged PH, JP or KR. One that is (by now) some row's own barcode is left out, and
+        # so is one already listed for an earlier row.
+        codes = []
+        for barcode, (popularity, regions) in sorted(aliases_read(alt_barcodes).items()):
+            if popularity < 1 and not any(region in regions.split(",") for region in ALIAS_REGIONS):
+                continue
+            if barcode in alias_codes or not barcode.isdigit():
+                continue
+            if conn.execute("SELECT 1 FROM food_items WHERE barcode = ?", (barcode,)).fetchone():
+                continue
+            alias_codes.add(barcode)
+            codes.append(int(barcode))
+        if codes:
+            aliases.append([number] + codes)
 
     def one_decimal(value):
         return None if value is None else tidy_number(round(value, 1))
@@ -1196,7 +2443,8 @@ def export_app(conn, out_path, max_off, built):
         ]
 
     head = {"version": 2, "built": built, "note": EXPORT_NOTE, "fields": EXPORT_FIELDS,
-            "brands": list(brands), "groups": list(groups), "thumbBase": THUMB_BASE, "counts": counts}
+            "brands": list(brands), "groups": list(groups), "thumbBase": THUMB_BASE, "counts": counts,
+            "alias": aliases}
     folder = os.path.dirname(os.path.abspath(out_path))
     os.makedirs(folder, exist_ok=True)
     # Second pass: write to a side file and swap it in at the end, so a failed run never
@@ -1211,7 +2459,31 @@ def export_app(conn, out_path, max_off, built):
         out.write("]}")
     os.replace(side_file, out_path)
     conn.execute("DROP TABLE temp.export_pick")
-    return counts
+    details = {"pools": {pool: len(off_rows[pool]) for pool in ("PH",) + OFF_WRITE_ORDER},
+               "aliases": len(alias_codes)}
+    return counts, details
+
+
+def off_quota_argument(text):
+    """--off-quota "US=12000,UK=2500" -> {"US": 12000, "UK": 2500, "JP": 3500, "KR": 2500, "AS": 1500}.
+
+    Pools that are not named keep their default.
+    """
+    quota = dict(DEFAULT_OFF_QUOTA)
+    for part in text.split(","):
+        if not part.strip():
+            continue
+        pool, equals, number = (piece.strip() for piece in part.partition("="))
+        pool = pool.upper()
+        if pool == "PH":
+            raise argparse.ArgumentTypeError("PH takes no quota: Philippine rows are always exported in full")
+        if not equals or pool not in quota:
+            raise argparse.ArgumentTypeError(
+                f"{part.strip()!r} is not POOL=N with POOL one of {', '.join(OFF_WRITE_ORDER)}")
+        if not (number.isascii() and number.isdigit()):
+            raise argparse.ArgumentTypeError(f"{part.strip()!r}: the row count must be a whole number, 0 or more")
+        quota[pool] = int(number)
+    return quota
 
 
 # ---------------------------------------------------------------------------------------
@@ -1229,16 +2501,16 @@ def parse_arguments(argv):
                         help="FoodData Central CSV folder or flat CSV file; may be given more than once")
     parser.add_argument("--off-path", metavar="FILE", help="Open Food Facts export (tab-separated, .gz allowed)")
     parser.add_argument("--export-app", metavar="OUT.json", help="write the app's food list here")
-    parser.add_argument("--max-off", type=int, default=20000, metavar="N",
-                        help="most non-Philippine Open Food Facts rows to export (default 20000)")
+    default_quota = ",".join(f"{pool}={DEFAULT_OFF_QUOTA[pool]}" for pool in OFF_WRITE_ORDER)
+    parser.add_argument("--off-quota", type=off_quota_argument, default=dict(DEFAULT_OFF_QUOTA), metavar="POOLS",
+                        help="most Open Food Facts rows to export per market pool, as POOL=N pairs "
+                             f"(default {default_quota}); 0 leaves a pool out; Philippine rows are always exported")
     parser.add_argument("--built", default="", metavar="YYYY-MM-DD", help="date to write into the exported file")
     parser.add_argument("--quiet", action="store_true", help="print only the final summary line")
     args = parser.parse_args(argv)
 
     if not args.db.strip():
         parser.error("--db needs a file name")
-    if args.max_off < 0:
-        parser.error("--max-off cannot be negative")
     if args.built:
         try:
             if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", args.built):
@@ -1269,6 +2541,10 @@ def main(argv=None):
             raise InputError(f"SQLite 3.33 or newer is needed; this Python has {sqlite3.sqlite_version}")
         conn = food_schema.connect(args.db)
         food_schema.migrate(conn)
+        if args.export_app and old_rules_database(conn):
+            # Say so before any work is done: importing into this database would carry its
+            # old merges forward (see old_rules_database).
+            raise InputError(OLD_RULES_MESSAGE.format(db=args.db))
         importer = Importer(conn, args.quiet)
         for path in args.curated_json:
             import_curated(importer, path)
@@ -1282,9 +2558,13 @@ def main(argv=None):
         importer.save()
         summary = importer.summary()
         if args.export_app:
-            counts = export_app(conn, args.export_app, args.max_off, args.built)
-            importer.say(f"exported {args.export_app}: {sum(counts.values())} rows, "
-                         f"{os.path.getsize(args.export_app)} bytes")
+            counts, details = export_app(conn, args.export_app, args.off_quota, args.built)
+            size = os.path.getsize(args.export_app)
+            pools = ", ".join(f"{pool} {rows}" for pool, rows in details["pools"].items())
+            importer.say(f"exported {args.export_app}: {sum(counts.values())} rows, {size} bytes; "
+                         f"Open Food Facts pools: {pools}; {details['aliases']} extra barcodes")
+            summary["export"] = {"rows": sum(counts.values()), "bytes": size, "off_pools": details["pools"],
+                                 "aliases": details["aliases"]}
         importer.say(f"done in {time.time() - started:.1f} s")
     except (InputError, OSError, EOFError, ValueError, RuntimeError, csv.Error, zlib.error,
             sqlite3.Error) as problem:

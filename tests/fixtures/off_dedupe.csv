@@ -1,0 +1,16 @@
+code	url	product_name	product_name_en	generic_name	brands	categories_en	countries_tags	image_front_small_url	serving_size	serving_quantity	nutriscore_grade	completeness	unique_scans_n	energy-kcal_100g	energy-kj_100g	energy_100g	proteins_100g	carbohydrates_100g	carbohydrates-total_100g	sugars_100g	fat_100g	saturated-fat_100g	fiber_100g	sodium_100g	salt_100g	alcohol_100g	image_small_url
+0038000000011	http://world-en.openfoodfacts.org/product/0038000000011	Corn Flakes Plain			Kellogg's		en:united-states					0.5	9	100			2	20			2						
+0038000000035	http://world-en.openfoodfacts.org/product/0038000000035	Corn Flakes Plain			Kellogg's		en:united-states					0.5	6	112			2	20			2						
+0038000000028	http://world-en.openfoodfacts.org/product/0038000000028	Corn Flakes Plain			Kellogg's		en:united-states					0.5	4	111			2	20			2						
+0012000000014	http://world-en.openfoodfacts.org/product/0012000000014	Diet Cola Zero			Pepsi		en:united-states					0.5	3	2			0	0.5			0						
+0012000000021	http://world-en.openfoodfacts.org/product/0012000000021	Diet Cola Zero			Pepsi		en:united-states					0.5	1	6			0	0.5			0						
+0029000000015	http://world-en.openfoodfacts.org/product/0029000000015	Mixed Nut Clusters			Planters		en:united-states					0.9	20	546			10	50		10	20	3	3	0.2			
+0029000000022	http://world-en.openfoodfacts.org/product/0029000000022	Mixed Nut Clusters			Planters		en:united-states					0.4	5	496			10	50			20						
+0040000000012	http://world-en.openfoodfacts.org/product/0040000000012	Chocolate Wafer Bites			Munchies		en:united-states					0.9	50	200			3	30		12	11	5	1	0.1			
+5010000000019	http://world-en.openfoodfacts.org/product/5010000000019	Chocolate Wafer Bites			Munchies		en:united-kingdom					0.3	0	204			3	30			11						
+4901234567894	http://world-en.openfoodfacts.org/product/4901234567894	Chocolate Wafer Bites			Munchies		en:japan					0.3	0	198			3	30			11						
+0040000000029	http://world-en.openfoodfacts.org/product/0040000000029	Chocolate Wafer Bites			Munchies		en:united-states		30 g	30		0.3	2	205			3	30			11						
+3012345000050	http://world-en.openfoodfacts.org/product/3012345000050	Hazelnut Spread Jar			Hazelo		en:united-states,en:france,en:germany					0.8	100	540			6	57		56	31	10	2	0.05			
+0040000000036	http://world-en.openfoodfacts.org/product/0040000000036	Hazelnut Spread Jar			Hazelo		en:united-states					0.3	4	545			6	57			31						
+4801234000019	http://world-en.openfoodfacts.org/product/4801234000019	Hazelnut Spread Jar			Hazelo		en:philippines					0.3	2	535			6	57			31						
+0037600100002	http://world-en.openfoodfacts.org/product/0037600100002	Creamy Peanut Butter			Skippy		en:united-states					0.5	20	300			5	50			8						

@@ -888,6 +888,17 @@ async function suiteV2(){
     return 'curated, usda, off, lib, fav and recent seen';
   });
 
+  await step('Open Food Facts rows say "unverified" by their macros, an estimate says "approximate", other rows neither', async () => {
+    const mac = r => txt(r.el.querySelector('.fr-mac'));
+    let rows = await search('nongshim', r => !!rowNamed(r, 'Shin Ramyun'));
+    const shin = mac(rowNamed(rows, 'Shin Ramyun'));
+    expect(/ · (unverified|approximate)$/.test(shin) && !(/unverified/.test(shin) && /approximate/.test(shin)), 'Shin Ramyun shows "' + shin + '"');
+    rows = (await search('chicken', r => !!rowNamed(r, ADOBO))).concat(await search('banana raw', r => r.length > 0 && r[0].name === 'Banana, raw'));
+    const marked = rows.filter(r => r.src !== 'off' && /unverified/.test(mac(r)));
+    expect(!marked.length, 'rows that are not Open Food Facts say unverified: ' + marked.map(r => r.name + ' [' + r.src + ']').join(' | '));
+    return 'Shin Ramyun: "' + shin + '"';
+  });
+
   await step('digits: a short number lists matching foods while typing, a longer one waits to be a barcode', async () => {
     const rows = await search('12', r => r.length > 0);   /* the library has steaks sold as "12 oz" */
     expect(rows.some(r => /\b12\b/.test(r.name)), 'no row has the number 12 in its name: ' + names(rows));
@@ -1221,7 +1232,7 @@ async function suiteV2(){
       await wait(2500);   /* the app asks for the bundle 1.5 s after it starts */
       const rows = await search(PANCIT_CODE, r => r.length === 1 && r[0].name === PANCIT);
       expect(asked === 1 && removed === 1, 'the app asked for the bundle ' + asked + ' times and the list was removed ' + removed + ' times');
-      expect(txt(q('#food-res-head')) === BARCODE_HEAD && rows[0].kcal === 280, 'the barcode shows ' + rows[0].kcal + ' kcal, headed "' + txt(q('#food-res-head')) + '"');
+      expect(txt(q('#food-res-head')) === BARCODE_HEAD && (rows[0].kcal === 280 || rows[0].kcal === 467), 'the barcode shows ' + rows[0].kcal + ' kcal (1 pack 280 or 100 g 467), headed "' + txt(q('#food-res-head')) + '"');
       for (const a of plan.codes.slice(0, 2)) {
         type('#ff-name', 'x'); await waitFor(() => !visible(q('#food-res')), 2000, 'the list to hide');
         type('#ff-name', a.code); await wait(500);
