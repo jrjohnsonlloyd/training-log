@@ -1564,6 +1564,60 @@ async function suiteRanking(){
     return pick.length + ' of ' + shortRows.length + ' rows stored under a UPC-E, e.g. ' + pick[0].a + ' and ' + pick[0].e + ' -> ' + pick[0].name;
   }, { show: true });
 
+  /* Step 6. "milo": the Philippine sachets ("milo 24g") come before the ready-to-drink Milos of other markets named just "Milo" (a name with only a pack size after it
+     counts as named as typed, and with a Philippine product beginning with the words, products of other markets lose OFF_ABROAD_REF too). "kopiko": five of the
+     first six products are Philippine ones. */
+  const HOME_BRAND = 'a Philippine brand typed: the Philippine sachet comes before other markets\' products named just so, and Philippine products fill the first six';
+  if (!homeKeys.size) notRun(HOME_BRAND, 'the served bundle has no Philippine product rows');
+  else await step(HOME_BRAND, async () => {
+    const bad = []; let done = 0;
+    /* the sachet: a Philippine product named "milo" and a pack size ("milo 24g"), against products of other markets named just "Milo" */
+    const sachet = r => isHome(r) && /^milo \d+ ?(g|gr|gm|ml)$/.test(plain(r.name));
+    if (homeNames.some(n => /^ milo \d+ ?(g|gr|gm|ml) $/.test(n))) {
+      done++;
+      const milo = await typed('milo'), firstSachet = milo.findIndex(sachet), firstAway = milo.findIndex(r => r.src === 'off' && !isHome(r) && plain(r.name) === 'milo');
+      if (firstSachet < 0 || (firstAway >= 0 && firstAway < firstSachet)) bad.push('milo -> ' + milo.slice(0, 8).map(r => label(r) + (isHome(r) ? ' (PH)' : '')).join(' | '));
+    }
+    if (hasHome('kopiko')) {
+      done++;
+      const rows = (await typed('kopiko')).filter(r => r.src === 'off').slice(0, 6), home = rows.filter(isHome).length;
+      if (rows.length >= 6 && home < 5) bad.push('kopiko -> ' + home + ' of the first 6 products are Philippine: ' + rows.map(r => label(r) + (isHome(r) ? ' (PH)' : '')).join(' | '));
+    }
+    /* a brand on Philippine shelves typed as the brand, with no Philippine product named after it ("robinsons": the supermarket's own products): at least three of the first six products are Philippine */
+    const homeBrandRows = db.items.filter(r => srcOf(r) === 3 && String(r[ix.regions] || '').split(',').indexOf('PH') >= 0 && clean(brandOf(r)).toLowerCase() === 'robinsons').length;
+    if (homeBrandRows >= 6) {
+      done++;
+      const rows = (await typed('robinsons')).filter(r => r.src === 'off').slice(0, 6), home = rows.filter(isHome).length;
+      if (home < 3) bad.push('robinsons -> ' + home + ' of the first 6 products are Philippine: ' + rows.map(r => label(r) + (isHome(r) ? ' (PH)' : '')).join(' | '));
+    }
+    expect(done > 0, 'the bundle has no Philippine Milo or Kopiko');
+    expect(!bad.length, bad.join('; '));
+    return done + ' brands checked';
+  }, { show: true });
+
+  /* Step 6: a word typed with one letter wrong finds the food when the search as typed finds fewer than three rows; a search that finds three or more is untouched,
+     and so is a word the food names and brands already know. */
+  const TYPOS = [['chiken', 'chicken'], ['brocoli', 'broccoli'], ['spagetti', 'spaghetti'], ['avacado', 'avocado'], ['bananna', 'banana'], ['nutela', 'nutella'], ['weetabx', 'weetabix']];
+  await step('a word typed with one letter wrong still finds the food; searches that find three rows or more are not changed', async () => {
+    const hay = db.items.map(r => (nameOf(r) + ' ' + brandOf(r)).toLowerCase()), bad = []; let done = 0;
+    for (const [typo, word] of TYPOS) {
+      if (hay.filter(h => h.indexOf(word) >= 0).length < 3) continue;   /* the bundle hardly knows the word */
+      const rows = await typed(typo); done++;
+      if (rows.length < 3 || !rows.slice(0, 6).some(r => (r.name + ' ' + r.cat).toLowerCase().indexOf(word) >= 0)) bad.push(typo + ' -> ' + names(rows));
+    }
+    expect(done >= 5, 'only ' + done + ' of the ' + TYPOS.length + ' words are known to the served bundle');
+    const rice = await typed('rice');
+    expect(rice.length >= 3 && / rice|^rice/i.test(rice[0].name), '"rice" lists: ' + names(rice));
+    /* a word the list knows is no typo, however rare: "bihon" must not bring up Bison, "tango" Mango, "red horse" house rows */
+    for (const [word, swap] of [['bihon', 'bison'], ['tango', 'mango'], ['red horse', 'house']]) {
+      if (!hay.some(h => h.indexOf(word.split(' ').pop()) >= 0)) continue;
+      const rows = await typed(word), wrong = rows.filter(r => r.name.toLowerCase().indexOf(swap) >= 0 && r.name.toLowerCase().indexOf(word.split(' ').pop()) < 0);
+      if (wrong.length) bad.push(word + ' (a known word) -> ' + names(wrong));
+    }
+    expect(!bad.length, bad.length + ' of ' + done + ': ' + some(bad));
+    return done + ' misspelled words found their food';
+  }, { show: true });
+
   await step('no script errors were raised during the run', async () => {
     type('#ff-name', ''); await wait(200);
     expect(!appErrors.length, appErrors.join(' | '));
