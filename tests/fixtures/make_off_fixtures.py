@@ -2,12 +2,13 @@
 
     python tests/fixtures/make_off_fixtures.py [OUTPUT_FOLDER]
 
-Four files are written next to this script:
+Five files are written next to this script:
 
     sample_off.csv          the main import: 52 rows (32 old anchor rows + 20 selection rows)
     off_rules.csv           36 rows, one per validation / repair rule branch
     off_dedupe.csv          15 rows in groups that must (or must not) merge by name + brand
     off_alias_guard.csv     1 row whose barcode is also an alias stored on another row
+    off_serving.csv         18 rows for labels typed per serving (with a "quantity" column)
 
 Every row is written out in full below so a reader can follow the expected values in
 tests/test_import_foods.py without running anything. Short column keys:
@@ -57,11 +58,11 @@ def row(code, **kw):
     return [cells[column] for column in HEADER]
 
 
-def write(name, rows):
+def write(name, rows, header=HEADER):
     path = os.path.join(OUT, name)
     with open(path, "w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, delimiter="\t", quoting=csv.QUOTE_NONE, quotechar=None, lineterminator="\n")
-        writer.writerow(HEADER)
+        writer.writerow(header)
         writer.writerows(rows)
     print("wrote %-22s %d rows" % (name, len(rows)))
 
@@ -373,3 +374,75 @@ write("off_dedupe.csv", dd)
 guard = [row("0038000000028", name="Totally Different Snack", brand="Other Co", ctry="en:philippines", scans=5,
              comp=0.5, kcal=400, P=8, C=60, F=14)]
 write("off_alias_guard.csv", guard)
+
+# ======================================================================================
+# off_serving.csv : labels typed per serving into the per-100 g fields (Philippine rows)
+# ======================================================================================
+# The same layout plus the export's "quantity" column (the pack size), which only this file carries.
+SERVING_HEADER = HEADER + ["quantity"]
+
+
+def serving_row(code, quantity="", **kw):
+    return row(code, comp=0.5, scans=kw.pop("scans", 3), **kw) + [quantity]
+
+
+PH = "en:philippines"
+sv = [
+    # S1 snack with a stated serving: 117 kcal is 25 g of crackers -> 468 kcal per 100 g, "25 g" first
+    serving_row(ean("480", 7001), name="Fish Crackers", brand="Seaside", ctry=PH, ss="25 g", sq=25,
+                kcal=117, P=2, C=17.8, S=2, F=4.4, na=0.2),
+    # S2 the pack weight only in the name: 160 kcal for 33 g -> 484.8, "1 pack (33 g)" first
+    serving_row(ean("480", 7002), name="Double Choco Cookies 33g", brand="Crunchy Co", ctry=PH,
+                kcal=160, P=2, C=22, F=7),
+    # S3 bread with no weight anywhere: stored per serving under its own serving text "1 piece"
+    serving_row(ean("480", 7003), name="Cheese Ensaymada", brand="Panaderia", ctry=PH, ss="1 piece", scans=10,
+                kcal=140, P=3, C=18, F=6),
+    # S4 a sweet drink typed per bottle: 100 kcal for 500 ml -> 20 kcal per 100 ml, the bottle first
+    serving_row(ean("480", 7004), name="Lemon Iced Tea", brand="Leafy", ctry=PH, ss="1 bottle (500 ml)", sq=500,
+                kcal=100, P=0, C=25, S=25, F=0),
+    # S5 a real low-calorie drink: left alone
+    serving_row(ean("480", 7005), name="Iced Coffee Drink", brand="Brewed", ctry=PH, ss="240 ml", sq=240,
+                kcal=30, P=1, C=5, F=0.7),
+    # S6 a real low-calorie soup: left alone
+    serving_row(ean("480", 7006), name="Chicken Noodle Soup", brand="Mamas", ctry=PH, ss="250 ml", sq=250,
+                kcal=45, P=2, C=6, F=1.5),
+    # S7 fresh noodles really are 150 kcal: left alone
+    serving_row(ean("480", 7007), name="Fresh Miki Noodles", brand="Mamas", ctry=PH, ss="100 g", sq=100,
+                kcal=150, P=5, C=30, F=1),
+    # S8 biscuits at 0 kcal: dropped
+    serving_row(ean("480", 7008), name="Iced Gem Biscuits", ctry=PH, kcal=0, P=0, C=0, F=0),
+    # S9 a zero-calorie drink: kept as it is
+    serving_row(ean("480", 7009), name="Cola Zero", brand="Fizz", ctry=PH, ss="330 ml", sq=330,
+                kcal=0, P=0, C=0, F=0),
+    # S10 the website's placeholder as the name, nothing else to name it by: dropped
+    serving_row(ean("480", 7010), name="Loading…", brand="Selecta", ctry=PH, kcal=129, P=2, C=17, F=6),
+    # S11 the same placeholder with a generic name: named by the generic name
+    serving_row(ean("480", 7011), name="Loading...", generic="Strawberry Yogurt Drink", brand="Dairy Best",
+                ctry=PH, kcal=70, P=2, C=12, F=1.5),
+    # S12 the S1 pattern on a row sold in the United States only: left alone (Philippine rows only)
+    serving_row(ean("001", 7012), name="Fish Crackers", brand="Seaside US", ctry="en:united-states", ss="25 g",
+                sq=25, kcal=117, P=2, C=17.8, S=2, F=4.4),
+    # S13 the pack weight only in the quantity column: 150 kcal for 30 g -> 500, "1 pack (30 g)" first
+    serving_row(ean("480", 7013), quantity="30 g", name="Corn Chips", brand="Crispo", ctry=PH,
+                kcal=150, P=2, C=19, F=7.5),
+    # S14 the label (143 kcal, 3 / 20 / 6 g) typed per serving with the pack's 180 g as the serving, so the
+    #     file's per-100 g figures are those divided by 1.8. Put back to the label figures; a dry snack, so
+    #     the serving weighs about (3 + 20 + 6) / 0.95 = 31 g -> 461 kcal per 100 g, "1 serving (about 31 g)"
+    serving_row(ean("480", 7014), name="Taco Shells", brand="Bambi", ctry=PH, ss="180 g", sq=180,
+                kcal=79.4, P=1.67, C=11.1, F=3.33, na=0.0667),
+    # S15 same name and brand as S3 but real numbers per 100 g: must stay a row of its own
+    serving_row(ean("480", 7015), name="Cheese Ensaymada", brand="Panaderia", ctry=PH, scans=1,
+                kcal=380, P=8, C=50, F=16),
+    # S16 a dry snack with no weight anywhere: (2 + 15 + 8) / 0.95 = 26 g -> 538.5 kcal, "1 pouch (about 26 g)"
+    serving_row(ean("480", 7016), name="Cheese Curls", brand="Snacky", ctry=PH, ss="1 pouch",
+                kcal=140, P=2, C=15, F=8, na=0.9),
+    # S17 a stated weight that explains nothing (65 kcal for a 250 g jar), not a dry food: per serving
+    serving_row(ean("480", 7017), name="Sandwich Spread", brand="Ladys", ctry=PH, ss="250 g", sq=250,
+                kcal=65, P=0, C=4, F=6),
+    # S18 typed per serving like S14 (110 kcal, 3 / 20 / 2 g for a 60 g bun) but 183 kcal is not far
+    #     enough off for bread and bread is not dry: left as it is, its bun still showing 110 kcal
+    serving_row(ean("480", 7018), name="Burger Buns", brand="Bakerite", ctry=PH, ss="1 bun (60 g)", sq=60,
+                kcal=183, P=5, C=33.3, F=3.33),
+]
+assert len(sv) == 18, len(sv)
+write("off_serving.csv", sv, SERVING_HEADER)

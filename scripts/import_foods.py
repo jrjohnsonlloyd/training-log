@@ -106,7 +106,7 @@ OFF_COLUMNS = (
     "serving_size", "serving_quantity", "unique_scans_n", "energy-kcal_100g", "energy-kj_100g",
     "energy_100g", "proteins_100g", "carbohydrates_100g", "sugars_100g", "fat_100g",
     "saturated-fat_100g", "fiber_100g", "sodium_100g", "salt_100g",
-    "completeness", "carbohydrates-total_100g", "alcohol_100g", "categories_en", "generic_name",
+    "completeness", "carbohydrates-total_100g", "alcohol_100g", "categories_en", "generic_name", "quantity",
     "image_small_url",      # keep last: the bulk export's name for the small front photo
 )
 OFF_COUNTRIES = {"en:philippines": "PH", "en:united-states": "US", "en:united-kingdom": "UK",
@@ -425,6 +425,9 @@ class Importer:
         self.repaired = 0                                   # Open Food Facts rows kept after a repair
         self.filled = 0                                     # ... and rows given one missing macro
         self.off_dropped = {"name": 0, "numbers": 0, "calories": 0}    # why Open Food Facts rows were invalid
+        # Philippine rows whose label was typed per serving (see serving_typed_fix): re-based to
+        # 100 g with the serving first, stored per serving, or dropped (counted in invalid too).
+        self.serving_typed = {"rebased": 0, "per_serving": 0, "drop_zero": 0, "drop_high": 0}
         self._waiting = []                                  # cleaned rows not yet written
         self._order = 0                                     # 1, 2, 3 ... in the order rows are read
         conn.create_function("regions_union", 2, regions_union)
@@ -629,7 +632,7 @@ class Importer:
         return {"read": dict(self.read), "kept": kept, "filtered_region": self.filtered_region,
                 "invalid": self.invalid, "duplicates": self.duplicates, "total_rows": total,
                 "repaired": self.repaired, "filled": self.filled, "off_dropped": dict(self.off_dropped),
-                "aliases": aliases}
+                "aliases": aliases, "serving_typed": dict(self.serving_typed)}
 
 
 def _same_food(kept, row, key):
@@ -640,11 +643,13 @@ def _same_food(kept, row, key):
     if row.source != "off":
         return kept[0]              # curated and USDA duplicates were always merged by name alone
     for keeper in kept:
-        if keeper.per_unit != "100g":
+        if keeper.per_unit != "100g" and keeper.source != "off":
             # A curated row stored per serving cannot be compared in calories. It takes the
             # row when the key names a brand ("mcdonalds|big mac"), not for a bare food name.
             if not key.startswith("|"):
                 return keeper
+        elif keeper.per_unit != row.per_unit:
+            continue                # an Open Food Facts row per serving and one per 100 g: not comparable
         elif abs(keeper.kcal - row.kcal) <= max(MERGE_KCAL_SHARE * max(keeper.kcal, row.kcal), MERGE_KCAL_FLOOR):
             return keeper
     return None
@@ -1244,6 +1249,13 @@ _PLACEHOLDER_BRAND = re.compile(r"unknown|undefined|none|null|n/a|na|no brand|no
 _LABEL_TEXT = re.compile(r"\b(?:best before|use by|store in a|keep refrigerated|keep frozen|nutrition info"
                          r"|calories per)", re.I)
 _INGREDIENTS = re.compile(r"ingredients:", re.I)
+# The website's placeholder saved as a name ("Loading…", "Loading..."), a slogan copied from
+# the pack ("Mi sedaap. Mi segara. Jelas terasa sedapnya. ..."), and text that starts in the
+# middle of a sentence ("at seasonings, kaya bagay sa kahit"; 36 names in the whole export,
+# none of them a usable name).
+_LOADING = re.compile(r"loading\s*(?:…|\.{2,})?", re.I)
+_SLOGAN = re.compile(r"jelas terasa|we'?re here to help|is this halal", re.I)
+_MID_SENTENCE = re.compile(r"(?:at|and|or|of|to|for|is|are|kaya|sa|ng)\s")      # lower case on purpose
 
 
 def decode_entities(value):
@@ -1277,6 +1289,8 @@ def junk_name(name):
             return True
     # "Unknown", "N/A", "test." ... (stray punctuation around the word does not save it)
     bare = name.strip(" .,;:!?-_*'\"()[]")
+    if _LOADING.fullmatch(bare) or _SLOGAN.search(name) or _MID_SENTENCE.match(name):
+        return True
     return bool(_PLACEHOLDER_NAME.fullmatch(bare) or _LABEL_TEXT.search(name))
 
 
@@ -1541,6 +1555,443 @@ def off_portions(serving_size, serving_g, kcal):
     return [[label[:60], tidy_number(round(grams, 2))]]
 
 
+# --- labels typed per serving ---
+# Many Philippine rows hold the label's PER SERVING column in the per-100 g fields: the
+# calories agree with the macros, so nothing above catches them, but they are 2 to 6 times
+# too low ("fish crackers 117 kcal", "bread 141") or, for a bottle, too high ("cola 72 per
+# 100 ml"). Such a row is recognised by its kind of food, read from words in its name and
+# categories, and the range real labels of that kind fall in (SERVING_KINDS). The ranges
+# were measured on the Philippine rows of the real export (per 100 g; per 100 ml for drinks):
+# a dry snack, cookie or cracker is 340 to 620 kcal, bread 200 to 500, a soft drink 15 to 60.
+# A row is suspect when its calories are below the kind's floor (above its ceiling for a
+# drink); a real low-calorie product of a kind that is not listed (soup, pickles, fresh
+# noodles, a coffee drink, a diet soda) is never suspect.
+#
+# A suspect row must also look like a label column copied whole: its calories agree with
+# its own protein, carbs and fat (to 20 % or 10 kcal). What is then done (serving_typed_fix):
+#   1. the serving's weight is looked for: serving_quantity (or a weight in serving_size),
+#      then a weight written in the name ("cm cookies 33g", "c2 lemon 455ml"), then the
+#      pack's "quantity". The first weight (5 to 2000 g, not 90 to 110) that puts the
+#      calories back in the plausible range, with no more than 100 g of anything in 100 g,
+#      is taken: the numbers are re-based to per 100 g, the row is marked an estimate, and
+#      that serving becomes the default portion (pinned first like a curated
+#      "default_portion": "serving"). It may be more than 100 g (a 500 ml bottle).
+#   2. when no stated weight works and the calories are far enough off (the kind's "sure"
+#      figure; noodles and drink powders have none, as their low figures may honestly be
+#      "as prepared"):
+#      a. a dry food (crackers, chips, chocolate, candy, nuts, nut spread, cereal, oil) is nearly
+#         all protein, carbs and fat, so the serving the numbers describe weighs about
+#         their sum (divided by the kind's "solids" share, 0.90 to 1). The row is re-based
+#         on that weight and the serving is called "1 serving (about 29 g)".
+#      b. any other kind (bread, cheese, mayonnaise, a drink) is stored per serving (at
+#         least 15 kcal), labelled with its serving text when that text names no weight,
+#         else "1 serving (as on the pack)".
+#   3. otherwise the row is left as it is: there is no telling.
+# Whatever is done, the default portion shows the calories the label gives for a serving.
+#
+# One more case. Open Food Facts lets a contributor type the label "per serving" and works
+# the per-100 g figures out from the serving size typed next to it. When that size was the
+# whole pack ("90g" for a 22 g serving of fish crackers), the file holds 117 kcal, 1.11 g,
+# 17.8 g, 4.44 g: not label figures, but they become the label's own (105 kcal, 1, 16, 4 g)
+# when taken back to 90 g. Such a row (_typed_for_serving) is put back to its label figures
+# first, its stated serving is known to be wrong and is not tried, and step 2 applies without
+# the "sure" test for a dry food. Drinks are not read this way.
+# Separately, a dry food (any kind except drinks; ice cream under 5 kcal) showing under
+# 10 kcal is dropped, and so is one above 1.5 times the top of its range. Drinks are never
+# dropped for 0 kcal: water, diet and zero drinks are real.
+#
+# Ice cream has no range of its own, but Philippine tubs print their numbers per 100 ml,
+# and 100 ml of ice cream weighs about 60 g (it is half air): "129 kcal" is then shown for
+# 100 g when 100 g holds about 215. A row with 80 to 160 kcal, at least 2 g of fat (not a
+# water ice) and a "100 ml" serving, or no serving at all and "ice cream" in its name, is
+# re-based on that weight with "100 ml (about 60 g)" first (_ice_cream_by_volume). Bars,
+# cones, sticks and anything light or with a serving in grams are left as they are.
+# import_off applies all of this to Philippine rows only (tagged PH or a 480 barcode).
+
+_LIQUID_UNIT = re.compile(r"\d\s*(?:ml|cl|l|ltrs?|liters?|litres?|fl\.?\s*oz)\b", re.I)
+# Words that make a food wet, frozen, a meal, a seasoning or a drink: such a row is never one of the dry kinds.
+_WET = re.compile(
+    r"ice cream|gelato|sorbet|sundae|popsicle|frozen|\bdrinks?\b|drinking|juice|beverage|shake|smoothie|latte"
+    r"|coffee|\btea\b|yogh?urt|soup|sauce|syrup|cornetto|\bcones?\b|ready.?to.?(?:eat|drink)|\bmeals?\b|\bdip\b"
+    r"|\bmilk\b(?! ?(?:chocolate|choco|biscuits?|cookies?|crackers?|candy|candies|tablets?|bars?|bread|buns?))"
+    r"|chicken|beef|bacon|\bham\b|sau[sd]ages?|hot ?dogs?|longganisa|tocino|tuna|sardines?|corned|\bmeat|turkey"
+    r"|pepperoni|salami|mortadella|prosciutto|salmon|\bcod\b|breast|fillets?|nuggets?|embutido|siomai|dumplings?"
+    r"|pierogi|krainer|bratwurst|franks?|frankfurters?|fries|\bmash|salad|sandwich(?:es)?\b(?! ?(?:cookies?"
+    r"|biscuits?|crackers?|wafers?|spread|chocolate))|\bsubs?\b|pizza|burrito|pickles?|seasoning|spice|\bblend\b"
+    r"|vinegar|bread (?:&|and) butter|\bbrats?\b|steak|grits|scramble|casserole|\bbakes\b|pudding|mousse|jell-?o"
+    r"|\bmole\b|green beans|happy apples|apples? (?:&|and)", re.I)
+_DRINK_PLACE = re.compile(r"beverages|drinks|sodas|\bteas\b|juices|nectars", re.I)    # categories of drinks
+_DRINK_NOT = (
+    r"milk|latte|coffee|cappuccino|mocha|macchiato|yogh?urt|yakult|probiotic|cultured|\bsoy|\boat|almond|choco"
+    r"|cocoa|malt|collagen|protein|powder|\bmix\b|concentrate|cordial|syrup|crackers?|biscuits?|cand(?:y|ies)"
+    r"|gumm|jelly(?! drink)|ice cream|cake|cookies?|oreo|zero|diet|light|lite|no sugar|sugar.?free|unsweetened"
+    r"|\bwater\b|vinegar|sauce|seasoning|tuna|instant")
+_ZERO_CUE = re.compile(r"sugar.?free|no sugar|zero|diet|\blite?\b|light", re.I)
+
+
+class _Kind:
+    """One kind of food: the range its real labels fall in and what happens outside it.
+
+    words: matched in the name (and, with by_brand, in "name | brand"); places: matched in
+    categories_en, only when no kind's words matched the name; skip: words in the name or
+    the serving text that rule the kind out. low, high: the plausible range per 100 g (per
+    100 ml for drinks); a kind without one (ice cream) is only checked for 0 kcal. flag:
+    suspect below this (above it for drinks). sure: below this a row is stored per serving
+    even when no weight explains it (at or above it for drinks); None = never, a weight is
+    always needed. dry: a wet word or a liquid amount rules the kind out. max_carbs: per
+    100 g, after re-basing. solids: the share of the food's weight that is protein, carbs
+    and fat, for the kinds dry enough that a serving's weight can be told from them.
+    """
+    __slots__ = ("name", "words", "places", "skip", "low", "high", "flag", "sure", "drink", "dry", "by_brand",
+                 "max_carbs", "solids")
+
+    def __init__(self, name, words, places, skip, low, high, flag, sure, drink=False, dry=None, by_brand=False,
+                 max_carbs=None, solids=None):
+        self.solids = solids
+        self.name, self.low, self.high, self.flag, self.sure = name, low, high, flag, sure
+        self.words = re.compile(words, re.I)
+        self.places = re.compile(places, re.I) if places else None
+        self.skip = re.compile(skip, re.I) if skip else None
+        self.drink, self.by_brand, self.max_carbs = drink, by_brand, max_carbs
+        self.dry = (not drink) if dry is None else dry              # a drink is never dry
+
+
+# In the order they are tried; the first kind that matches decides (so "peanut butter
+# cookies" are cookies, not peanut butter, and "cheese peanuts" are nuts).
+SERVING_KINDS = (
+    _Kind("ice cream", r"ice cream|gelato|helado|sorbet|sundae|popsicle|ice pops?|ice bars?|ice lolly|ice lollies"
+                       r"|ice candy|frozen dessert|frozen yogh?urt|cornetto|\b(?:selecta|big scoop|creamline|aice"
+                       r"|carmen'?’?s best|arce dairy|dan eric'?’?s|btic|melona|binggrae|magnum|halo top|yasso|tofutti"
+                       r"|dipping dots|jude'?’?s|ben & jerry'?’?s|h[aä]agen|breyers|talenti|goodpop)\b",
+          r"ice creams|frozen desserts|ice pops|sorbets", r"hydration|energy|performance|\bdrink|\bprime\b|\bc4\b",
+          None, None, None, None, dry=False, by_brand=True),
+    _Kind("soda", r"\b(?:colas?|coke|coca.?cola|sodas?|soft drinks?|sprite|royal|tru.?orange|7.?up|seven up"
+                  r"|mountain dew|pepsi|mirinda|sarsi|root ?beer|ginger ale|fanta|carbonated)\b",
+          r"sodas|soft drinks|carbonated drinks|colas", _DRINK_NOT, 15, 60, 60, 60, drink=True),
+    _Kind("tea", r"\b(?:iced tea|ice tea|green tea|lemon tea|c2|nestea|tea drink|black tea|oolong|jasmine tea"
+                 r"|honey tea)\b", r"iced teas|tea-based beverages|ready-to-drink teas", _DRINK_NOT,
+          10, 55, 55, 60, drink=True),
+    _Kind("juice", r"\b(?:juices?|nectar|fruit drink|lemonade|dalandan|energy drinks?|sports drinks?|isotonic"
+                   r"|gatorade|pocari|zesto|minute maid)\b",
+          r"juices|nectars|fruit-based beverages|energy drinks|sports drinks",
+          _DRINK_NOT + r"|\bin\b|slices|halves|drained|canned|cocktail|tidbits|chunks|segments", 15, 75, 75, 85,
+          drink=True),
+    # Milk, chocolate milk and coffee drinks in a bottle, can or carton (a liquid amount is required):
+    # 100 ml of any of them stays under 95 kcal; evaporated, condensed and coconut milk and cream do not.
+    _Kind("milk drink", r"\b(?:milk|choco(?:late)? drink|coffee drink|latte|cappuccino|mocha|macchiato|chuckie"
+                        r"|nutri ?boost|milk tea)\b", None,
+          r"evaporad[ao]|evaporated|condensed|condensada|kremdensada|\bcream\b(?! ?milk)|creamer|coconut|\bgata\b"
+          r"|powder|ensure|pediasure|supplement|formula|shake|smoothie|yogh?urt|yakult|kefir|butter|concentrate"
+          r"|syrup|ice cream|liqueur|\bmix\b|instant|3 ?in ?1|sachet|protein|collagen|whey|zero|diet|no sugar"
+          r"|sugar.?free", 25, 95, 100, None, drink=True),
+    _Kind("drink powder", r"\b(?:3 ?in ?1|3-in-1|2 ?in ?1|coffee mix|creamer|coffee.?mate|milk powder"
+                          r"|powdered milk|powdered (?:chocolate|choco|juice|drink|milk drink)|milo|ovaltine"
+                          r"|energen|tang|juice powder|choco(?:late)? drink mix|chocolate malt|malt drink)\b",
+          r"powdered milk|dried milks|milk powders|creamers|powdered (?:chocolate|juice|drink)",
+          r"ready.?to.?drink|\brtd\b|bottle|\bcan\b|\buht\b|sterili[sz]ed|liquid|\bblack\b|\bpure\b|classic|baking"
+          r"|seasoning|protein|whey|collagen|creatine|pre.?workout|bcaa|cocoa powder|tablea|ice cream|electrolyte"
+          r"|hydration|sugar.?free|zero|diet|light|lite|\btea\b|lemonade", 330, 580, 250, None, dry=False),
+    _Kind("bakery", r"\b(?:bread|breads|pandesal|pan de sal|ensaymada|ensaimada|monay|muffins?|cupcakes?|brownies?"
+                    r"|donuts?|doughnuts?|croissants?|eclairs?|brioche|mamon|pastry|pastries|buns?|bagels?|toast"
+                    r"|crinkles|cakes?|swiss roll|chiffon|pianono|brazo|hopia|hopiang|neu ?bake|gardenia)\b",
+          r"\b(?:breads|muffins|pastries|brioches)\b|(?<!biscuits and )\bcakes\b",
+          r"crumbs|breading|\bmix\b|flour|rice cakes?|fish cakes?|crab cakes?|yam cakes?(?! bar)|cheesecake"
+          r"|\bloaf\b(?! bread)|pancakes?|mochi|tikoy|kakanin|puto|bibingka|kutsinta|suman|sapin|cassava|halaya"
+          r"|leche|flan|cream puff|custard|fruit ?cake|stuffing|tortillas?|spread|wraps?\b|egg white|dipper"
+          r"|panera|einstein|seltzer|roaster|blend", 200, 500, 200, 150),
+    _Kind("crackers", r"\b(?:crackers?|biscuits?|cookies?|wafers?|pretzels?|biscocho|galletas?|otap|sky ?flakes"
+                      r"|polvoron|rosquillos|barquillos|uraro|broas|piaya)\b",
+          r"\b(?:biscuits|crackers|cookies|wafers)\b(?! and cakes)",
+          r"cookie dough|egg ?roll wrappers?|spring roll|soft|flapjack|buttermilk|homestyle|home style|southern"
+          r"|flaky|grands|dough|waffles?|layers|jumbo|cheesecake", 340, 600, 300, 230, solids=0.95),
+    _Kind("chips", r"\b(?:chips|crisps|curls|chicharr?ons?|cornicks?|corniks|nachos|puffs|popcorn|cracklets"
+                   r"|cracklin|crackling|kropek|kropeck|taco shells?|cheese rings|potato sticks|corn (?:snacks?|bits)"
+                   r"|pork rinds?|chippy|piattos|tortillos|tostillas)\b", r"\b(?:chips|crisps|popcorn|puffed)\b",
+          r"fruit|mango|banana|apple|jackfruit|dried|kale|pickles?|shrimp(?! (?:crackers?|chips))|chocolate chips?"
+          r"|choco chips?|baking chips|chips delight|\boven\b|triple cook|thick cut|chunky|steak|crinkle|curly"
+          r"|hash|shredded|potato curls|cream puffs?|pancake|cereal|cauliflower|\bsalt\b|wetherspoon|side plate",
+          350, 620, 350, 230, solids=0.95),
+    _Kind("nut spread", r"\b(?:peanut butter|nut butter|almond butter|cashew butter|hazelnut spread"
+                        r"|chocolate spread|choco spread|nutella|choco hazelnut|cocoa spread)\b", None,
+          r"cookies?|crackers?|biscuits?|wafers?|\bbars?\b|cups?|sandwich|cand(?:y|ies)|powder|protein|whey"
+          r"|filled|flavou?r|cereal|oat|chips|pretzels?|light|reduced", 450, 700, 450, 250, solids=0.95),
+    _Kind("mayonnaise", r"\b(?:mayonnaise|mayo|sandwh?ich spread)\b", None,
+          r"light|lite|low.?fat|reduced|fat.?free|onigiri|potato|vegan|half", 250, 760, 250, 150),
+    _Kind("oil", r"\b(?:cooking|vegetable|coconut|olive|canola|palm|corn|soybean|soya|sesame|sunflower|rice bran"
+                 r"|avocado|peanut|grapeseed|safflower)\s+oil\b|\bolein\b", None,
+          r"\bin\b|spray|fish|flakes|chunks|capsules?|softgels?|chil[il]|garlic|infused|chips|loaf|bread|ciabatta"
+          r"|focaccia|crackers?|dressing|mayo", 700, 950, 700, 400, solids=1.0),
+    _Kind("nuts", r"\b(?:peanuts?|cashews?|almonds?|pistachios?|macadamias?|walnuts?|hazelnuts?|pecans?|pili"
+                  r"|kasoy|mixed nuts|nuts|sunflower seeds|pumpkin seeds|melon seeds|watermelon seeds"
+                  r"|butong pakwan|kuaci)\b", r"salted nuts|roasted nuts|mixed nuts|\bpeanuts\b|cashews|almonds"
+          r"|pistachios", r"butter|spread|\boil\b|flour|\bbars?\b|cookies?|coconut|paste|cream|unsweetened|vanilla"
+          r"|beverage|alpro|so nice|\bsilk\b|foam|\bdates?\b|cupcakes?|cakes?|brioche|rolls?|baklava"
+          r"|carrots?|broccoli", 430, 720, 400, 260, solids=0.93),
+    _Kind("butter", r"\b(?:margarine|ghee|shortening|lard|butter)\b", None,
+          r"peanut|\bnut\b|almond|cashew|cocoa|shea|cakes?|bread|buns?|rolls?|mochi|popcorn|\bcorn\b|garlic|rice"
+          r"|flavou?r|scotch|cream|cand(?:y|ies)|toffee|caramel|honey|\bbars?\b|cups?|shrimp|crab|prawn|squid"
+          r"|cinnamon|sugar|beans?|squash|lemon|tarts?|\bpie\b|coconut(?! butter)|\bube\b|\byam\b|cheese"
+          r"|oats?|granola|fried|fish|spread|apple|fruit|pumpkin|pear|plum|chick|light|lite|reduced|potato"
+          r"|carrot|r[oœ]sti|\bau lard|cherry|berry|peach|apricot|vanilla|emuls|extract|olive", 500, 900, 500, 200),
+    _Kind("cheese", r"\b(?:cheese|cheddar|mozzarella|parmesan|gouda|edam|queso|quezo|cheez|cheezee|kesong)\b", None,
+          r"cream cheese|cottage|ricotta|feta|light|lite|low.?fat|reduced|vegan|plant|flavou?re?d?|curls|rings"
+          r"|balls|sticks|cake|ensaymada|dressing|mayo|lasagna|macaroni|\bmac\b|burger|\bpie\b|tart|pastillas"
+          r"|tomato|spaghetti|pasta|stuffed|bites|snack|\bcorn\b|powder|\bbars?\b|yema|\boil\b|butter|popped"
+          r"|cheesies|crisps|chocolate|gateau|seasoned|potato|onion|nacho|queso dip|no dairy|dairy.?free|broccoli"
+          r"|pistachio", 230, 480, 230, 100, max_carbs=15),
+    _Kind("cereal", r"\b(?:cereals?|granola|corn ?flakes|muesli|koko krunch|oats|rolled oats|oatmeal|cheerios"
+                    r"|froot loops|honey stars)\b", r"breakfast cereals|cereal flakes|granolas|mueslis|rolled oats",
+          r"\bbars?\b|\bjars?\b|bites|porridge|cups?\b|prepared|cooked|with milk|ready", 330, 520, 300, 200,
+          solids=0.93),
+    _Kind("noodles", r"\b(?:instant noodles?|noodles?|pancit canton|ramen|ramyun|ramyeon|ramyon|mami|bihon"
+                     r"|sotanghon|canton|spaghetti|pasta|macaroni|vermicelli|misua|miswa|udon|soba|lomi|miki"
+                     r"|odong|chow mein|yakisoba|mi goreng|fettuccine|penne|linguine|lm pc|lm)\b",
+          r"instant noodles|pastas|noodles",
+          r"fresh|cooked|ready|tteokbokki|stir.?fry mix|strips|\bkit\b|baked|carbonara|salad|meatballs|chilled"
+          r"|soup base|prepared|bowl|konjac|shirataki|keto|zero|slim|miracle|kelp|palmini|palm|zucchini|veggie"
+          r"|vegetable|squash|lentil|chickpea|bean|edamame|soy", 330, 520, 300, None),
+    _Kind("chocolate", r"\b(?:chocolates?|choco bars?|pralines?|bonbons?|truffles)\b",
+          r"\bchocolates\b|chocolate candies",
+          r"sugar.?free|no sugar|zero|creatine|vitamins?|supplement|collagen|protein|cakes?|mochi|pudding|spread"
+          r"|cereal|flan|gateau|g[aâ]teau|mousse|\bpots?\b|dessert|custard|matcha|bomb pop|\bpops?\b|non.?dairy"
+          r"|keto|fresh milk|jell-?o", 420, 620, 300, 250, solids=0.97),
+    _Kind("candy", r"\b(?:candy|candies|lollipops?|lollies|gumm(?:y|ies)|jelly beans|marshmallows?|mallows"
+                   r"|tic ?tac|toffees?|pastillas|yema|nougat|caramels)\b",
+          r"confectioner|candies|gummies|marshmallows",
+          r"sugar.?free|no sugar|zero|\bgum\b|creatine|vitamins?|supplement|collagen|protein|cakes?|mochi|pudding"
+          r"|jelly cups?|gulaman|gelatin|spread|cereal|grapes?|matcha|\btea\b|vinegar|elderberry|melatonin|biotin"
+          r"|probiotic|fib(?:er|re)|cotton candy|xylitol|flan|custard|rice|\briz\b|g[aâ]teau|dessert|powder"
+          r"|\bc gummies", 280, 450, 280, 180, solids=0.90),
+)
+# "Cookies and Cream" names a flavour (of an ice cream, a chocolate bar, a drink), not a cookie.
+_FLAVOUR_NAME = re.compile(r"\bcookies?\s*(?:and|&|n|['’‘]?n['’]?)\s*cream\b", re.I)
+
+
+def serving_kind(name, brand, categories, serving_size, quantity):
+    """The _Kind a row belongs to, or None.
+
+    The name's words are tried first, then (only when no kind's words match the name) the
+    categories. Drinks also need a liquid amount or a drink category; the dry kinds never
+    take a row with a wet word or a liquid amount; drink powders take no liquid amount.
+    """
+    name, categories = _FLAVOUR_NAME.sub(" ", name or ""), categories or ""
+    liquid = bool(_LIQUID_UNIT.search(serving_size or "") or _LIQUID_UNIT.search(quantity or "")
+                  or _LIQUID_UNIT.search(name))
+    wet = liquid or bool(_WET.search(name))
+    own_words = name + " | " + (serving_size or "")
+
+    def fits(kind):
+        if kind.skip is not None and kind.skip.search(own_words):
+            return False
+        if kind.drink and not (liquid or (_DRINK_PLACE.search(categories) and kind.name != "milk drink")):
+            return False
+        return True
+
+    branded = name + " | " + (brand or "")
+    found = ([kind for kind in SERVING_KINDS if kind.words.search(branded if kind.by_brand else name)]
+             or [kind for kind in SERVING_KINDS if kind.places is not None and kind.places.search(categories)])
+    for kind in found:
+        if not fits(kind):
+            continue
+        if (kind.dry and wet) or (kind.name == "drink powder" and liquid):
+            return None
+        return kind
+    return None
+
+
+_WEIGHT_IN_TEXT = re.compile(r"(\d+(?:[.,]\d+)?)\s*(kg|g|gm|gms|grams?|ml|cl|l|ltrs?|liters?|litres?)\b", re.I)
+_UNIT_FACTOR = {"kg": 1000, "cl": 10, "l": 1000, "ltr": 1000, "ltrs": 1000, "liter": 1000, "liters": 1000,
+                "litre": 1000, "litres": 1000}
+
+
+def text_weight(text):
+    """The first weight or volume written in a text, in g or ml: "cm cookies 33g" -> 33,
+    "Zesto 1.5L" -> 1500, "4 x 110 ml" -> 110. None when there is none."""
+    found = _WEIGHT_IN_TEXT.search(text or "")
+    if not found:
+        return None
+    unit = found.group(2).lower()
+    return float(found.group(1).replace(",", ".")) * _UNIT_FACTOR.get(unit, 1)
+
+
+def _typed_for_serving(row, serving_g):
+    """True when the per-100 g figures were worked out from numbers typed for one serving.
+
+    The file's figures are then not label figures (117 kcal, 1.11 g, 17.8 g, 4.44 g with a
+    "90g" serving) but become ones when taken back to that serving (105 kcal, 1, 16, 4 g):
+    whole calories and protein, carbs and fat in half grams, allowing for the three
+    significant digits the file keeps. At least one of the four figures must be off the
+    label grid as it stands, so that a plain round row is never read this way.
+    """
+    if serving_g is None:
+        return False
+    odd = False
+    for column, step in (("calories_kcal", 1.0), ("protein_g", 0.5), ("carbs_g", 0.5), ("fat_g", 0.5)):
+        value = row[column]
+        if value is None:
+            continue
+        if abs(value / step - round(value / step)) * step > 0.02:
+            odd = True
+        back = value * serving_g / 100.0
+        if abs(back / step - round(back / step)) * step > max(0.03, 0.006 * back):
+            return False
+    return odd
+
+
+SERVING_SODIUM_MAX = 2500       # mg per 100 g after re-basing; more is a typing slip, and the figure is dropped
+
+
+def _rebased(figures, factor, kind):
+    """The figures (calories and grams) times factor, or None when they would be impossible for 100 g."""
+    scaled = {column: figures[column] * factor for column in ("calories_kcal",) + GRAM_COLUMNS
+              if figures[column] is not None}
+    if not kind.low <= scaled["calories_kcal"] <= kind.high:
+        return None
+    if any(scaled.get(column, 0) > 100 for column in GRAM_COLUMNS):
+        return None
+    if scaled.get("protein_g", 0) + scaled.get("carbs_g", 0) + scaled.get("fat_g", 0) > 105:
+        return None
+    if kind.max_carbs is not None and scaled.get("carbs_g", 0) > kind.max_carbs:
+        return None
+    return scaled
+
+
+ICE_CREAM_G_PER_ML = 0.6        # a tub of ordinary ice cream: 100 ml weighs about 60 g
+_ICE_CREAM_NAME = re.compile(r"ice ?cream|gelato|sundae|sorbetes", re.I)
+_NOT_TUB_ICE_CREAM = re.compile(
+    r"sugar.?free|no sugar|zero|diet|\blite?\b|light|low.?fat|reduced|yogh?urt|\bmilk\b(?! ?choco)|latte|shake|soda"
+    r"|sorbet\b|pops?\b|popsicle|loll(?:y|ies)|ice (?:candy|bars?|sticks?|drops?)|sandwich|\bcones?\b|\bbars?\b"
+    r"|sticks?\b|powder|\bmix\b|syrup|topping", re.I)
+
+
+def _ice_cream_by_volume(row, name, label_text, serving_g):
+    """Re-base a tub ice cream whose numbers are per 100 ml on the weight of 100 ml. True when done."""
+    kcal = row["calories_kcal"]
+    if not 80 <= kcal < 160 or (row["fat_g"] or 0) < 2 or _NOT_TUB_ICE_CREAM.search(name):
+        return False
+    from_macros = 4 * (row["protein_g"] or 0) + 4 * (row["carbs_g"] or 0) + 9 * (row["fat_g"] or 0)
+    if abs(kcal - from_macros) > max(0.20 * max(kcal, from_macros), 10):
+        return False
+    if label_text:
+        if not (_LIQUID_UNIT.search(label_text) and serving_g is not None and 90 <= serving_g <= 110):
+            return False                                        # a serving in grams, a bar, a cup, a whole tub
+    elif not _ICE_CREAM_NAME.search(name):
+        return False
+    for column in ("calories_kcal",) + GRAM_COLUMNS + ("sodium_mg",):
+        if row[column] is not None:
+            row[column] = row[column] / ICE_CREAM_G_PER_ML
+    grams = tidy_number(round(100 * ICE_CREAM_G_PER_ML, 2))
+    row["basis"] = "estimate"
+    row["portions"] = [[f"100 ml (about {grams} g)", grams, PIN_MARK]]
+    return True
+
+
+def serving_typed_fix(row, name, brand, categories, serving_size, serving_g, quantity):
+    """Find and repair a row whose label was typed per serving (see the notes above).
+
+    row: the cleaned row (its portions already set by off_portions). Returns what was done:
+    "" nothing, "rebased" (numbers now per 100 g, the serving pinned first), "per_serving"
+    (numbers kept, stored per serving), "drop_zero" or "drop_high" (the row must be thrown away).
+    """
+    kind = serving_kind(name, brand, categories, serving_size, quantity)
+    if kind is None:
+        return ""
+    kcal = row["calories_kcal"]
+    if kind.low is None:                                        # ice cream: 0 kcal, and numbers per 100 ml
+        if kcal < 5 and not _ZERO_CUE.search(name):
+            return "drop_zero"
+        label_text = clean_text(serving_size)
+        by_volume = _ice_cream_by_volume(row, name, label_text,
+                                         text_weight(label_text) if serving_g is None else serving_g)
+        return "rebased" if by_volume else ""
+    if kind.drink:
+        if kcal <= kind.flag or kcal > 250:                     # above 250 it is a syrup or powder, not a bottle
+            return ""
+    else:
+        if kcal < 10:                                           # no dry snack, bread or powder is that light
+            return "drop_zero"
+        if kcal > 1.5 * kind.high:
+            return "drop_high"
+        if kcal >= kind.flag:
+            return ""
+    # The pattern looked for is a label column copied whole: calories that agree with the
+    # row's own protein, carbs and fat (to 20 %, or 10 kcal). Otherwise the calories figure
+    # itself may be the wrong one, and re-basing would scale the error.
+    from_macros = 4 * (row["protein_g"] or 0) + 4 * (row["carbs_g"] or 0) + 9 * (row["fat_g"] or 0)
+    if abs(kcal - from_macros) > max(0.20 * max(kcal, from_macros), 10):
+        return ""
+
+    label_text = clean_text(serving_size)
+    if serving_g is None:
+        serving_g = text_weight(label_text)                     # "1 pack (25 g)" without serving_quantity
+    # The label's own figures for one serving: the row's numbers as they stand, or, when
+    # they were worked out from a serving typed with the wrong weight, taken back to it.
+    columns = ("calories_kcal",) + GRAM_COLUMNS + ("sodium_mg",)
+    figures = {column: row[column] for column in columns}
+    derived = not kind.drink and _typed_for_serving(row, serving_g)
+    if derived:
+        figures = {column: None if value is None else value * serving_g / 100.0 for column, value in figures.items()}
+
+    def rebase(grams, label, others=()):
+        """Store the figures per 100 g with this serving first. False when grams cannot be their weight."""
+        scaled = _rebased(figures, 100.0 / grams, kind)
+        if scaled is None:
+            return False
+        row.update(scaled)
+        sodium = figures["sodium_mg"]
+        row["sodium_mg"] = None if sodium is None or sodium * 100.0 / grams > SERVING_SODIUM_MAX \
+            else sodium * 100.0 / grams
+        row["basis"] = "estimate"
+        amount = tidy_number(round(grams, 2))
+        row["portions"] = [[label[:60], amount, PIN_MARK]] + [p for p in others if p[1] != amount]
+        return True
+
+    # 1. A stated weight that explains the numbers: the serving, the name, the pack size.
+    weights = [] if derived or serving_g is None else [("serving", serving_g)]
+    for source, text in (("name", name), ("pack", quantity)):
+        grams = text_weight(text)
+        if grams is not None:
+            weights.append((source, grams))
+    tried = derived
+    for source, grams in weights:
+        if not 5 <= grams <= 2000 or 90 <= grams <= 110:        # a weight near 100 g changes nothing
+            continue
+        tried = True
+        amount = tidy_number(round(grams, 2))
+        unit = "ml" if kind.drink else "g"
+        if source == "serving" and label_text and re.search(r"\d", label_text):
+            label = label_text if re.search(r"[A-Za-z]", label_text) else f"{amount} {unit}"
+        elif source == "serving":
+            label = f"{amount} {unit}"
+        else:
+            label = f"1 {'bottle' if kind.drink else 'pack'} ({amount} {unit})"
+        others = [] if derived else off_portions(serving_size, serving_g, row["calories_kcal"] * 100.0 / grams)
+        if rebase(grams, label, others):
+            return "rebased"
+
+    # 2. No stated weight explains them. Only when they are far enough off to be sure
+    #    (for numbers known to be typed for a serving of a dry food it is enough that the
+    #    serving typed with them is at least half again as heavy as they allow).
+    plain_label = label_text if label_text and not tried and not _NUMBER_AND_UNIT.search(label_text) \
+        and re.search(r"[A-Za-z]", label_text) else ""
+    far_off = kind.sure is not None and (kcal >= kind.sure if kind.drink else kcal < kind.sure)
+    if kind.solids is not None and (far_off or derived):
+        # a. A dry food: the serving weighs about its protein, carbs and fat together.
+        macros = (figures["protein_g"] or 0) + (figures["carbs_g"] or 0) + (figures["fat_g"] or 0)
+        grams = math.floor(macros / kind.solids + 0.5)
+        if (far_off or grams * 1.5 <= serving_g) and 5 <= grams <= 2000 \
+                and rebase(grams, f"{plain_label or '1 serving'} (about {grams} g)"):
+            return "rebased"
+    if not far_off or figures["calories_kcal"] < 15:            # under 15 kcal: not even one serving of anything
+        return ""
+    # b. Per serving, as the label has it.
+    row.update({column: value for column, value in figures.items() if value is not None})
+    row["per_unit"] = "serving"
+    row["basis"] = "estimate"
+    row["portions"] = [[(plain_label or "1 serving (as on the pack)")[:60], None]]
+    return "per_serving"
+
+
 def import_off(importer, path):
     """The Open Food Facts product export: one product per line, roughly 200 columns, numbers per 100 g."""
     count = kept = 0
@@ -1552,7 +2003,7 @@ def import_off(importer, path):
             continue
         (code, product_name, product_name_en, brands, countries, image, serving_size, serving_quantity,
          scans, kcal, kj, energy, protein, carbs, sugars, fat, saturates, fibre, sodium, salt,
-         completeness, carbs_total, alcohol, categories, generic_name, image_small) = record
+         completeness, carbs_total, alcohol, categories, generic_name, quantity, image_small) = record
         # The website and its API call the small front photo "image_front_small_url"; the bulk CSV
         # export calls the same photo "image_small_url". Take whichever the file has.
         image = image or image_small
@@ -1640,6 +2091,21 @@ def import_off(importer, path):
         reconcile_parts(row)
 
         row["portions"] = off_portions(serving_size, serving_g, row["calories_kcal"])
+
+        # Labels typed per serving (Philippine rows only). Calories and macros agree, so the
+        # checks above pass them, but the numbers are for one serving (or one bottle), not
+        # 100 g. Re-based to 100 g with that serving first when its weight can be found,
+        # otherwise stored per serving; a food that plainly has calories showing none is
+        # dropped. Measured on other markets the same words misjudged one row in five
+        # (restaurant items, US biscuits, oven chips), so those rows are left as they are.
+        if "PH" in regions.split(",") or barcode_origin(row["barcode"]) == "PH":
+            fixed = serving_typed_fix(row, row["name"], row["brand"], categories, serving_size, serving_g, quantity)
+            if fixed:
+                importer.serving_typed[fixed] += 1
+                if fixed.startswith("drop"):
+                    importer.invalid += 1
+                    continue
+
         if not apply_rules(row):
             importer.invalid += 1
             importer.off_dropped["numbers"] += 1

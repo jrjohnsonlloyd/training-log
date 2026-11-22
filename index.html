@@ -968,6 +968,7 @@ function recentFoods(){ /* what you logged before, newest first, one row per nam
   recentMemo = { key: key, list: out }; return out;
 }
 const ALIAS_BONUS = 3; /* a curated bundle row found through one of its other names typed in full ("carne norte", "kanin") */
+const ALIAS_NAMED = 7; /* ...and when its own name already holds every word ("steak" for "Beef steak, cooked", "potatoes" for "Boiled potato"), its name bonus is raised to the 7 of a whole name typed */
 /* n is ' ' + name + ' ', T the typed word with its padded forms. In the name: whole word beats start of a word beats inside a word, and a word also counts as whole when the name has it with -s or -es ("egg" in "Eggs", "tomato" in "Tomatoes, raw"); then the brand and other names for the food; a match only on the category counts least. One scan of the name settles the usual case of no match. */
 function termScore(n, name, aka, cat, T){
   const t = T.t, at = name.indexOf(t);
@@ -1030,8 +1031,8 @@ function foodSearch(q, limit, cat){
       if (wc >= 0 && code[i] !== wc) continue;
       const s = src[i], n = plain[i]; let sc = rate(pad[i], n, aux[i], grp[i], DB_BONUS[s], items[i][nameAt], s === 3);
       if (sc < 0) continue;
-      /* which rows make "ref": a curated row named as typed, known by that other name (which also earns ALIAS_BONUS when its own name does not say it) or beginning with the words; a USDA row whose name or comma part is the words. A USDA row that only ends with them ("Egg sandwich on wheat bread", "Non-dairy milk") is no reference. */
-      if (s !== 3) { if (named > 0) { if (s === 0 || !tailOnly) ref = true; } else if (s === 0 && alt.has(i) && alias(alt.get(i))) { ref = true; if (viaAlias(n)) sc += ALIAS_BONUS; } else if (s === 0 && starts(pad[i])) ref = true; }
+      /* which rows make "ref": a curated row named as typed, known by that other name (which also earns ALIAS_BONUS when its own name does not say it, else raises its name bonus to ALIAS_NAMED) or beginning with the words; a USDA row whose name or comma part is the words. A USDA row that only ends with them ("Egg sandwich on wheat bread", "Non-dairy milk") is no reference. */
+      if (s !== 3) { const byAlias = s === 0 && alt.has(i) && alias(alt.get(i)); if (named > 0) { if (s === 0 || !tailOnly) ref = true; } else if (byAlias || (s === 0 && starts(pad[i]))) ref = true; if (byAlias) sc += viaAlias(n) ? (named ? 0 : ALIAS_BONUS) : Math.max(0, ALIAS_NAMED - named); }
       scored.push({ s: sc, row: items[i], n: n, o: ord[i] * 1e7 + i, e: s === 3 ? named : 0 });
     }
   }
@@ -1184,13 +1185,14 @@ function thumbHtml(it){
 function foodCatsHtml(){ return '<div class="fcats" role="group" aria-label="Show which foods">' + ['all'].concat(FOOD_CATS).map(c => '<button type="button" class="fcat" data-action="food-cat" data-cat="' + c + '" aria-pressed="' + (state.foodCat === c) + '">' + esc(FOOD_CAT_LABEL[c]) + '</button>').join('') + '</div>'; }
 /* Two listed foods of one name and one brand are different foods (the same label with other numbers), so each says its calories per 100 g on the grey line. Your own favourites and recent foods are left out of the comparison. */
 function twinKey(it){ return it.fav || it.recent ? '' : plainOf(it).n + '|' + plainTxt(it.brand || ''); }
-/* data-src says where a row comes from: fav, recent, lib (the hand-written library), curated, usda or off (the bundle), online. twin = another listed row has this name and brand. */
+/* data-src says where a row comes from: fav, recent, lib (the hand-written library), curated, usda or off (the bundle), online. twin = another listed row has this name and brand.
+   Crowd-sourced numbers (Open Food Facts, in the bundle or online, and USDA branded results online) say "unverified" next to the macros; an estimate says "approximate" instead. */
 function foodRowHtml(it, i, twin){
   const own = it.fav || it.recent, who = own ? it.brand || '' : it.brand || it.cat || '';
   const line = (own ? '<span class="pill">' + esc(it.cat) + '</span> ' : '') + (who ? '<span class="fr-brand">' + esc(who) + '</span> · ' : '') + esc(it.serving || '1 serving') + (twin && it.per100 && hasNum(it.per100.kcal) ? ' · <span class="fr-per">' + fmtNum(it.per100.kcal) + ' kcal/100 g</span>' : '');
   const from = it.fav ? 'fav' : it.recent ? 'recent' : it.online ? 'online' : it.src === 'curated' || it.src === 'usda' || it.src === 'off' ? it.src : 'lib';
   return '<div class="food-item" data-src="' + from + '"><button type="button" class="pickbtn" data-action="food-use" data-i="' + i + '">' + thumbHtml(it) +
-    '<span class="fr-txt"><b>' + esc(it.name) + '</b><span class="s">' + line + '</span><span class="s fr-mac">P ' + fmtNum(it.protein, 1) + ' · C ' + fmtNum(it.carbs, 1) + ' · F ' + fmtNum(it.fat, 1) + ' g' + (it.basis === 'estimate' ? ' · approximate' : '') + '</span></span></button>' +
+    '<span class="fr-txt"><b>' + esc(it.name) + '</b><span class="s">' + line + '</span><span class="s fr-mac">P ' + fmtNum(it.protein, 1) + ' · C ' + fmtNum(it.carbs, 1) + ' · F ' + fmtNum(it.fat, 1) + ' g' + (it.basis === 'estimate' ? ' · approximate' : !own && (it.src === 'off' || it.src === 'fdc') ? ' · unverified' : '') + '</span></span></button>' +
     '<div class="k">' + fmtNum(it.kcal) + '<small>kcal</small></div><button type="button" class="btn small" data-action="food-addnow" data-i="' + i + '" aria-label="Add one serving of ' + esc(it.name) + '">Add</button></div>';
 }
 function foodResultsHtml(){

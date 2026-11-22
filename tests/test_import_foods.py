@@ -50,6 +50,7 @@ OFF_TSV = os.path.join(FIXTURES, "sample_off.csv")
 OFF_RULES = os.path.join(FIXTURES, "off_rules.csv")
 OFF_DEDUPE = os.path.join(FIXTURES, "off_dedupe.csv")
 OFF_GUARD = os.path.join(FIXTURES, "off_alias_guard.csv")
+OFF_SERVING = os.path.join(FIXTURES, "off_serving.csv")
 USDA_FLAT = os.path.join(FIXTURES, "sample_usda.csv")
 USDA_FOLDER = os.path.join(FIXTURES, "usda_fdc_mini")
 CURATED = os.path.join(FIXTURES, "local_ph_curated.json")
@@ -445,6 +446,22 @@ def rules_import():
     return cached("rules", build)
 
 
+def serving_import():
+    """off_serving.csv alone (labels typed per serving), imported twice and exported."""
+    def build():
+        d = new_dir("serving")
+        db = os.path.join(d, "foods.sqlite")
+        bundle = os.path.join(d, "food-db.json")
+        args = ["--db", db, "--off-path", OFF_SERVING, "--export-app", bundle, "--built", BUILT, "--quiet"]
+        first = import_ok(args)
+        rows1, doc1 = snapshot(db), read_json(bundle)
+        second = import_ok(args)
+        first.update(db=db, bundle=bundle, doc=doc1, rows1=rows1, rows2=snapshot(db), doc2=read_json(bundle),
+                     summary2=second["summary"])
+        return first
+    return cached("serving", build)
+
+
 def dedupe_import():
     """off_dedupe.csv with the flat USDA file (which holds the Skippy twin), exported."""
     def build():
@@ -587,7 +604,7 @@ class FixtureFileTests(unittest.TestCase):
             self.assertNotIn(None, row.values(), "a row has fewer cells than the header")
 
     def test_rule_fixtures_have_their_row_counts_and_complete_rows(self):
-        for path, count in ((OFF_RULES, 36), (OFF_DEDUPE, 15), (OFF_GUARD, 1)):
+        for path, count in ((OFF_RULES, 36), (OFF_DEDUPE, 15), (OFF_GUARD, 1), (OFF_SERVING, 18)):
             with self.subTest(file=os.path.basename(path)):
                 with open(path, encoding="utf-8", newline="") as f:
                     header = f.readline().rstrip("\r\n").split("\t")
@@ -605,7 +622,7 @@ class FixtureFileTests(unittest.TestCase):
         proc = subprocess.run([sys.executable, "-B", os.path.join(FIXTURES, "make_off_fixtures.py"), out],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
         self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8", "replace"))
-        for name in ("sample_off.csv", "off_rules.csv", "off_dedupe.csv", "off_alias_guard.csv"):
+        for name in ("sample_off.csv", "off_rules.csv", "off_dedupe.csv", "off_alias_guard.csv", "off_serving.csv"):
             with self.subTest(file=name):
                 with open(os.path.join(out, name), "rb") as made, open(os.path.join(FIXTURES, name), "rb") as kept:
                     # line endings may differ after a git checkout on Windows
@@ -3773,6 +3790,298 @@ class CompletenessGuardTests(unittest.TestCase):
         db = os.path.join(self.dir, "curated.sqlite")
         import_ok(["--db", db, "--curated-json", CURATED, "--export-app", self.out, "--quiet"])
         self.assertEqual(read_json(self.out)["counts"], {"curated": 8, "usda": 0, "off": 0})
+
+
+# --------------------------------------------------------------------------------------
+# labels typed per serving (serving_typed_fix), off_serving.csv; S1..S18 as in make_off_fixtures.py
+# --------------------------------------------------------------------------------------
+
+class ServingTypedCase(DbCase):
+    @classmethod
+    def load(cls):
+        return serving_import()
+
+    def code(self, n, prefix="480"):
+        return ean(prefix, n)
+
+    def item(self, code):
+        """The bundle row with this barcode, as a dict keyed by the bundle's field names."""
+        doc = self.imp["doc"]
+        for row in doc["items"]:
+            if str(row[doc["fields"].index("barcode")]).zfill(13) == code:
+                return dict(zip(doc["fields"], row))
+        self.fail("no bundle row has the barcode %s" % code)
+
+
+class ServingTypedSummaryTests(ServingTypedCase):
+    def test_counts(self):
+        # 18 read; S8 (0 kcal biscuits) and S10 ("Loading…" with no other name) are invalid
+        self.assertEqual(self.summary["read"]["off"], 18)
+        self.assertEqual(self.summary["invalid"], 2)
+        self.assertEqual(self.summary["off_dropped"]["name"], 1)
+        self.assertEqual(self.summary["serving_typed"],            # S1 S2 S4 S13 S14 S16; S3 S17; S8
+                         {"rebased": 6, "per_serving": 2, "drop_zero": 1, "drop_high": 0})
+        self.assertEqual(self.summary["kept"]["off"], 16)
+
+    def test_a_second_import_changes_nothing(self):
+        self.assertEqual(self.imp["rows1"], self.imp["rows2"])
+        self.assertEqual(self.imp["doc"], self.imp["doc2"])
+        self.assertEqual(self.imp["summary2"]["serving_typed"], self.summary["serving_typed"])
+
+
+class ServingTypedRebaseTests(ServingTypedCase):
+    def test_a_snack_with_a_stated_serving_is_rebased_and_its_serving_comes_first(self):
+        row = self.off_row(self.code(7001))
+        self.near(row["calories_kcal"], 468)            # 117 x 100 / 25
+        self.near(row["protein_g"], 8)
+        self.near(row["carbs_g"], 71.2)
+        self.near(row["fat_g"], 17.6)
+        self.near(row["sugars_g"], 8)
+        self.near(row["sodium_mg"], 800)                # 200 mg x 4
+        self.assertEqual(row["per_unit"], "100g")
+        self.assertEqual(row["basis"], "estimate")
+        self.assertEqual(self.portions_of(row), [["25 g", 25, "serving"]])
+        rec = self.item(self.code(7001))
+        self.assertEqual(rec["per"], 0)
+        self.assertEqual(rec["kcal"], 468)
+        self.assertEqual(rec["portions"][0], ["25 g", 25])   # the keep-first mark is not exported
+        self.assertEqual(rec["basis"], "estimate")
+
+    def test_the_pack_weight_in_the_name_is_used(self):
+        row = self.off_row(self.code(7002))
+        self.near(row["calories_kcal"], 484.8)          # 160 x 100 / 33
+        self.assertEqual(self.portions_of(row), [["1 pack (33 g)", 33, "serving"]])
+        self.assertEqual(self.item(self.code(7002))["portions"], [["1 pack (33 g)", 33]])
+
+    def test_the_pack_weight_in_the_quantity_column_is_used(self):
+        row = self.off_row(self.code(7013))
+        self.near(row["calories_kcal"], 500)            # 150 x 100 / 30
+        self.assertEqual(self.item(self.code(7013))["portions"][0], ["1 pack (30 g)", 30])
+
+    def test_a_sweet_drink_typed_per_bottle_is_rebased_to_100_ml(self):
+        row = self.off_row(self.code(7004))
+        self.near(row["calories_kcal"], 20)             # 100 x 100 / 500: the serving is more than 100 g
+        self.near(row["carbs_g"], 5)
+        rec = self.item(self.code(7004))
+        self.assertEqual(rec["kcal"], 20)
+        self.assertEqual(rec["portions"][0], ["1 bottle (500 ml)", 500])
+
+
+class ServingTypedEstimatedWeightTests(ServingTypedCase):
+    """A dry food with no usable weight: the serving weighs about its protein, carbs and fat."""
+
+    def test_a_dry_snack_with_no_weight_is_rebased_on_the_weight_its_macros_give(self):
+        row = self.off_row(self.code(7016))
+        self.assertEqual(row["per_unit"], "100g")
+        self.near(row["calories_kcal"], 538.5)          # 140 x 100 / 26, and 26 = round((2 + 15 + 8) / 0.95)
+        self.near(row["protein_g"], 7.69)
+        self.near(row["carbs_g"], 57.69)
+        self.near(row["fat_g"], 30.77)
+        self.assertEqual(row["basis"], "estimate")
+        self.assertEqual(self.portions_of(row), [["1 pouch (about 26 g)", 26, "serving"]])
+        rec = self.item(self.code(7016))
+        self.assertEqual(rec["portions"][0], ["1 pouch (about 26 g)", 26])
+        self.assertEqual(round(rec["kcal"] * 26 / 100), 140)       # the default portion shows the label's calories
+
+    def test_sodium_that_becomes_impossible_after_rebasing_is_dropped(self):
+        self.assertIsNone(self.off_row(self.code(7016))["sodium_mg"])       # 900 mg x 100 / 26 = 3 462
+
+    def test_figures_worked_out_from_a_serving_typed_with_the_pack_weight_go_back_to_the_label(self):
+        row = self.off_row(self.code(7014))             # 79.4 kcal with "180 g": the label says 143 kcal
+        self.assertEqual(row["per_unit"], "100g")
+        self.near(row["calories_kcal"], 461)            # 79.4 x 1.8 x 100 / 31
+        self.near(row["protein_g"], 9.7)
+        self.near(row["carbs_g"], 64.45)
+        self.near(row["fat_g"], 19.34)
+        self.near(row["sodium_mg"], 387.3)              # 66.7 mg x 1.8 x 100 / 31
+        self.assertEqual(self.portions_of(row), [["1 serving (about 31 g)", 31, "serving"]])   # not "180 g"
+        rec = self.item(self.code(7014))
+        self.assertEqual(round(rec["kcal"] * 31 / 100), 143)
+
+    def test_figures_worked_out_from_a_believable_serving_are_left_alone(self):
+        row = self.off_row(self.code(7018))             # 183 kcal bread, "1 bun (60 g)" = 110 kcal as typed
+        self.near(row["calories_kcal"], 183)
+        self.assertEqual(row["per_unit"], "100g")
+        self.assertNotEqual(row["basis"], "estimate")
+        self.assertEqual(self.portions_of(row), [["1 bun (60 g)", 60]])
+
+
+class ServingTypedPerServingTests(ServingTypedCase):
+    def test_no_weight_anywhere_stores_the_row_per_serving_under_its_serving_text(self):
+        row = self.off_row(self.code(7003))
+        self.assertEqual(row["per_unit"], "serving")
+        self.near(row["calories_kcal"], 140)
+        self.assertEqual(row["basis"], "estimate")
+        self.assertEqual(self.portions_of(row), [["1 piece", None]])
+        rec = self.item(self.code(7003))
+        self.assertEqual((rec["per"], rec["kcal"], rec["portions"]), (1, 140, [["1 piece", None]]))
+
+    def test_a_weight_that_explains_nothing_gives_the_generic_serving_label(self):
+        row = self.off_row(self.code(7017))
+        self.assertEqual(row["per_unit"], "serving")
+        self.near(row["calories_kcal"], 65)
+        self.assertEqual(self.portions_of(row), [["1 serving (as on the pack)", None]])
+
+    def test_a_same_name_row_per_100_g_is_not_merged_into_the_per_serving_row(self):
+        self.near(self.off_row(self.code(7015))["calories_kcal"], 380)
+        self.assertEqual(self.n_rows("name = 'Cheese Ensaymada'"), 2)
+
+
+class ServingTypedLeftAloneTests(ServingTypedCase):
+    def test_real_low_calorie_products_are_unchanged(self):
+        for n, kcal in ((7005, 30), (7006, 45), (7007, 150)):     # coffee drink, soup, fresh noodles
+            with self.subTest(code=n):
+                row = self.off_row(self.code(n))
+                self.near(row["calories_kcal"], kcal)
+                self.assertEqual(row["per_unit"], "100g")
+                self.assertNotEqual(row["basis"], "estimate")
+
+    def test_a_zero_calorie_drink_is_kept(self):
+        self.near(self.off_row(self.code(7009))["calories_kcal"], 0)
+
+    def test_rows_not_sold_in_the_philippines_are_left_alone(self):
+        row = self.off_row(self.code(7012, "001"))
+        self.near(row["calories_kcal"], 117)
+        self.assertEqual(self.portions_of(row), [["25 g", 25]])
+
+
+class ServingTypedDropTests(ServingTypedCase):
+    def test_a_food_with_0_kcal_is_dropped(self):
+        self.assertDroppedCode(self.code(7008))
+
+    def test_loading_with_no_other_name_is_dropped(self):
+        self.assertDroppedCode(self.code(7010))
+        self.absent(name="Loading…")
+
+    def test_loading_with_a_generic_name_takes_the_generic_name(self):
+        self.assertEqual(self.off_row(self.code(7011))["name"], "Strawberry Yogurt Drink")
+
+    def assertDroppedCode(self, code):
+        self.assertEqual(self.n_rows("source_ref = ? OR barcode = ?", (code, code)), 0)
+
+
+class ServingTypedRuleTests(unittest.TestCase):
+    """serving_kind, text_weight and serving_typed_fix called directly."""
+
+    @classmethod
+    def setUpClass(cls):
+        import import_foods
+        cls.m = import_foods
+
+    def row(self, kcal, p, c, f, portions=()):
+        row = self.m.blank_row("off")
+        row.update(calories_kcal=kcal, protein_g=p, carbs_g=c, fat_g=f, portions=list(portions))
+        return row
+
+    def kind(self, name, brand="", categories="", serving="", quantity=""):
+        found = self.m.serving_kind(name, brand, categories, serving, quantity)
+        return found and found.name
+
+    def test_text_weight(self):
+        self.assertEqual(self.m.text_weight("Zesto Dalandan 1.5L"), 1500)
+        self.assertEqual(self.m.text_weight("cm cookies (pp) 33g double chocolate"), 33)
+        self.assertEqual(self.m.text_weight("4 x 110 ml"), 110)
+        self.assertIsNone(self.m.text_weight("1 pouch"))
+
+    def test_kinds(self):
+        self.assertEqual(self.kind("Original Taste", "Coca-Cola", "Beverages,Carbonated drinks,Sodas"), "soda")
+        self.assertEqual(self.kind("Sting Energy Drink", "Pepsi-Cola", "", "320 ml"), "juice")
+        self.assertEqual(self.kind("Peanut Butter Cookies"), "crackers")
+        self.assertEqual(self.kind("Cheese Peanuts"), "nuts")
+        self.assertIsNone(self.kind("Cheese Krainer"))                 # a sausage
+        self.assertEqual(self.kind("Cookies & Cream", "Selecta"), "ice cream")   # an ice cream maker: 0 kcal only
+        self.assertIsNone(self.kind("Chicken Popcorn"))
+        self.assertIsNone(self.kind("Crinkle Cut Oven Chips"))         # chips that are fries
+
+    def test_a_row_far_above_its_range_is_dropped(self):
+        self.assertEqual(self.m.serving_typed_fix(self.row(800, 10, 50, 62), "White Bread", None, "", "", None, ""),
+                         "drop_high")
+
+    def test_calories_that_disagree_with_the_macros_are_left_alone(self):
+        row = self.row(220, 10, 73.3, 1)                               # 4P + 4C + 9F = 342
+        self.assertEqual(self.m.serving_typed_fix(row, "Otap Sugar Biscuits", None, "", "30 g", 30, ""), "")
+        self.assertEqual(row["calories_kcal"], 220)
+
+    def test_kinds_whose_low_figures_may_be_as_prepared_need_a_weight(self):
+        row = self.row(104, 2.2, 16.6, 3.2)                            # a prepared ramen figure, 507 g pack
+        self.assertEqual(self.m.serving_typed_fix(row, "Shin Ramyun", None, "", "1 pack (507 g)", 507, ""), "")
+        self.assertEqual(row["per_unit"], "100g")
+
+    def test_a_flavour_called_cookies_and_cream_is_not_a_cookie(self):
+        self.assertIsNone(self.kind("Cookies And Cream", "Nestle"))
+        self.assertEqual(self.kind("cookies and cream", "Goya", "Snacks,Confectioneries,Compound chocolates"),
+                         "chocolate")
+        self.assertEqual(self.kind("Cookies n Cream Sandwich Cookies"), "crackers")
+
+    def test_typed_for_serving(self):
+        typed = self.m._typed_for_serving
+        self.assertTrue(typed(self.row(117, 1.11, 17.8, 4.44), 90))        # 105 kcal, 1 / 16 / 4 g
+        self.assertTrue(typed(self.row(250, 5, 30, 13.3), 60))             # 150 kcal, 3 / 18 / 8 g
+        self.assertFalse(typed(self.row(141, 6, 27, 1), 50))               # round as it stands
+        self.assertFalse(typed(self.row(141, 1.8, 17.1, 7.2), 27))         # odd, and no rounder at 27 g
+        self.assertFalse(typed(self.row(117, 1.11, 17.8, 4.44), None))
+
+    def test_a_double_scaling_is_not_made(self):
+        # 150 kcal, 3 / 18 / 8 g typed for a "60 g" serving: 250 kcal x 100 / 60 = 417 would fit crackers,
+        # but the label's 150 kcal is a serving of about (3 + 18 + 8) / 0.95 = 31 g
+        row = self.row(250, 5, 30, 13.3, [["60g", 60]])
+        self.assertEqual(self.m.serving_typed_fix(row, "Prawn Crackers Salted Egg", "Oishi", "", "60g", 60, "60 g"),
+                         "rebased")
+        self.assertAlmostEqual(row["calories_kcal"], 150 * 100 / 31, places=1)
+        self.assertEqual(row["portions"], [["1 serving (about 31 g)", 31, "serving"]])
+
+    def test_tub_ice_cream_per_100_ml_is_rebased_on_the_weight_of_100_ml(self):
+        row = self.row(129, 2, 17, 6)
+        self.assertEqual(self.m.serving_typed_fix(row, "Cookies & Cream Ice Cream", "Selecta", "", "100 ml", 100, ""),
+                         "rebased")
+        self.assertAlmostEqual(row["calories_kcal"], 215, places=1)        # 129 / 0.6
+        self.assertAlmostEqual(row["fat_g"], 10, places=1)
+        self.assertEqual(row["basis"], "estimate")
+        self.assertEqual(row["portions"], [["100 ml (about 60 g)", 60, "serving"]])
+        row = self.row(130, 2, 22, 3)                                      # no serving, "ice cream" in the name
+        self.assertEqual(self.m.serving_typed_fix(row, "Corneto Vanilla Ice Cream", None, "", "", None, ""), "rebased")
+        self.assertEqual(round(row["calories_kcal"] * 60 / 100), 130)
+
+    def test_other_frozen_things_and_the_ice_cream_makers_milk_are_left_alone(self):
+        for name, brand, serving, grams, numbers in (
+                ("Mango Ice Cream", "BTIC", "100 g", 100, (121, 3.8, 25.7, 0.3)),            # a serving in grams
+                ("Banana Pecan Ice Cream", "BTIC", "100 g", 100, (138, 3.3, 24.8, 2.8)),
+                ("Cream Bar Rocky Road Ice Cream", "Creamline", "85ml", 85, (94, 0, 16.5, 2.9)),
+                ("Watermelon Slice Ice Stick", "Selecta", "1 Ice Stick (60 ml)", 60, (83, 0, 21.7, 0)),
+                ("Fortified Milk", "Selecta", "245 ml", 245, (65, 2.9, 6.5, 3.3)),
+                ("Double Dutch", "Selecta", "", None, (130, 3, 18, 5)),                      # nothing says ice cream
+                ("Low Fat Ube Ice Cream", "BTIC", "", None, (113, 2.5, 23.9, 0.8)),
+                ("Mango Lite Ice Cream", "Carmen's Best", "100 ml", 100, (150, 2.6, 24, 5)),
+                ("Salted Caramel Ice Cream", "Carmen's Best", "100 ml", 100, (230, 4, 22, 14))):   # a dense one
+            with self.subTest(name=name):
+                row = self.row(*numbers)
+                self.assertEqual(self.m.serving_typed_fix(row, name, brand, "", serving, grams, ""), "")
+                self.assertEqual(row["calories_kcal"], numbers[0])
+
+    def test_a_milk_or_coffee_drink_typed_per_carton_is_rebased_to_100_ml(self):
+        self.assertEqual(self.kind("Nestle Chuckie", "Nestlé", "", "1 portion (180 ml)"), "milk drink")
+        row = self.row(119, 5, 16, 4.3)
+        self.assertEqual(self.m.serving_typed_fix(row, "Nestle Chuckie", "Nestlé", "", "1 portion (180 ml)", 180, ""),
+                         "rebased")
+        self.assertAlmostEqual(row["calories_kcal"], 66.1, places=1)
+        self.assertEqual(row["portions"][0], ["1 portion (180 ml)", 180, "serving"])
+        row = self.row(60, 3.2, 4.8, 3.3)                                  # real milk: left alone
+        self.assertEqual(self.m.serving_typed_fix(row, "Fresh Milk", "Cowhead", "", "250 ml", 250, ""), "")
+
+    def test_rich_milks_and_milk_without_a_liquid_amount_are_not_milk_drinks(self):
+        self.assertIsNone(self.kind("Evaporated Milk", "Alaska", "", "115 ml"))
+        self.assertIsNone(self.kind("Coconut Milk", "", "", "400 ml"))
+        self.assertIsNone(self.kind("All Purpose Cream", "Nestle", "", "250 ml"))
+        self.assertEqual(self.kind("Full Cream Milk", "Milk Magic", "", "250 ml"), "milk drink")
+        self.assertEqual(self.kind("Milk Chocolate", "Goya", "", "", "35 g"), "chocolate")
+        self.assertEqual(self.kind("Milk Chocolate", "Farm Fresh", "", "200 ml"), "milk drink")
+        self.assertEqual(self.kind("Fortified Powdered Milk Drink", "Bear Brand", "Beverages", "33 g"), "drink powder")
+
+    def test_a_typed_serving_close_to_what_the_macros_give_is_left_alone(self):
+        row = self.row(433, 8.33, 65, 16.7, [["1 container (60 g)", 60]])  # 260 kcal, 5 / 39 / 10 g: about 57 g
+        self.assertEqual(self.m.serving_typed_fix(row, "Peanut Butter Stix", None, "", "1 container (60 g)", 60, ""),
+                         "")
+        self.assertEqual(row["calories_kcal"], 433)
 
 
 
