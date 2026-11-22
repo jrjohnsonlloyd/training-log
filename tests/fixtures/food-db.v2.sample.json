@@ -1,9 +1,9 @@
-{"version":2,"built":"2026-11-22","note":"Hand-written sample of the version 2 app bundle for the UI smoke tests: synthetic fixture rows standing in for the curated Philippine list, USDA FoodData Central and Open Food Facts.",
+{"version":2,"built":"2026-11-22","note":"Hand-written sample of the version 2 app bundle for the UI smoke tests: synthetic fixture rows standing in for the curated Philippine list, USDA FoodData Central and Open Food Facts. The three 'Coco Butter Biscuits' rows share one name and brand on purpose, stored in the opposite of the order the app must list them in. 'alias' holds barcodes of other packs as numbers, [row index, code, ...]; its last three entries are there to be ignored: a row's own barcode listed under another row, a row index that does not exist, an in-store code.",
 "fields":["name","brand","group","category","regions","barcode","thumb","per","kcal","protein","carbs","sugars","fat","saturates","fibre","sodium","portions","source","aka"],
-"brands":["Jollibee","Lucky Me!","Starbucks","Mars","Nongshim","Glico"],
+"brands":["Jollibee","Lucky Me!","Starbucks","Mars","Nongshim","Glico","Testbake"],
 "groups":["Jollibee","Home dish","Lucky Me!","Starbucks","Bananas","Burgers","Apples","Rice","Dairy and Egg Products"],
 "thumbBase":"https://images.openfoodfacts.org/images/products/",
-"counts":{"curated":4,"usda":5,"off":3},
+"counts":{"curated":4,"usda":5,"off":6},
 "items":[
 ["Chickenjoy 1 pc (thigh)",0,0,1,"PH",0,0,0,304,21.6,4,null,22.4,null,null,null,[["1 thigh",125]],0,["chicken joy"]],
 ["Chicken adobo",-1,1,2,"PH",0,0,0,141,15.7,3.3,null,6.5,null,null,null,[["1 serving with sauce",152]],0,["adobong manok"]],
@@ -16,5 +16,9 @@
 ["Egg, whole, cooked, hard-boiled",-1,8,2,"US",0,0,0,155,12.6,1.1,1.1,10.6,3.3,0,124,[["1 large",50]],2,0],
 ["Snickers",3,-1,0,"UK","5000159407236","500/015/940/7236/front_en.4.200.jpg",0,485,8.6,60.5,51.8,22.5,7.9,null,252,[["48 g",48]],3,0],
 ["Shin Ramyun",4,-1,0,"US,KR","8801043014830","880/104/301/4830/front_en.7.200.jpg",0,433,9.2,65,3.3,15,7.5,2.5,1790,[["120 g",120]],3,0],
-["Pocky Chocolate",5,-1,0,"JP","4901330502881","490/133/050/2881/front_ja.3.200.jpg",0,503,8.3,66.7,36.1,22.2,11.1,2.8,200,[["1 pack (36 g)",36]],3,0]
-]}
+["Pocky Chocolate",5,-1,0,"JP","4901330502881","490/133/050/2881/front_ja.3.200.jpg",0,503,8.3,66.7,36.1,22.2,11.1,2.8,200,[["1 pack (36 g)",36]],3,0],
+["Coco Butter Biscuits",6,-1,0,"US","0041220333334",0,0,430,6,70,22,14,7,2,300,[["4 biscuits (30 g)",30]],3,0],
+["Coco Butter Biscuits",6,-1,0,"PH,US","8850000333337",0,0,500,6.5,64,24,24,13,2,280,[["4 biscuits (30 g)",30]],3,0],
+["Coco Butter Biscuits",6,-1,0,"UK","4800000333331",0,0,470,6,68,23,19,10,2,290,[["4 biscuits (30 g)",30]],3,0]
+],
+"alias":[[14,4800000333348,41220333341],[2,4807770270130,123457],[9,4807770270123],[99,4800000999991],[10,2000000001234]]}

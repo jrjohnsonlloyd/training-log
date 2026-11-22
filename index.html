@@ -130,6 +130,8 @@ label.f{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--fg
 .fr-txt b{line-height:1.25}
 .fr-txt .s{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden} /* long serving notes stop after two lines here; the form shows them in full once the food is chosen */
 .fr-txt .fr-mac{font-size:12px;color:var(--muted)}
+.food-res .fr-txt b{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden} /* a very long product name stops after three lines; the form shows it in full once the food is chosen */
+.food-res .fr-brand{display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom} /* a long brand is cut with an ellipsis, so the serving after it stays in view */
 /* Sugars, saturates, fibre and sodium or salt: a folded part of the form and one extra strip in the day summary. */
 .food-hero{flex-wrap:wrap}
 .daymore{flex:1 1 100%;min-width:0;border-top:1px solid var(--grid);padding-top:10px;margin-top:-4px}
@@ -857,9 +859,11 @@ async function loadFoodLib(){
     if (r.ok) { const j = await r.json(); if (j && Array.isArray(j.items)) { lsSet('foodLibExtra', { items: j.items }); setFoodLib(mergeLib(items, j.items)); } }
   } catch (e) {}
 }
-const plainTxt = s => norm(s).replace(/['’`.]/g, '').replace(/&/g, ' and ').replace(/[^a-z0-9ñ]+/g, ' ').trim();
+/* The search key of a text. Accents are folded (Nestlé = nestle, jalapeño = jalapeno, full-width letters = plain ones) and the letters of every script are kept, so a name that is partly Japanese is not cut down to its Latin scraps. Plain ASCII takes the short path. */
+const plainTxt = s => { let x = norm(s); if (/[^\x00-\x7f]/.test(x)) x = x.normalize('NFKD').replace(/[̀-ͯ]/g, '').normalize('NFKC').toLowerCase(); return x.replace(/['’`.]/g, '').replace(/&/g, ' and ').replace(/[^\p{L}\p{M}\p{N}]+/gu, ' ').trim(); };
 const plainCache = new WeakMap();
-function plainOf(it){ let p = plainCache.get(it); if (!p) { const n = plainTxt(it.name); p = { n: n, a: plainTxt([it.brand || ''].concat(it.aka || []).join(' ')), c: plainTxt(it.cat || '') }; plainCache.set(it, p); } return p; }
+/* n = the name, a = brand and other names in one string, c = the display group, al = each other name on its own */
+function plainOf(it){ let p = plainCache.get(it); if (!p) { const n = plainTxt(it.name); p = { n: n, a: plainTxt([it.brand || ''].concat(it.aka || []).join(' ')), c: plainTxt(it.cat || ''), al: (Array.isArray(it.aka) ? it.aka : []).map(plainTxt).filter(Boolean) }; plainCache.set(it, p); } return p; }
 function roundTo(v, d){ const m = Math.pow(10, d); return Math.round((Number(v) || 0) * m) / m; }
 /* One canonical spelling per barcode, the same rule as normalize_barcode in scripts/food_schema.py: digits only, 8 to 14 of them, leading zeros dropped, then padded to 13, so "016000275287", "0016000275287" and "00016000275287" are one product. In-store codes starting with 2 are reused by every shop, so they never match. */
 function normBarcode(raw){
@@ -887,23 +891,30 @@ function dbRec(db, row){
     kcal: nn('kcal') || 0, protein: nn('protein'), carbs: nn('carbs'), sugars: nn('sugars'), fat: nn('fat'), saturates: nn('saturates'), fibre: nn('fibre'), sodium: nn('sodium'),
     portions: Array.isArray(ps) ? ps : [], source: s >= 0 && s <= 3 ? s : 2, aka: Array.isArray(aka) ? aka.map(String) : [], basis: v('basis') ? String(v('basis')) : 'database' };
 }
-/* Builds the search tables once: plain names, brand and other names, group, category and source per row, a barcode map, and the names by which curated rows replace older library items. */
+/* Builds the search tables once: plain names (also padded with a space each side, so the search builds no strings per row), brand and other names, group, category and source per row, a barcode map, and the names by which curated rows replace older library items.
+   ord puts rows that tie in the search in a fixed order: a barcode with the Philippine prefix 480 first, then rows tagged as sold in the Philippines, then the rest.
+   A newer bundle may carry "alias": [[row index, barcode, barcode, ...], ...], the barcodes of other packs of the same product, written as numbers (so without their leading zeros). They join the barcode map but never replace a row's own barcode; altCode remembers which codes they are. A bundle without the list loads as before. */
 function prepFoodDb(j){
   if (!j || !Array.isArray(j.items)) return null;
   const v2 = Array.isArray(j.fields); if (!v2 && !Array.isArray(j.cats)) return null;
   const tbl = k => v2 && Array.isArray(j[k]) ? j[k] : [];
-  const db = { version: v2 ? 2 : 1, items: j.items, ix: {}, cats: v2 ? [] : j.cats, brands: tbl('brands'), groups: tbl('groups'), thumbBase: v2 && typeof j.thumbBase === 'string' ? j.thumbBase : '', byBarcode: new Map(), hide: new Set(), exact: new Map() };
+  const db = { version: v2 ? 2 : 1, items: j.items, ix: {}, cats: v2 ? [] : j.cats, brands: tbl('brands'), groups: tbl('groups'), thumbBase: v2 && typeof j.thumbBase === 'string' ? j.thumbBase : '', byBarcode: new Map(), altCode: new Set(), hide: new Set(), exact: new Map(), alt: new Map() };
   if (v2) j.fields.forEach((f, i) => { db.ix[f] = i; });
   const n = db.items.length, memo = new Map(), pl = s => { let p = memo.get(s); if (p == null) { p = plainTxt(s); memo.set(s, p); } return p; };
   db.nameAt = v2 ? (db.ix.name == null ? 0 : db.ix.name) : 0;
-  db.plain = new Array(n); db.aux = new Array(n); db.grp = new Array(n); db.bp = new Array(n); db.code = new Uint8Array(n); db.src = new Uint8Array(n);
+  db.plain = new Array(n); db.pad = new Array(n); db.aux = new Array(n); db.grp = new Array(n); db.code = new Uint8Array(n); db.src = new Uint8Array(n); db.ord = new Uint8Array(n);
   for (let i = 0; i < n; i++) {
     const r = dbRec(db, db.items[i]), name = plainTxt(r.name), brand = r.brand ? pl(r.brand) : '', aka = r.aka.map(plainTxt).filter(Boolean);
-    db.plain[i] = name; db.bp[i] = brand; db.aux[i] = (brand + ' ' + aka.join(' ')).trim(); db.grp[i] = r.group ? pl(r.group) : '';
+    db.plain[i] = name; db.pad[i] = ' ' + name + ' '; db.aux[i] = (brand + ' ' + aka.join(' ')).trim(); db.grp[i] = r.group ? pl(r.group) : '';
     db.code[i] = Math.max(0, FOOD_CATS.indexOf(r.category)); db.src[i] = r.source;
-    if (r.barcode) { const k = normBarcode(r.barcode); if (k && !db.byBarcode.has(k)) db.byBarcode.set(k, i); }
-    if (r.source === 0) { db.hide.add(name); aka.forEach(a => db.hide.add(a)); db.exact.set(name, db.exact.has(name) ? -1 : i); }
+    const k = r.barcode ? normBarcode(r.barcode) : null; if (k && !db.byBarcode.has(k)) db.byBarcode.set(k, i);
+    db.ord[i] = k && k.slice(0, 3) === '480' ? 0 : /(^|,)PH(,|$)/.test(r.regions) ? 1 : 2;
+    if (r.source === 0) { if (aka.length) db.alt.set(i, aka); db.hide.add(name); aka.forEach(a => db.hide.add(a)); db.exact.set(name, db.exact.has(name) ? -1 : i); }
   }
+  if (v2 && Array.isArray(j.alias)) j.alias.forEach(a => {
+    if (!Array.isArray(a) || !Number.isInteger(a[0]) || a[0] < 0 || a[0] >= n) return;
+    for (let k = 1; k < a.length; k++) { const c = normBarcode(String(a[k]).padStart(13, '0')); if (c && !db.byBarcode.has(c)) { db.byBarcode.set(c, a[0]); db.altCode.add(c); } }
+  });
   return db;
 }
 let foodDbLoading = null;
@@ -916,7 +927,7 @@ function loadFoodDb(){
     if (!state.foodDb || state.foodBusy) return;
     const res = state.foodResults, box = document.activeElement;
     if (res && !res.online) { state.foodResults = barcodeResults(res.q) || localResults(res.q, res.more); paintFoodResults(); }
-    else if (!res && state.tab === 'food' && box && box.id === 'ff-name') { const hit = barcodeResults(box.value.trim()); if (hit) { state.foodResults = hit; paintFoodResults(); } } /* a barcode typed while the list was still loading */
+    else if (!res && state.tab === 'food' && box && box.id === 'ff-name') { const q = box.value.trim(), hit = DIGITS_ONLY.test(q) ? liveResults(q, false) : null; if (hit) { state.foodResults = hit; paintFoodResults(); } } /* a barcode, or a short number such as "555", typed while the list was still loading */
   })();
   return foodDbLoading;
 }
@@ -956,62 +967,113 @@ function recentFoods(){ /* what you logged before, newest first, one row per nam
   });
   recentMemo = { key: key, list: out }; return out;
 }
-function termScore(name, aka, cat, t){ /* in the name: whole word beats start of a word beats inside a word; then the brand and other names for the food; a match only on the category counts least */
-  const n = ' ' + name + ' ';
-  if (n.indexOf(' ' + t + ' ') >= 0) return name.indexOf(t) === 0 ? 6 : 3.5;
-  if (name.indexOf(t) === 0) return 4.5;
-  if (n.indexOf(' ' + t) >= 0) return 3;
-  if (name.indexOf(t) >= 0) return 1.5;
-  if (aka && (' ' + aka).indexOf(' ' + t) >= 0) return 3;
-  if (aka && aka.indexOf(t) >= 0) return 1;
-  return cat && (' ' + cat).indexOf(' ' + t) >= 0 ? -2 : -9;
+const ALIAS_BONUS = 3; /* a curated bundle row found through one of its other names typed in full ("carne norte", "kanin") */
+/* n is ' ' + name + ' ', T the typed word with its padded forms. In the name: whole word beats start of a word beats inside a word, and a word also counts as whole when the name has it with -s or -es ("egg" in "Eggs", "tomato" in "Tomatoes, raw"); then the brand and other names for the food; a match only on the category counts least. One scan of the name settles the usual case of no match. */
+function termScore(n, name, aka, cat, T){
+  const t = T.t, at = name.indexOf(t);
+  if (at >= 0) {
+    if (n.indexOf(T.we) >= 0 || n.indexOf(T.ws) >= 0 || n.indexOf(T.wes) >= 0) return at === 0 ? 6 : 3.5;
+    if (at === 0) return 4.5;
+    return n.indexOf(T.w) >= 0 ? 3 : 1.5;
+  }
+  if (aka) { const a = aka.indexOf(t); if (a >= 0) return a === 0 || (' ' + aka).indexOf(T.w) >= 0 ? 3 : 1; }
+  return cat && cat.indexOf(t) >= 0 && (' ' + cat).indexOf(T.w) >= 0 ? -2 : -9;
 }
 /* Every word typed must appear. Your own foods rank first, then the curated Philippine foods (library and bundle), then the USDA tables, then other packaged products; shorter, closer names win.
    cat narrows the list to one category (default: the filter pill that is pressed). Favourites and recent foods only pass a narrower filter when their stored record says which category they are. */
 function foodSearch(q, limit, cat){
-  const pq = plainTxt(q), terms = pq.split(' ').filter(Boolean).map(t => t.length > 3 && t.charAt(t.length - 1) === 's' ? t.slice(0, -1) : t); if (!terms.length) return { items: [], total: 0 };
+  const pq = plainTxt(q);
+  const stem = w => w.length > 3 && w.charAt(w.length - 1) === 's' && w.charAt(w.length - 2) !== 's' ? (w.slice(-3) === 'oes' ? w.slice(0, -2) : w.slice(0, -1)) : w; /* eggs = egg, tomatoes = tomato; "swiss" stays; -ies is left alone (fries, cookies) */
+  const terms = pq.split(' ').filter(Boolean).map(stem); if (!terms.length) return { items: [], total: 0 };
+  const T = terms.map(t => ({ t: t, w: ' ' + t, we: ' ' + t + ' ', ws: ' ' + t + 's ', wes: ' ' + t + 'es ' }));
   const want = cat || state.foodCat || 'all', all = want === 'all';
   const scored = [];
   const pqs = terms.join(' ');
-  const head = raw => { /* +3 when the words typed are the food itself, not an ingredient or a side: "Rice, cooked", "Fried egg", "Fish, salmon" */
-    const segs = String(raw).replace(/\([^)]*\)/g, ' ').split(',').map(plainTxt), is = x => x === pq || x === pqs;
+  const stemAll = s => s.indexOf('s') < 0 ? s : s.split(' ').map(stem).join(' ');
+  const is = x => x === pqs || stemAll(x) === pqs; /* the same words, plural endings aside */
+  const tails = n => { const m = stemAll(n); return m.length > pqs.length && m.slice(-pqs.length - 1) === ' ' + pqs; };
+  /* named = the bonus the row just rated got for being named as typed. ref = a reference row (library, curated list, USDA) answers to what was typed. tailOnly = the bonus came from the "name ends with the words" rule. */
+  let named = 0, ref = false, tailOnly = false;
+  /* The words typed are the food itself, not an ingredient or a side: +3 for "Rice, cooked" and "Fried egg", +2.75 for "Fish, salmon". The comma rule is the USDA way of naming; a product label with commas is a list of flavours, so an Open Food Facts row (off) gets 7 when its whole name is what was typed once brackets and plural endings are set aside, 3 when it ends with it, and nothing for commas. */
+  const head = (raw, off) => {
+    const bare = String(raw).replace(/\([^)]*\)/g, ' ');
+    if (off) { const n = plainTxt(bare); return is(n) ? 7 : tails(n) && n.indexOf(' with ') < 0 ? 3 : 0; } /* 7, so the row named literally as typed (8) stays ahead of "Protein Bars" for "protein bar" and of "Maggi (Kari)" for "maggi" */
+    const segs = bare.split(',').map(plainTxt);
     if (is(segs[0])) return 3;
     if (segs.length > 1) return segs.slice(1).some(is) ? 2.75 : 0;
-    const n = segs[0], tail = x => n.length > x.length && n.slice(-x.length - 1) === ' ' + x;
-    return (tail(pq) || tail(pqs)) && n.indexOf(' with ') < 0 ? 3 : 0;
+    const n = segs[0];
+    if (tails(n) && n.indexOf(' with ') < 0) { tailOnly = true; return 3; }
+    return 0;
   };
-  const rate = (name, aka, cat, bonus, raw) => { let sc = bonus; for (let k = 0; k < terms.length; k++) { const x = termScore(name, aka, cat, terms[k]); if (x < -5) return -1; sc += x; } return Math.max(0, sc + (name === pq ? 8 : head(raw)) - Math.min(4, name.length / 22)); };
-  const add = (it, bonus) => { if (!all && it.category !== want) return; const p = plainOf(it), sc = rate(p.n, p.a, p.c, bonus, it.name); if (sc >= 0) scored.push({ s: sc, it: it, n: p.n }); };
-  state.food.saved.forEach(x => add(Object.assign({}, x, { fav: true, cat: 'Favourite' }), 7));
-  recentFoods().forEach(it => add(it, 5));
+  /* The name bonus: 8 for the name exactly as typed; 7 for a library, curated or USDA row whose whole name is the words typed apart from plural endings ("Potato" for "potatoes"); else the head rule, which can only fire when every word typed is a whole word of the name, so it is not even tried otherwise. */
+  const rate = (n, name, aka, cat, bonus, raw, off) => {
+    let sc = bonus, whole = true;
+    for (let k = 0; k < T.length; k++) { const x = termScore(n, name, aka, cat, T[k]); if (x < -5) { named = 0; return -1; } if (x !== 6 && x !== 3.5) whole = false; sc += x; }
+    tailOnly = false; named = name === pq ? 8 : whole ? (!off && is(name) ? 7 : head(raw, off)) : 0;
+    return Math.max(0, sc + named - Math.min(4, name.length / 22));
+  };
+  const alias = al => { for (let k = 0; k < al.length; k++) if (al[k] === pq || is(al[k])) return true; return false; }; /* one of the row's other names is exactly what was typed */
+  const viaAlias = name => { for (let k = 0; k < T.length; k++) if (name.indexOf(T[k].t) < 0) return true; return false; }; /* ...and its own name does not hold every word */
+  const starts = n => n.indexOf(' ' + pq + ' ') === 0 || n.indexOf(' ' + pqs + ' ') === 0; /* a hand-written row that begins with the words typed: "San Miguel Pale Pilsen" for "san miguel" */
+  const add = (it, bonus, own) => {
+    if (!all && it.category !== want) return; const p = plainOf(it), n = ' ' + p.n + ' ', sc = rate(n, p.n, p.a, p.c, bonus, it.name, false); if (sc < 0) return;
+    if (!own && (named > 0 || (p.al.length && alias(p.al)) || starts(n))) ref = true;
+    scored.push({ s: sc, it: it, n: p.n, o: -1, e: 0 });
+  };
+  state.food.saved.forEach(x => add(Object.assign({}, x, { fav: true, cat: 'Favourite' }), 7, true));
+  recentFoods().forEach(it => add(it, 5, true));
   const db = state.foodDb, hide = db && db.hide.size ? db.hide : null; /* a curated bundle row replaces the older library item of the same name */
-  state.foodLib.forEach(it => { if (hide && hide.has(plainOf(it).n)) return; add(it, 4); });
-  if (db) { const wc = all ? -1 : FOOD_CATS.indexOf(want); for (let i = 0; i < db.items.length; i++) { if (wc >= 0 && db.code[i] !== wc) continue; const n = db.plain[i], row = db.items[i], sc = rate(n, db.aux[i], db.grp[i], DB_BONUS[db.src[i]], row[db.nameAt]); if (sc >= 0) scored.push({ s: sc, row: row, n: n, k: 'db|' + n + '|' + db.bp[i] }); } }
-  scored.sort((a, b) => b.s - a.s || a.n.length - b.n.length || (a.n < b.n ? -1 : 1));
+  state.foodLib.forEach(it => { if (hide && hide.has(plainOf(it).n)) return; add(it, 4, false); });
+  if (db) {
+    const wc = all ? -1 : FOOD_CATS.indexOf(want), code = db.code, src = db.src, plain = db.plain, pad = db.pad, aux = db.aux, grp = db.grp, items = db.items, alt = db.alt, ord = db.ord, nameAt = db.nameAt;
+    for (let i = 0; i < items.length; i++) {
+      if (wc >= 0 && code[i] !== wc) continue;
+      const s = src[i], n = plain[i]; let sc = rate(pad[i], n, aux[i], grp[i], DB_BONUS[s], items[i][nameAt], s === 3);
+      if (sc < 0) continue;
+      /* which rows make "ref": a curated row named as typed, known by that other name (which also earns ALIAS_BONUS when its own name does not say it) or beginning with the words; a USDA row whose name or comma part is the words. A USDA row that only ends with them ("Egg sandwich on wheat bread", "Non-dairy milk") is no reference. */
+      if (s !== 3) { if (named > 0) { if (s === 0 || !tailOnly) ref = true; } else if (s === 0 && alt.has(i) && alias(alt.get(i))) { ref = true; if (viaAlias(n)) sc += ALIAS_BONUS; } else if (s === 0 && starts(pad[i])) ref = true; }
+      scored.push({ s: sc, row: items[i], n: n, o: ord[i] * 1e7 + i, e: s === 3 ? named : 0 });
+    }
+  }
+  /* A food the reference tables know by this name: a product label gets no extra credit for carrying the same words, so "Egg" by a supermarket brand no longer outranks "Boiled egg" and "Egg, whole, raw". With no such reference row (Milo, Nutella, Coke Zero) the product named as typed keeps its bonus and leads. */
+  if (ref) for (let i = 0; i < scored.length; i++) { const x = scored[i]; if (x.e > 0) x.s = Math.max(0, x.s - x.e); }
+  /* equal score: the shorter name, then the alphabet, then your own and library foods, then the bundle rows in their fixed order (Philippine barcode, Philippine tag, the rest; inside each the order of the bundle) */
+  scored.sort((x, y) => y.s - x.s || x.n.length - y.n.length || (x.n < y.n ? -1 : x.n > y.n ? 1 : x.o - y.o));
+  /* Every bundle row is listed: the importer only keeps two rows of one name and brand when they are different foods. Your own and library foods are listed once per name and calories. */
   const out = [], seen = new Set(); let total = 0;
   for (let i = 0; i < scored.length; i++) {
-    const x = scored[i], key = x.row ? x.k : x.n + '|' + Math.round(Number(x.it.kcal) || 0); if (seen.has(key)) continue; seen.add(key); total++;
+    const x = scored[i];
+    if (!x.row) { const key = x.n + '|' + Math.round(Number(x.it.kcal) || 0); if (seen.has(key)) continue; seen.add(key); }
+    total++;
     if (out.length < limit) out.push(x.row ? dbItem(x.row) : x.it);
   }
   return { items: out, total: total };
 }
 function localResults(q, more){
-  const r = foodSearch(q, more ? 60 : 12); let msg = '';
+  const r = foodSearch(q, more ? 60 : 12); let msg = '', wider = 0; /* wider: nothing under the pressed pill, but this many matches under "All" */
   if (!r.items.length) {
-    const cat = state.foodCat, wider = cat !== 'all' ? foodSearch(q, 1, 'all').total : 0;
+    const cat = state.foodCat; wider = cat !== 'all' ? foodSearch(q, 1, 'all').total : 0;
     msg = wider ? 'Nothing under “' + FOOD_CAT_LABEL[cat] + '” matches that. “All” has ' + fmtNum(wider) + (wider === 1 ? ' match.' : ' matches.')
       : (state.foodDb ? 'Nothing saved in the app matches that. ' : 'The food list is still loading. ') + 'Try fewer words, search brands online, or ask Claude to estimate.';
   }
-  return { q: q, items: r.items, total: r.total, more: !!more, online: false, msg: msg };
+  return { q: q, items: r.items, total: r.total, more: !!more, online: false, msg: msg, wider: wider };
 }
-/* A typed barcode is looked up in the bundle first: a hit is shown at once, with no network call. */
+/* A typed barcode is looked up in the bundle first: a hit is shown at once, with no network call. alias = the code belongs to another pack of the product shown, so the serving and the picture may be that other pack's. */
 function barcodeResults(q){
   const db = state.foodDb; if (!db || !db.byBarcode.size || !/^[\d\s-]+$/.test(q)) return null;
   const code = normBarcode(q), i = code ? db.byBarcode.get(code) : undefined; if (i == null) return null;
-  return { q: q, items: [dbItem(db.items[i])], total: 1, more: false, online: false, barcode: code, msg: '' };
+  return { q: q, items: [dbItem(db.items[i])], total: 1, more: false, online: false, barcode: code, alias: db.altCode.has(code), msg: '' };
 }
-/* What the list shows while typing: a barcode saved in the app, else the foods matching the words; nothing for one letter or for a number that is not a saved barcode (Find food looks those up online). */
-function liveResults(q, more){ const hit = barcodeResults(q); return hit || (q.length < 2 || /^\d[\d\s-]*$/.test(q) ? null : localResults(q, more)); }
+/* What the list shows while typing: a barcode saved in the app, else the foods matching the words; nothing for one letter.
+   Digits only: up to four digits are searched like words and listed when something matches ("555" tuna, "7 11"); a longer number is a barcode being typed, and one that is not saved in the app shows nothing until Find food looks it up online. */
+const DIGITS_ONLY = /^\d[\d\s-]*$/;
+function liveResults(q, more){
+  const hit = barcodeResults(q); if (hit) return hit;
+  if (q.length < 2) return null;
+  if (!DIGITS_ONLY.test(q)) return localResults(q, more);
+  if (q.replace(/\D/g, '').length > 4) return null;
+  const r = localResults(q, more); return r.items.length || r.wider ? r : null;
+}
 /* Results after an online search: the app's own matches first, then the brand matches found online (net), both narrowed by the filter pill. */
 function onlineResults(q, more, net, note){
   const hit = barcodeResults(q), local = hit ? hit.items : foodSearch(q, more ? 60 : 12).items, cat = state.foodCat, shown = cat === 'all' ? net : net.filter(i => i.category === cat);
@@ -1029,14 +1091,17 @@ function offItem(p){
   const sodium = (s, max) => { const g = grams('sodium' + s, max / 1000), salt = grams('salt' + s, max / 400); return g != null ? roundTo(g * 1000, 1) : salt != null ? roundTo(sodiumMgFromSaltG(salt), 1) : null; };
   /* per 100 g as sold; else per 100 g as prepared (instant noodles, drink mixes); kilojoules are converted when calories are missing */
   const sfx = has('energy-kcal_100g') || has('energy_100g') ? '_100g' : has('energy-kcal_prepared_100g') || has('energy_prepared_100g') ? '_prepared_100g' : '';
+  /* A wrong calorie field (crackers at 4 kcal): calories below half of what the protein, the sugars (never more than the carbs) and the fat alone add up to, less 10, cannot be right. The importer rejects such rows from the bundle; the online answer is skipped the same way. */
+  const tooLow = (kcal, s) => { const g0 = k => has(k + s) && Number(n[k + s]) > 0 ? Number(n[k + s]) : 0, sug = g0('sugars'); return kcal < 0.5 * (4 * g0('proteins') + 4 * (has('carbohydrates' + s) ? Math.min(sug, g0('carbohydrates')) : sug) + 9 * g0('fat')) - 10; };
   if (sfx) {
     const kcal = has('energy-kcal' + sfx) ? Number(n['energy-kcal' + sfx]) : Number(n['energy' + sfx]) / 4.184;
+    if (tooLow(kcal, sfx)) return null;
     const ps = [], m = /(\d+(?:[.,]\d+)?)\s*(g|ml)\b/i.exec(String(p.serving_size || '')), g = Number(p.serving_quantity) > 0 ? Number(p.serving_quantity) : m ? Number(m[1].replace(',', '.')) : 0;
     if (p.serving_size && g > 0) ps.push([String(p.serving_size), g]);
     return per100Item(name + (sfx === '_100g' ? '' : ' (prepared)'), 'Packaged', { kcal: Math.round(kcal), protein: Number(n['proteins' + sfx]) || 0, carbs: Number(n['carbohydrates' + sfx]) || 0, fat: Number(n['fat' + sfx]) || 0,
       sugars: grams('sugars' + sfx, 100), saturates: grams('saturated-fat' + sfx, 100), fibre: grams('fiber' + sfx, 100), sodium: sodium(sfx, 40000) }, ps, extra);
   }
-  if (p.serving_size && has('energy-kcal_serving')) return Object.assign({ name: name, cat: 'Packaged', serving: String(p.serving_size), kcal: Math.round(Number(n['energy-kcal_serving'])), protein: num1(n.proteins_serving), carbs: num1(n.carbohydrates_serving), fat: num1(n.fat_serving),
+  if (p.serving_size && has('energy-kcal_serving') && !tooLow(Number(n['energy-kcal_serving']), '_serving')) return Object.assign({ name: name, cat: 'Packaged', serving: String(p.serving_size), kcal: Math.round(Number(n['energy-kcal_serving'])), protein: num1(n.proteins_serving), carbs: num1(n.carbohydrates_serving), fat: num1(n.fat_serving),
     sugars: r1(grams('sugars_serving', 1000)), saturates: r1(grams('saturated-fat_serving', 1000)), fibre: r1(grams('fiber_serving', 1000)), sodium: sodium('_serving', 40000), basis: 'database' }, extra);
   return null;
 }
@@ -1117,25 +1182,30 @@ function thumbHtml(it){
   return '<span class="fthumb" data-cat="' + c + '"' + (u ? ' data-thumb="' + esc(u) + '"' : '') + '>' + CAT_ICON[c] + (u && !badThumbs.has(u) ? '<img class="fthumb-img" src="' + esc(u) + '" alt="" width="44" height="44" loading="lazy" decoding="async" referrerpolicy="no-referrer">' : '') + '</span>';
 }
 function foodCatsHtml(){ return '<div class="fcats" role="group" aria-label="Show which foods">' + ['all'].concat(FOOD_CATS).map(c => '<button type="button" class="fcat" data-action="food-cat" data-cat="' + c + '" aria-pressed="' + (state.foodCat === c) + '">' + esc(FOOD_CAT_LABEL[c]) + '</button>').join('') + '</div>'; }
-function foodRowHtml(it, i){
+/* Two listed foods of one name and one brand are different foods (the same label with other numbers), so each says its calories per 100 g on the grey line. Your own favourites and recent foods are left out of the comparison. */
+function twinKey(it){ return it.fav || it.recent ? '' : plainOf(it).n + '|' + plainTxt(it.brand || ''); }
+/* data-src says where a row comes from: fav, recent, lib (the hand-written library), curated, usda or off (the bundle), online. twin = another listed row has this name and brand. */
+function foodRowHtml(it, i, twin){
   const own = it.fav || it.recent, who = own ? it.brand || '' : it.brand || it.cat || '';
-  const line = (own ? '<span class="pill">' + esc(it.cat) + '</span> ' : '') + (who ? '<span class="fr-brand">' + esc(who) + '</span> · ' : '') + esc(it.serving || '1 serving');
-  return '<div class="food-item"><button type="button" class="pickbtn" data-action="food-use" data-i="' + i + '">' + thumbHtml(it) +
+  const line = (own ? '<span class="pill">' + esc(it.cat) + '</span> ' : '') + (who ? '<span class="fr-brand">' + esc(who) + '</span> · ' : '') + esc(it.serving || '1 serving') + (twin && it.per100 && hasNum(it.per100.kcal) ? ' · <span class="fr-per">' + fmtNum(it.per100.kcal) + ' kcal/100 g</span>' : '');
+  const from = it.fav ? 'fav' : it.recent ? 'recent' : it.online ? 'online' : it.src === 'curated' || it.src === 'usda' || it.src === 'off' ? it.src : 'lib';
+  return '<div class="food-item" data-src="' + from + '"><button type="button" class="pickbtn" data-action="food-use" data-i="' + i + '">' + thumbHtml(it) +
     '<span class="fr-txt"><b>' + esc(it.name) + '</b><span class="s">' + line + '</span><span class="s fr-mac">P ' + fmtNum(it.protein, 1) + ' · C ' + fmtNum(it.carbs, 1) + ' · F ' + fmtNum(it.fat, 1) + ' g' + (it.basis === 'estimate' ? ' · approximate' : '') + '</span></span></button>' +
     '<div class="k">' + fmtNum(it.kcal) + '<small>kcal</small></div><button type="button" class="btn small" data-action="food-addnow" data-i="' + i + '" aria-label="Add one serving of ' + esc(it.name) + '">Add</button></div>';
 }
 function foodResultsHtml(){
   const res = state.foodResults; if (!res) return '';
   const n = res.items.length, more = !res.online && !res.barcode && res.total > n;
-  const head = state.foodBusy ? 'Searching…' : res.barcode && n ? 'Barcode match · saved in the app' : n ? (res.online || !more ? n : 'Top ' + n + ' of ' + fmtNum(res.total)) + (n === 1 ? ' match' : ' matches') : 'No match yet';
-  return foodCatsHtml() + '<div class="head" id="food-res-head">' + esc(head) + '</div>' + res.items.map(foodRowHtml).join('') +
+  const head = state.foodBusy ? 'Searching…' : res.barcode && n ? (res.alias ? 'Same product, another pack · saved in the app' : 'Barcode match · saved in the app') : n ? (res.online || !more ? n : 'Top ' + n + ' of ' + fmtNum(res.total)) + (n === 1 ? ' match' : ' matches') : 'No match yet';
+  const twins = new Map(); res.items.forEach(it => { const k = twinKey(it); if (k) twins.set(k, (twins.get(k) || 0) + 1); });
+  return foodCatsHtml() + '<div class="head" id="food-res-head">' + esc(head) + '</div>' + res.items.map((it, i) => foodRowHtml(it, i, twins.get(twinKey(it)) > 1)).join('') +
     (res.msg ? '<p class="hr-note" style="margin:8px 0 0">' + esc(res.msg) + '</p>' : '') +
     '<div class="chip-row" style="margin-top:10px">' + (more ? '<button type="button" class="btn small" data-action="food-more">Show more</button>' : '') + (res.online ? '' : '<button type="button" class="btn small" data-action="food-online"' + (state.foodBusy ? ' disabled' : '') + '>Search brands online</button>') + '<button type="button" class="btn small ghost" data-action="food-clear">Close</button></div>';
 }
 function paintFoodResults(){ /* only this box is redrawn, so the form and the keyboard stay as they are; the pill strip keeps its sideways scroll position */
   const el = view.querySelector('#food-res'); if (!el) return;
   const old = el.querySelector('.fcats'), x = old ? old.scrollLeft : 0;
-  el.hidden = !state.foodResults; el.innerHTML = foodResultsHtml();
+  el.hidden = !state.foodResults; el.innerHTML = foodResultsHtml(); el.dataset.q = state.foodResults ? state.foodResults.q : ''; /* data-q: the text this list answers */
   const strip = el.querySelector('.fcats'); if (strip && x) strip.scrollLeft = x;
 }
 function foodRing(eaten, target){
@@ -1171,7 +1241,7 @@ function renderFood(){
   if (state.canWrite) {
     html += '<section><h2>' + (f.editId ? 'Edit entry' : 'Add food') + '</h2><div class="card">' +
       '<label class="f">Food or description<input type="text" id="ff-name" data-ff="name" autocomplete="off" autocorrect="off" enterkeyhint="search" placeholder="chicken adobo, Jollibee Chickenjoy, or a barcode number" value="' + esc(f.name) + '"></label>' +
-      '<div class="food-res" id="food-res"' + (state.foodResults ? '' : ' hidden') + '>' + foodResultsHtml() + '</div>' +
+      '<div class="food-res" id="food-res" data-q="' + esc(state.foodResults ? state.foodResults.q : '') + '"' + (state.foodResults ? '' : ' hidden') + '>' + foodResultsHtml() + '</div>' +
       '<label class="f" id="ff-pi-wrap"' + (f.portions && f.per100 ? '' : ' hidden') + ' style="margin-top:10px">Serving size<select data-ff="pi">' + portionSelectHtml(f) + '</select></label>' +
       '<div class="frow"><label class="f">Servings<input type="number" id="ff-qty" data-ff="qty" min="0" step="0.25" inputmode="decimal" value="' + esc(f.qty) + '"></label>' +
       '<label class="f">Kcal per serving<input type="number" id="ff-kcal" data-ff="kcal" min="0" step="any" inputmode="decimal" value="' + esc(f.kcal) + '"></label>' +
@@ -1494,7 +1564,7 @@ view.addEventListener('input', ev => { /* results follow the typing; the form is
   liveT = setTimeout(() => {
     if (state.foodBusy || state.tab !== 'food') return; const q = t.value.trim();
     if (!state.foodDb && q.length >= 2) loadFoodDb();
-    const res = liveResults(q, false); /* a barcode saved in the app, or the foods matching the words; nothing for one letter or an unknown number */
+    const res = liveResults(q, false); /* a barcode saved in the app, or the foods matching the words; nothing for one letter or an unknown long number */
     if (!res) { if (state.foodResults) { state.foodResults = null; paintFoodResults(); } return; }
     state.foodResults = res; paintFoodResults();
   }, 130);

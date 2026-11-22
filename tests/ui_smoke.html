@@ -35,7 +35,14 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:6px 8px}
   Suites: "baseline" runs against the repository's own food-db.json (the old version 1 bundle, so it also proves that
   old bundles still load). "v2" needs a version 2 bundle served as /food-db.json; run_ui_smoke.py --suite v2 builds one
   from the fixtures with scripts/import_foods.py, or serves tests/fixtures/food-db.v2.sample.json (see --bundle).
-  The v2 checks only rely on the anchor rows that both bundles contain.
+  The v2 checks only rely on the anchor rows that both bundles contain; a check that needs something only one of them
+  has (an "alias" list, the three same-named sample rows) reports XFAIL "not run" on the other.
+  "ranking" checks the order of search results on a real bundle: run it with --db-file PATH. With a bundle of fewer
+  than 20,000 rows it does nothing and reports that it was skipped (the runner then exits with 0).
+
+  What the suites read from the app's page, besides ids and data-action: #food-res carries data-q (the text the list
+  answers), every result row (.food-item) carries data-src (fav, recent, lib, curated, usda, off, online), and a row whose
+  name and brand another listed row shares shows its calories per 100 g in a span with class fr-per.
 */
 (function(){
 'use strict';
@@ -45,18 +52,23 @@ const APP_URL = '../index.html';
 const checks = [];
 const appErrors = [];
 let frame = null;
+let skipped = '';   /* set by a suite that cannot say anything about what is being served: the runner prints the reason and exits with 0 */
 
 /* ---------- reporting ---------- */
 function publish(done){
-  document.getElementById('result').textContent = 'RESULT ' + JSON.stringify({ suite: suiteName, done: !!done, checks: checks });
-  document.getElementById('status').textContent = (done ? 'finished: ' : 'running: ') + checks.filter(c => c.ok).length + ' of ' + checks.length + ' checks passed (suite ' + suiteName + ')';
+  const out = { suite: suiteName, done: !!done, checks: checks }; if (skipped) out.skipped = skipped;
+  document.getElementById('result').textContent = 'RESULT ' + JSON.stringify(out);
+  document.getElementById('status').textContent = (done ? 'finished: ' : 'running: ') + (skipped ? 'skipped, ' + skipped : checks.filter(c => c.ok).length + ' of ' + checks.length + ' checks passed') + ' (suite ' + suiteName + ')';
 }
-/* opts.xfail = true marks a failure that is expected because of a known bug in the app; the runner prints XFAIL and does not count it. */
+/* opts.xfail = true marks a failure that is expected because of a known bug in the app, or a check that cannot run on what is being served; the runner prints XFAIL and does not count it.
+   opts.show = true makes the runner print the detail of a passing check even without --verbose (for measured rates). */
 function check(name, ok, detail, opts){
   const c = { name: String(name), ok: !!ok, detail: detail == null ? '' : String(detail) };
   if (opts && opts.xfail) c.xfail = true;
+  if (opts && opts.show) c.show = true;
   checks.push(c); publish(false); return c.ok;
 }
+const notRun = (name, why) => check(name, false, 'not run: ' + why, { xfail: true });
 function expect(cond, msg){ if (!cond) throw new Error(msg || 'expectation failed'); }
 async function step(name, fn, opts){
   try { const d = await fn(); check(name, true, d, opts); return true; }
@@ -82,6 +94,7 @@ const doc = () => frame.contentDocument;
 const q = sel => doc().querySelector(sel);
 const qa = sel => Array.from(doc().querySelectorAll(sel));
 const txt = el => el ? el.textContent.replace(/\s+/g, ' ').trim() : '';
+const clean = s => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();   /* a stored text as txt() would read it back from the page */
 /* Whole number shown on screen, whatever the thousands separator: "1,310 kcal so far" -> 1310. Not for decimals. */
 const num = s => { const d = String(s == null ? '' : s).replace(/[^0-9]/g, ''); return d ? Number(d) : NaN; };
 const visible = el => !!el && el.getClientRects().length > 0;
@@ -159,13 +172,23 @@ async function openApp(hash, readySel){
   finally { clearInterval(poll); hookErrors(); }
 }
 /* Rows of the live search results under the food field. cat is the muted label under the name: the brand, else the display group (a restaurant, "Home dish", a USDA group), or "Favourite" / "Recent" for your own foods.
-   tag is "Favourite" or "Recent" on your own foods and empty otherwise. thumb is the picture address the row carries (null when the food has none), dcat its category, img the picture element while it is in the page, icon the category icon drawn under it. */
+   tag is "Favourite" or "Recent" on your own foods and empty otherwise. thumb is the picture address the row carries (null when the food has none), dcat its category, img the picture element while it is in the page, icon the category icon drawn under it.
+   src is where the row comes from (data-src: fav, recent, lib, curated, usda, off, online); per is "N kcal/100 g" on a row that shares its name and brand with another listed row, else empty. */
 function resultRows(){
   return qa('#food-res .food-item').map((it, i) => {
     const th = it.querySelector('.fthumb');
     return { i: i, el: it, name: txt(it.querySelector('.pickbtn b')), cat: txt(it.querySelector('.pickbtn .fr-brand') || it.querySelector('.pickbtn .pill')), tag: txt(it.querySelector('.pickbtn .pill')), sub: txt(it.querySelector('.pickbtn .s')), kcal: num(txt(it.querySelector('.k'))),
+      src: it.getAttribute('data-src') || '', per: txt(it.querySelector('.pickbtn .fr-per')),
       thumbEl: th, thumb: th ? th.getAttribute('data-thumb') : null, dcat: th ? th.getAttribute('data-cat') : null, img: th ? th.querySelector('img') : null, icon: th ? th.querySelector('svg') : null };
   });
+}
+/* Types text and returns what the list shows once the app has answered (it waits 130 ms after the last key): the rows, or none when the list is hidden.
+   The list says in data-q which text it answers, so the list of an earlier query is never read by mistake. For many queries in a row; search() above is for one query with a condition. */
+async function typed(text){
+  type('#ff-name', text); await wait(170);
+  const box = q('#food-res'); if (!visible(box)) return [];
+  expect(box.getAttribute('data-q') === text.trim(), 'the list answers "' + box.getAttribute('data-q') + '" after "' + text + '" was typed');
+  return resultRows();
 }
 /* Types a query into the food field and waits until the results list is showing and until(rows) is true (default: at least one row). Local search only. */
 async function search(text, until, ms){
@@ -548,6 +571,55 @@ async function captureBackup(){
 const sodiumBox = () => ({ label: txt(q('#ff-sodium-l')), value: q('#ff-sodium') ? q('#ff-sodium').value : null });
 const dayMore = k => txt(q('#food-daymore [data-nx="' + k + '"]'));
 
+/* ---------- helpers for reading the served bundle (the rules are written out again here on purpose: the tests state them, they do not borrow the app's code) ---------- */
+const BARCODE_HEAD = 'Barcode match · saved in the app', ALIAS_HEAD = 'Same product, another pack · saved in the app';
+function fieldIx(db){ const ix = {}; (db.fields || []).forEach((f, i) => { ix[f] = i; }); return ix; }
+/* The search key of a text: lower case, accents folded, apostrophes and full stops dropped, "&" read as "and", anything that is not a letter or a digit is a space. */
+function plain(s){
+  let x = String(s == null ? '' : s).trim().toLowerCase();
+  if (/[^\x00-\x7f]/.test(x)) x = x.normalize('NFKD').replace(/[̀-ͯ]/g, '').normalize('NFKC').toLowerCase();
+  return x.replace(/['’`.]/g, '').replace(/&/g, ' and ').replace(/[^\p{L}\p{M}\p{N}]+/gu, ' ').trim();
+}
+/* Plural endings set aside, as the search does: eggs = egg, tomatoes = tomato; short words and words in -ss stay. */
+const stemWord = w => w.length > 3 && /[^s]s$/.test(w) ? (/oes$/.test(w) ? w.slice(0, -2) : w.slice(0, -1)) : w;
+const stemAll = s => String(s).split(' ').map(stemWord).join(' ');
+/* One spelling per barcode: digits only, 8 to 14 of them, leading zeros dropped, padded to 13; in-store codes (2...) never match. */
+function canonCode(raw){
+  const d = String(raw == null ? '' : raw).replace(/[^0-9]/g, ''); if (d.length < 8 || d.length > 14) return null;
+  const s = d.replace(/^0+/, ''); if (!s) return null;
+  const c = s.padStart(13, '0');
+  return c.charAt(0) === '2' || c.slice(0, 2) === '02' ? null : c;
+}
+/* What the "alias" list of a bundle promises. codes: barcodes of other packs that must find their row (code as typed, 13 digits; digits = how many the number in the file had).
+   own: codes that are a row's own barcode and must keep finding that row. ignored: codes that must find nothing (no such row index, or an in-store code). */
+function aliasPlan(db){
+  const ix = fieldIx(db), items = db.items, mine = new Map(), codes = [], own = [], bad = [], seen = new Set();
+  items.forEach((r, i) => { const c = canonCode(r[ix.barcode]); if (c && !mine.has(c)) mine.set(c, i); });
+  (Array.isArray(db.alias) ? db.alias : []).forEach(a => {
+    if (!Array.isArray(a)) return;
+    const ok = Number.isInteger(a[0]) && a[0] >= 0 && a[0] < items.length;
+    a.slice(1).forEach(raw => {
+      const p13 = String(raw).padStart(13, '0'), c = canonCode(p13);
+      if (c && mine.has(c)) { own.push({ code: p13, name: clean(items[mine.get(c)][ix.name]) }); return; }
+      if (!ok || !c) { bad.push(p13); return; }
+      if (seen.has(c)) return; seen.add(c);
+      codes.push({ code: p13, digits: String(raw).length, name: clean(items[a[0]][ix.name]) });
+    });
+  });
+  return { codes: codes, own: own, ignored: bad.filter(p => !seen.has(canonCode(p))) };
+}
+/* Open Food Facts rows of the bundle that share one name and one brand, as [[row index, ...], ...] in bundle order. */
+function twinGroups(db){
+  const ix = fieldIx(db), g = new Map();
+  db.items.forEach((r, i) => { if (r[ix.source] !== 3) return; const k = plain(r[ix.name]) + '|' + r[ix.brand]; if (g.has(k)) g.get(k).push(i); else g.set(k, [i]); });
+  return Array.from(g.values()).filter(v => v.length > 1);
+}
+/* The fixed order of rows that tie in the search: a barcode with the Philippine prefix 480 first, then rows tagged PH, then the rest; inside each the order of the bundle. */
+function tieOrder(db, idx){
+  const ix = fieldIx(db), rank = i => { const c = canonCode(db.items[i][ix.barcode]); return c && c.slice(0, 3) === '480' ? 0 : /(^|,)PH(,|$)/.test(String(db.items[i][ix.regions] || '')) ? 1 : 2; };
+  return idx.slice().sort((a, b) => rank(a) - rank(b) || a - b);
+}
+
 /* ---------- suite: v2 (the food-database upgrade, against a version 2 bundle) ---------- */
 async function suiteV2(){
   const seed = baselineData(); seedStorage(seed.store);
@@ -555,6 +627,7 @@ async function suiteV2(){
   const todays = seed.store.food.entries.filter(e => e.date === seed.today), countedToday = todays.filter(e => e.status !== 'pending').length;
   let added = 0;   /* entries this suite logs today */
   const logged = {};
+  let bundle = null;   /* the served /food-db.json as the test page reads it */
 
   const booted = await step('app boots with the version 2 bundle and rewrites nothing while loading', async () => {
     await openApp('food');
@@ -563,6 +636,7 @@ async function suiteV2(){
     expect(!appErrors.length, appErrors.join(' | '));
     const db = await loadJson('../food-db.json');
     expect(db.version === 2 && Array.isArray(db.fields) && Array.isArray(db.items), 'the served /food-db.json is not a version 2 bundle (version ' + db.version + '); run with --suite v2 so the runner serves one');
+    bundle = db;
     expect(localStorage.getItem('tl.food') === seededFood, 'loading the app changed the stored food data');
     expect(readKey('food').schema === undefined, 'a schema marker was written before anything was saved');
     return 'bundle with ' + db.items.length + ' rows, built "' + (db.built || '') + '"; stored data byte-for-byte as seeded';
@@ -727,6 +801,100 @@ async function suiteV2(){
       expect(lookupRequests().length === before, 'requests to the lookup services: ' + lookupRequests().slice(before).join(', '));
     } finally { f.stop(); }
     return tried.length + ' spellings found offline (' + tried.join(', ') + '); ' + f.log.length + ' fetch calls, none to another host';
+  });
+
+  /* Newer bundles list the barcodes of other packs of a product under "alias". The checks work on whatever list is served; a bundle without one reports "not run". */
+  const plan = aliasPlan(bundle), ALIAS_CHECK = 'a barcode from the bundle\'s "alias" list finds its row offline, headed "Same product, another pack"';
+  const hideList = async () => { type('#ff-name', 'x'); await waitFor(() => !visible(q('#food-res')), 2000, 'the list to hide between barcodes'); };
+  if (!plan.codes.length) notRun(ALIAS_CHECK, 'the served bundle has no usable "alias" list; --bundle sample serves one');
+  else await step(ALIAS_CHECK, async () => {
+    const before = lookupRequests().length, f = watchFetch(), tried = [];
+    try {
+      const short = plan.codes.filter(a => a.digits < 13), pick = plan.codes.slice(0, 3).concat(short.slice(0, 3)).filter((a, i, l) => l.indexOf(a) === i);
+      for (const a of pick) {
+        /* as the list stores it (13 digits), and as a pack prints it: 12 digits for a US code, 8 for a short one */
+        const spellings = [a.code].concat(a.digits <= 8 ? [a.code.slice(-8)] : a.digits <= 12 ? [a.code.slice(-12)] : []);
+        for (const code of spellings) {
+          await hideList();
+          await search(code, r => r.length === 1 && r[0].name === a.name);
+          expect(txt(q('#food-res-head')) === ALIAS_HEAD, code + ' is headed "' + txt(q('#food-res-head')) + '"');
+          expect(!q('[data-action="food-more"]'), code + ': "Show more" is offered for a barcode match');
+          tried.push(code);
+        }
+      }
+      for (const o of plan.own.slice(0, 3)) {   /* a row's own barcode, although the list names it under another row */
+        await hideList();
+        await search(o.code, r => r.length === 1 && r[0].name === o.name);
+        expect(txt(q('#food-res-head')) === BARCODE_HEAD, 'the own barcode ' + o.code + ' of "' + o.name + '" is headed "' + txt(q('#food-res-head')) + '"');
+      }
+      for (const code of plan.ignored.slice(0, 3)) {   /* no such row, or an in-store code: nothing to show */
+        await hideList();
+        type('#ff-name', code); await wait(500);
+        expect(!visible(q('#food-res')), code + ' lists: ' + names(resultRows()));
+      }
+      expect(!f.other().length, 'fetch calls to another host: ' + f.other().join(', '));
+      expect(lookupRequests().length === before, 'requests to the lookup services: ' + lookupRequests().slice(before).join(', '));
+    } finally { f.stop(); }
+    return tried.length + ' spellings of ' + plan.codes.length + ' alias codes tried (' + tried.join(', ') + '); own barcodes kept: ' + plan.own.length + '; ignored entries: ' + plan.ignored.length;
+  });
+
+  await step('picking the row an alias barcode found fills the form like any other row', async () => {
+    if (!plan.codes.length) return 'the served bundle has no alias list: nothing to pick';
+    const a = plan.codes[0], rows = await search(a.code, r => r.length === 1 && r[0].name === a.name), kcal = rows[0].kcal;
+    click('food-use', { i: 0 });
+    await waitFor(() => q('#ff-name') && q('#ff-name').value === a.name && !visible(q('#food-res')), 3000, 'the food in the form');
+    expect(Math.round(Number(q('#ff-kcal').value)) === kcal, 'the form shows ' + q('#ff-kcal').value + ' kcal, the row showed ' + kcal);
+    type('#ff-name', ''); await wait(200);
+    return a.name + ', ' + kcal + ' kcal';
+  });
+
+  const TWIN = 'Coco Butter Biscuits', TWIN_ALIAS = '4800000333348', TWIN_CHECK = 'rows that share a name and a brand are all listed, the Philippine barcode first, each with its calories per 100 g';
+  const nameAt = fieldIx(bundle).name;
+  if (bundle.items.filter(r => r[nameAt] === TWIN).length !== 3) notRun(TWIN_CHECK, 'the three "' + TWIN + '" rows are only in the hand-written sample (--bundle sample)');
+  else await step(TWIN_CHECK, async () => {
+    if (plan.codes.some(a => a.code === TWIN_ALIAS)) {   /* the alias belongs to the third of the three rows, the one at 470 kcal per 100 g: 141 kcal in its 30 g serving */
+      const al = await search(TWIN_ALIAS, r => r.length === 1 && r[0].name === TWIN);
+      expect(al[0].kcal === 141 && !al[0].per, 'the alias barcode shows the row with ' + al[0].kcal + ' kcal' + (al[0].per ? ' and "' + al[0].per + '"' : ''));
+    }
+    const rows = await search('coco butter biscuits', r => r.filter(x => x.name === TWIN).length >= 3), mine = rows.filter(x => x.name === TWIN);
+    expect(mine.length === 3, mine.length + ' rows named "' + TWIN + '" are listed');
+    mine.forEach(r => expect(r.src === 'off' && r.cat === 'Testbake' && r.sub.indexOf('4 biscuits (30 g)') >= 0, 'row: ' + r.src + ', ' + r.cat + ', ' + r.sub));
+    /* stored in the bundle as: 430 (US code), 500 (tagged PH), 470 (barcode 480...) */
+    expect(mine.map(r => r.per).join(' | ') === '470 kcal/100 g | 500 kcal/100 g | 430 kcal/100 g', 'order and calories per 100 g: ' + mine.map(r => r.per || 'none').join(' | '));
+    expect(mine.map(r => r.kcal).join() === '141,150,129', 'calories for the 30 g serving: ' + mine.map(r => r.kcal).join());
+    expect(headCount() === rows.length, 'the header counts ' + headCount() + ' matches for ' + rows.length + ' rows');
+    const lone = await search('snickers', r => !!rowNamed(r, 'Snickers'));
+    expect(lone.every(r => !r.per), 'a row without a namesake shows calories per 100 g: ' + lone.map(r => r.name + ' ' + r.per).join(' | '));
+    return mine.map(r => r.per).join(' | ');
+  });
+
+  await step('result rows say where they come from (data-src) and the list says which text it answers (data-q)', async () => {
+    let rows = await search('chicken', r => !!rowNamed(r, ADOBO) && !!rowNamed(r, CHICKENJOY));
+    expect(q('#food-res').getAttribute('data-q') === 'chicken', 'data-q is "' + q('#food-res').getAttribute('data-q') + '"');
+    rows.forEach(r => expect(['fav', 'recent', 'lib', 'curated', 'usda', 'off'].indexOf(r.src) >= 0, r.name + ' has data-src "' + r.src + '"'));
+    expect(rowNamed(rows, ADOBO).src === 'curated' && rowNamed(rows, CHICKENJOY).src === 'curated', 'the curated rows have data-src ' + rowNamed(rows, ADOBO).src + ' and ' + rowNamed(rows, CHICKENJOY).src);
+    rows = await search('banana raw', r => r.length > 0 && r[0].name === 'Banana, raw'); expect(rows[0].src === 'usda', '"Banana, raw" has data-src ' + rows[0].src);
+    rows = await search('nongshim', r => !!rowNamed(r, 'Shin Ramyun')); expect(rowNamed(rows, 'Shin Ramyun').src === 'off', 'Shin Ramyun has data-src ' + rowNamed(rows, 'Shin Ramyun').src);
+    rows = await search('smoke test', r => r.length > 0);
+    expect(rows.some(r => r.src === 'fav' && r.tag === 'Favourite') && rows.some(r => r.src === 'recent' && r.tag === 'Recent'), 'own foods: ' + rows.map(r => r.name + ' [' + r.src + ']').join(' | '));
+    const lib = await loadJson('../food-library.json'), it = (lib.items || []).find(x => x.name === 'Pancit canton'); expect(it, 'food-library.json has no "Pancit canton"');
+    rows = await search('pancit canton', r => !!rowNamed(r, 'Pancit canton')); expect(rowNamed(rows, 'Pancit canton').src === 'lib', 'the library item has data-src ' + rowNamed(rows, 'Pancit canton').src);
+    type('#ff-name', 'x'); await waitFor(() => !visible(q('#food-res')), 2000, 'the list to hide');
+    expect(q('#food-res').getAttribute('data-q') === '', 'the hidden list still carries data-q "' + q('#food-res').getAttribute('data-q') + '"');
+    return 'curated, usda, off, lib, fav and recent seen';
+  });
+
+  await step('digits: a short number lists matching foods while typing, a longer one waits to be a barcode', async () => {
+    const rows = await search('12', r => r.length > 0);   /* the library has steaks sold as "12 oz" */
+    expect(rows.some(r => /\b12\b/.test(r.name)), 'no row has the number 12 in its name: ' + names(rows));
+    for (const text of ['9731', '48077', '48077702', PANCIT_CODE.slice(0, 12)]) {   /* no food carries 9731; five digits and more are a barcode being typed */
+      type('#ff-name', text); await wait(500);
+      expect(!visible(q('#food-res')), '"' + text + '" lists: ' + names(resultRows()));
+    }
+    const hit = await search(PANCIT_CODE, r => r.length === 1 && r[0].name === PANCIT);
+    expect(txt(q('#food-res-head')) === BARCODE_HEAD, 'the full barcode is headed "' + txt(q('#food-res-head')) + '"');
+    type('#ff-name', ''); await wait(200);
+    return '"12": ' + rows.length + ' rows, first ' + rows[0].name + '; 9731, 48077, 48077702 and 12 digits of a barcode: hidden; the full barcode: ' + hit[0].name;
   });
 
   await step('choosing the pancit canton row fills 280 kcal for "1 pack" and More nutrition shows sodium 900 mg', async () => {
@@ -930,6 +1098,33 @@ async function suiteV2(){
     return 'Open Food Facts and USDA brand rows: picture, supermarket, sugars, saturates, fibre, sodium';
   });
 
+  await step('an online product whose calories contradict its own protein, sugars and fat is not listed', async () => {
+    /* skipped when calories < half of (4 x protein + 4 x the smaller of sugars and carbs + 9 x fat) - 10 */
+    const p = (code, name, nut, extra) => Object.assign({ code: code, product_name: name, brands: 'Guardco', nutriments: nut }, extra || {});
+    const off = { products: [
+      p('9990000000109', 'Guardco Honest Wafer', { 'energy-kcal_100g': 480, proteins_100g: 6, carbohydrates_100g: 62, sugars_100g: 30, fat_100g: 23 }),
+      p('9990000000116', 'Guardco Four Calorie Crackers', { 'energy-kcal_100g': 4, proteins_100g: 8, carbohydrates_100g: 70, sugars_100g: 6, fat_100g: 15 }),          /* 0.5 x (32 + 24 + 135) - 10 = 85.5 */
+      p('9990000000123', 'Guardco Half Truth Spread', { 'energy-kcal_100g': 180, proteins_100g: 10, carbohydrates_100g: 60, sugars_100g: 20, fat_100g: 30 }),          /* 0.5 x (40 + 80 + 270) - 10 = 185 */
+      p('9990000000130', 'Guardco Just Enough Spread', { 'energy-kcal_100g': 186, proteins_100g: 10, carbohydrates_100g: 60, sugars_100g: 20, fat_100g: 30 }),         /* 186 is not below 185 */
+      p('9990000000147', 'Guardco Zero Cola', { 'energy-kcal_100g': 0, proteins_100g: 0, carbohydrates_100g: 0, sugars_100g: 0, fat_100g: 0 }),                        /* a real zero */
+      p('9990000000154', 'Guardco Sports Drink', { 'energy-kcal_100g': 25, proteins_100g: 0, carbohydrates_100g: 0, sugars_100g: 5.8, fat_100g: 0 }),                 /* sugars above carbs: only as much sugar counts as there are carbs, so nothing here contradicts 25 kcal */
+      p('9990000000161', 'Guardco Kilojoule Bar', { energy_100g: 84, proteins_100g: 10, carbohydrates_100g: 60, sugars_100g: 25, fat_100g: 12 }),                    /* 84 kJ = 20 kcal against 0.5 x 248 - 10 = 114 */
+      p('9990000000178', 'Guardco Cup Noodles', { 'energy-kcal_serving': 12, proteins_serving: 7, carbohydrates_serving: 40, sugars_serving: 3, fat_serving: 13 }, { serving_size: '1 cup (64 g)' }),   /* 0.5 x (28 + 12 + 117) - 10 = 68.5 */
+      p('9990000000185', 'Guardco Cup Soup', { 'energy-kcal_serving': 90, proteins_serving: 3, carbohydrates_serving: 15, sugars_serving: 4, fat_serving: 2 }, { serving_size: '1 cup (240 ml)' })
+    ] };
+    const stub = stubFetch(off, { foods: [] }), keep = ['Guardco Honest Wafer', 'Guardco Just Enough Spread', 'Guardco Zero Cola', 'Guardco Sports Drink', 'Guardco Cup Soup'], drop = ['Guardco Four Calorie Crackers', 'Guardco Half Truth Spread', 'Guardco Kilojoule Bar', 'Guardco Cup Noodles'];
+    try {
+      type('#ff-name', 'guardco'); await wait(250);
+      click('food-find');
+      const rows = await waitFor(() => { const r = resultRows(); return r.length >= keep.length && !/searching/i.test(txt(q('#food-res-head'))) ? r : null; }, 6000, 'the stubbed online results');
+      keep.forEach(n => expect(rowNamed(rows, n), n + ' is missing: ' + rows.map(r => r.name).join(' | ')));
+      drop.forEach(n => expect(!rowNamed(rows, n), n + ' is listed'));
+      expect(rows.length === keep.length && rows.every(r => r.src === 'online'), rows.length + ' rows: ' + rows.map(r => r.name + ' [' + r.src + ']').join(' | '));
+    } finally { stub.stop(); }
+    type('#ff-name', ''); await wait(200);
+    return keep.length + ' listed, ' + drop.length + ' skipped';
+  });
+
   await step('at 375 px wide nothing scrolls sideways, the pills scroll inside their strip and tap targets are at least 40 px', async () => {
     frame.style.width = '375px'; await wait(100);
     try {
@@ -1000,6 +1195,42 @@ async function suiteV2(){
     return 'listed, editable, counted';
   });
 
+  /* Keep this one after everything that uses the app's state: it loads the app afresh. The checks after it only read what is stored. */
+  await step('a bundle without an "alias" list still loads: barcodes and search work, alias barcodes simply find nothing', async () => {
+    if (!plan.codes.length) {   /* what is being served is such a bundle, and the whole suite just ran on it */
+      const rows = await search(PANCIT_CODE, r => r.length === 1 && r[0].name === PANCIT);
+      expect(txt(q('#food-res-head')) === BARCODE_HEAD, 'the barcode is headed "' + txt(q('#food-res-head')) + '"');
+      type('#ff-name', ''); await wait(200);
+      return 'the served bundle has no alias list and the suite ran on it; barcode found: ' + rows[0].name;
+    }
+    /* the same bundle with the list taken out, handed to a freshly loaded app in place of /food-db.json */
+    const stored = localStorage.getItem('tl.food'), errors = appErrors.length;
+    await openApp('food');
+    const w = win(), orig = w.fetch; let asked = 0, removed = 0;
+    w.fetch = function(input){
+      const u = String(input && input.url || input); if (!/food-db\.json(\?|#|$)/.test(u)) return orig.apply(w, arguments);
+      asked++;
+      return orig.apply(w, arguments).then(r => r.json()).then(j => { if (j && 'alias' in j) { delete j.alias; removed++; } return new w.Response(JSON.stringify(j), { status: 200, headers: { 'Content-Type': 'application/json' } }); });
+    };
+    try {
+      await wait(2500);   /* the app asks for the bundle 1.5 s after it starts */
+      const rows = await search(PANCIT_CODE, r => r.length === 1 && r[0].name === PANCIT);
+      expect(asked === 1 && removed === 1, 'the app asked for the bundle ' + asked + ' times and the list was removed ' + removed + ' times');
+      expect(txt(q('#food-res-head')) === BARCODE_HEAD && rows[0].kcal === 280, 'the barcode shows ' + rows[0].kcal + ' kcal, headed "' + txt(q('#food-res-head')) + '"');
+      for (const a of plan.codes.slice(0, 2)) {
+        type('#ff-name', 'x'); await waitFor(() => !visible(q('#food-res')), 2000, 'the list to hide');
+        type('#ff-name', a.code); await wait(500);
+        expect(!visible(q('#food-res')), 'the alias barcode ' + a.code + ' still lists: ' + names(resultRows()));
+      }
+      const found = await search('pancit canton', r => !!rowNamed(r, PANCIT));
+      expect(found.some(r => r.name === PANCIT && r.src === 'curated') && found.some(r => r.src === 'lib'), 'rows for "pancit canton": ' + found.map(r => r.name + ' [' + r.src + ']').join(' | '));
+      type('#ff-name', ''); await wait(200);
+      expect(appErrors.length === errors, appErrors.slice(errors).join(' | '));
+      expect(localStorage.getItem('tl.food') === stored, 'loading the app again changed the stored food data');
+    } finally { w.fetch = orig; }
+    return 'loaded without the list: own barcode found, ' + Math.min(2, plan.codes.length) + ' alias barcodes not found, search works';
+  });
+
   await step('no script errors were raised during the run', async () => {
     expect(!appErrors.length, appErrors.join(' | '));
     return 'none';
@@ -1029,10 +1260,208 @@ async function suiteV2(){
   });
 }
 
+/* ---------- suite: ranking (the order of search results on a real bundle; run with --db-file PATH) ---------- */
+const RANK_MIN_ROWS = 20000;     /* below this the served bundle is a fixture or the old USDA-only build, and the suite says nothing */
+const EXACT_SAMPLE = 1000;       /* about how many product names are typed in full */
+const EXACT_MAX_FAIL = 0.01;     /* share of those that may fail; measured 0.2 to 0.3 % when the suite was written (a library dish that ends or begins with the words leads instead), 1.6 % with a ranking that lets near-equal names tie */
+/* Everyday foods the reference tables (library, curated list, USDA) know by name: a crowd-sourced product that merely carries the same name must not lead. */
+const GENERIC = ['rice', 'egg', 'eggs', 'chicken', 'chicken breast', 'banana', 'milk', 'bread', 'oats', 'peanut butter', 'coffee', 'yogurt', 'cheese', 'tuna', 'pasta', 'spaghetti', 'apple', 'potato', 'beef', 'salmon',
+  'butter', 'olive oil', 'sugar', 'tomato', 'corn', 'white rice', 'fried rice', 'brown rice', 'fried egg', 'boiled egg', 'pork', 'pork belly', 'bacon', 'ham', 'hotdog', 'water', 'beer', 'mango', 'avocado', 'sweet potato',
+  'tofu', 'shrimp', 'oatmeal', 'orange', 'onion', 'garlic', 'carrot', 'broccoli', 'honey', 'almonds', 'peanuts', 'chocolate', 'ice cream', 'pizza', 'burger', 'fries', 'kimchi', 'ramen', 'soy sauce', 'almond milk'];
+/* Brand and product queries with the pattern that says "this row is that brand's" (tested against the row's name and the brand shown under it). A brand the served bundle and the library do not carry at all is left out of the count. */
+const BRANDS = [['milo', 'milo'], ['bear brand', 'bear brand'], ['skyflakes', 'sky ?flakes'], ['lucky me', 'lucky me'], ['century tuna', 'century'], ['gardenia', 'gardenia'], ['oreo', 'oreo'], ['coke zero', 'coke zero|coca.cola zero'],
+  ['nescafe', 'nescaf'], ['kitkat', 'kit ?kat'], ['nutella', 'nutella'], ['pringles', 'pringles'], ['shin ramyun', 'shin ramyun'], ['pocky', 'pocky'], ['yakult', 'yakult'], ['del monte', 'del ?monte'], ['magnolia', 'magnolia'],
+  ['san miguel', 'san mig'], ['quaker oats', 'quaker'], ['nissin cup noodles', 'nissin'], ['coca cola', 'coca.?cola|coke'], ['sprite', 'sprite'], ['gatorade', 'gatorade'], ['kopiko', 'kopiko'], ['selecta', 'selecta'], ['chippy', 'chippy'],
+  ['oishi', 'oishi'], ['rebisco', 'rebisco'], ['snickers', 'snickers'], ['toblerone', 'toblerone'], ['cadbury', 'cadbury'], ['doritos', 'doritos'], ['spam', 'spam'], ['argentina', 'argentina'], ['555', '555'], ['knorr', 'knorr'],
+  ['indomie', 'indomie'], ['samyang', 'samyang'], ['skippy', 'skippy'], ['red bull', 'red bull'], ['cheerios', 'cheerios'], ['heineken', 'heineken']];
+/* Singular typed, the reference row is named in the plural, and the other way round. */
+const PLURALS = [['tomato', 'tomatoes'], ['carrot', 'carrots'], ['onion', 'onions'], ['mushroom', 'mushrooms'], ['potatoes', 'potato'], ['mangoes', 'mango']];
+
+async function suiteRanking(){
+  const db = await loadJson('../food-db.json').catch(() => null), n = db && Array.isArray(db.items) ? db.items.length : 0;
+  if (!db || db.version !== 2 || !Array.isArray(db.fields) || n < RANK_MIN_ROWS) {
+    skipped = 'the served food-db.json has ' + n + ' rows' + (db && db.version !== 2 ? ' (version ' + db.version + ')' : '') + '; the ranking checks need a real version 2 bundle of at least ' + RANK_MIN_ROWS + ' rows: run with --db-file PATH';
+    return;
+  }
+  seedStorage({ tab: 'food' });   /* no favourites and nothing logged: your own foods would rank first */
+  const ix = fieldIx(db), lib = ((await loadJson('../food-library.json').catch(() => null)) || {}).items || [];
+  const srcOf = r => Number(r[ix.source]), nameOf = r => String(r[ix.name] || ''), akaOf = r => Array.isArray(r[ix.aka]) ? r[ix.aka].map(String) : [];
+  const brandOf = r => { const b = r[ix.brand]; return typeof b === 'number' ? (b >= 0 && db.brands && db.brands[b] != null ? String(db.brands[b]) : '') : typeof b === 'string' ? b : ''; };
+  const bare = s => String(s).replace(/\([^)]*\)/g, ' ');
+  const count = [0, 0, 0, 0]; db.items.forEach(r => { const s = srcOf(r); if (s >= 0 && s <= 3) count[s]++; });
+  const label = r => r ? r.name + (r.cat ? ' {' + r.cat + '}' : '') + ' [' + r.src + ']' : 'no rows';
+  const some = (list, k) => list.slice(0, k || 8).join('; ') + (list.length > (k || 8) ? '; and ' + (list.length - (k || 8)) + ' more' : '');
+  const plains = db.items.map(r => plain(nameOf(r))), offNames = new Map();   /* the search key of every row, and how many Open Food Facts rows carry each */
+  db.items.forEach((r, i) => { if (srcOf(r) === 3) offNames.set(plains[i], (offNames.get(plains[i]) || 0) + 1); });
+
+  const booted = await step('the app boots with the served bundle and searches it', async () => {
+    await openApp('food');
+    await search('banana raw', r => r.some(x => x.src === 'usda' || x.src === 'curated' || x.src === 'off'), 30000);
+    expect(!appErrors.length, appErrors.join(' | '));
+    return n + ' rows (curated ' + count[0] + ', USDA ' + (count[1] + count[2]) + ', Open Food Facts ' + count[3] + '), built "' + (db.built || '') + '", ' + lib.length + ' library items' + (Array.isArray(db.alias) ? ', ' + db.alias.length + ' alias entries' : ', no alias list');
+  }, { show: true });
+  if (!booted) { check('remaining checks were skipped because the app did not boot', false, ''); return; }
+
+  await step('no Open Food Facts product is first for ' + GENERIC.length + ' everyday foods', async () => {
+    const bad = []; let off8 = 0, slots = 0;
+    for (const x of GENERIC) {
+      const rows = await typed(x);
+      if (!rows.length || rows[0].src === 'off') bad.push(x + ' -> ' + label(rows[0]));
+      rows.slice(0, 8).forEach(r => { slots++; if (r.src === 'off') off8++; });
+    }
+    expect(!bad.length, bad.length + ' of ' + GENERIC.length + ': ' + some(bad));
+    return 'product rows first: 0 of ' + GENERIC.length + '; product rows in the top 8: ' + off8 + ' of ' + slots;
+  }, { show: true });
+
+  /* The curated rows of the bundle: typed by name, or by one of their other names, the list leads with a hand-written row (the curated one, or a library dish known by that name).
+     A USDA row may lead only when its whole name is what was typed ("banana raw" for "Banana, raw", "sushi" for "Sushi"); a product row never leads. */
+  const curated = db.items.filter(r => srcOf(r) === 0);
+  const curatedCheck = async (what, queries) => {
+    const bad = [], by = { curated: 0, lib: 0, usda: 0 }; let done = 0;
+    for (const x of queries) {
+      const rows = await typed(x), f = rows[0]; done++;
+      if (f && (f.src === 'curated' || f.src === 'lib')) by[f.src]++;
+      else if (f && f.src === 'usda' && plain(f.name) === plain(x)) by.usda++;
+      else bad.push(x + ' -> ' + label(f));
+    }
+    expect(done >= 10, 'only ' + done + ' ' + what + ' to type: the served bundle has ' + curated.length + ' curated rows');
+    expect(!bad.length, bad.length + ' of ' + done + ': ' + some(bad));
+    return done + ' ' + what + ' typed: a curated row first ' + by.curated + ', a library row ' + by.lib + ', a USDA row named exactly so ' + by.usda;
+  };
+  const uniq = list => Array.from(new Set(list.map(s => clean(s).toLowerCase()).filter(s => s.length >= 2 && /\p{L}/u.test(s))));
+  const curNames = uniq(curated.reduce((a, r) => a.concat([nameOf(r), bare(nameOf(r))]), []));
+  const curOther = uniq(curated.reduce((a, r) => a.concat(akaOf(r)), [])).filter(x => curNames.indexOf(x) < 0);
+  await step('typing the name of a curated row leads with a curated or library row', () => curatedCheck('names of curated rows', curNames), { show: true });
+  await step('typing another name of a curated row leads with a curated or library row', () => curatedCheck('other names of curated rows', curOther), { show: true });
+
+  await step('brand and product queries lead with a product of that brand', async () => {
+    const hay = db.items.map(r => nameOf(r) + ' ' + brandOf(r)).concat(lib.map(it => String(it.name || '') + ' ' + String(it.cat || '')));
+    const bad = [], absent = []; let done = 0;
+    for (const b of BRANDS) {
+      const rx = new RegExp(b[1], 'i');
+      if (!hay.some(h => rx.test(h))) { absent.push(b[0]); continue; }
+      const rows = await typed(b[0]), f = rows[0]; done++;
+      if (!f || !rx.test(f.name + ' ' + f.cat)) bad.push(b[0] + ' -> ' + label(f));
+    }
+    expect(done >= 20, 'only ' + done + ' of the ' + BRANDS.length + ' brands are in the served bundle or the library; not carried: ' + absent.join(', '));
+    expect(!bad.length, bad.length + ' of ' + done + ': ' + some(bad));
+    return done + ' brand queries, all led by that brand' + (absent.length ? '; not in the served bundle: ' + absent.join(', ') : '');
+  }, { show: true });
+
+  await step('typing the exact name of a product lists that product first, unless a curated, library or USDA row has that name', async () => {
+    /* distinct names of Open Food Facts rows, one to three words, plain ASCII, in bundle order; every k-th is typed in lower case */
+    const seenNames = new Set(), all = [];
+    db.items.forEach((r, i) => { if (srcOf(r) !== 3) return; const raw = nameOf(r); if (/[^\x20-\x7e]/.test(raw)) return; const p = plains[i]; if (p.length < 3 || p.split(' ').length > 3 || !/[a-z]/.test(p) || seenNames.has(p)) return; seenNames.add(p); all.push(p); });
+    expect(all.length >= 200, 'only ' + all.length + ' product names to choose from');
+    const k = Math.max(1, Math.ceil(all.length / EXACT_SAMPLE)), sample = all.filter((x, i) => i % k === 0);
+    /* a reference row "has that name": its whole name, its name without the bracketed part, one of the comma-separated parts of a USDA-style name, or one of its other names; plural endings aside */
+    const ref = new Set(), addRef = (name, aka) => { const b = bare(name); [name, b].concat(b.split(',')).concat(aka || []).forEach(s => { const p = stemAll(plain(s)); if (p) ref.add(p); }); };
+    db.items.forEach(r => { const s = srcOf(r); if (s !== 3) addRef(nameOf(r), s === 0 ? akaOf(r) : []); });
+    lib.forEach(it => addRef(String(it.name || ''), Array.isArray(it.aka) ? it.aka : []));
+    let first = 0, excused = 0; const fail = [];
+    for (const p of sample) {
+      const rows = await typed(p), f = rows[0];
+      if (f && f.src === 'off' && plain(f.name) === p) first++;
+      else if (ref.has(stemAll(p))) excused++;
+      else fail.push(p + ' -> ' + label(f));
+    }
+    const pct = v => (Math.round(v * 10000) / 100) + ' %', rate = fail.length / sample.length;
+    const line = sample.length + ' of ' + all.length + ' names typed: the product first ' + first + ' (' + pct(first / sample.length) + '), a reference row has the name ' + excused + ', failures ' + fail.length + ' = ' + pct(rate) + ' (allowed: ' + pct(EXACT_MAX_FAIL) + ')';
+    expect(rate <= EXACT_MAX_FAIL, line + ': ' + some(fail, 12));
+    return line + (fail.length ? ': ' + some(fail, 6) : '');
+  }, { show: true });
+
+  await step('singular and plural find each other: "tomato" finds "Tomatoes, raw", "potatoes" finds "Potato"', async () => {
+    const firstPart = s => plain(bare(s).split(',')[0]);
+    const refRows = new Set(db.items.filter(r => srcOf(r) !== 3).map(r => firstPart(nameOf(r))).concat(lib.map(it => firstPart(String(it.name || '')))));
+    const bad = []; let done = 0;
+    for (const pair of PLURALS) {
+      if (!refRows.has(pair[1])) continue;   /* no reference row is named so in this bundle */
+      const rows = await typed(pair[0]); done++;
+      if (!rows.length || rows[0].src === 'off' || !rows.slice(0, 3).some(r => r.src !== 'off' && firstPart(r.name) === pair[1])) bad.push(pair[0] + ' -> ' + rows.slice(0, 3).map(label).join(' | '));
+    }
+    expect(done >= 4, 'only ' + done + ' of the ' + PLURALS.length + ' pairs could be tried on this bundle');
+    expect(!bad.length, bad.length + ' of ' + done + ': ' + some(bad));
+    return done + ' pairs: typed one way, a reference row named the other way is in the first three and no product leads';
+  });
+
+  await step('accents are folded: a product whose name has an accented letter is found by typing it without', async () => {
+    /* names of two or more words such as "Jalapeño Houmous", typed as "jalapeno houmous": a row with the accented spelling must be in the list */
+    const picks = [], seenP = new Set();
+    for (let i = 0; i < db.items.length && picks.length < 12; i++) {
+      const r = db.items[i]; if (srcOf(r) !== 3) continue;
+      const raw = nameOf(r), p = plains[i]; if (!/[À-ɏ]/.test(raw) || /[^\x00-\x7f]/.test(p) || p.split(' ').length < 2 || p.length < 8 || seenP.has(p) || offNames.get(p) > 6) continue;
+      seenP.add(p); picks.push({ p: p, raw: clean(raw) });
+    }
+    if (picks.length < 3) return 'only ' + picks.length + ' such names in the served bundle: nothing to try';
+    const bad = [];
+    for (const x of picks) { const rows = await typed(x.p); if (!rows.some(r => plain(r.name) === x.p && /[À-ɏ]/.test(r.name))) bad.push('"' + x.p + '" does not list "' + x.raw + '" (first: ' + label(rows[0]) + ')'); }
+    expect(!bad.length, bad.length + ' of ' + picks.length + ': ' + some(bad));
+    return picks.length + ' names, for example "' + picks[0].p + '" finds "' + picks[0].raw + '"';
+  });
+
+  await step('digits: a short number such as "555" lists the foods that carry it, a longer number waits to be a barcode', async () => {
+    const words = new Map();   /* numbers of two to four digits that stand as a word in a name */
+    plains.forEach(p => { (p.match(/(^| )\d{2,4}(?= |$)/g) || []).forEach(w => { const d = w.trim(); words.set(d, (words.get(d) || 0) + 1); }); });
+    const pick = ['555', '100'].filter(d => words.has(d)).concat(Array.from(words.keys())).filter((d, i, l) => l.indexOf(d) === i).slice(0, 3);
+    expect(pick.length > 0, 'no name in the served bundle carries a number of two to four digits');
+    for (const d of pick) {
+      const rows = await typed(d);
+      expect(rows.length > 0, '"' + d + '" lists nothing although ' + words.get(d) + ' names carry it');
+      expect(rows.some(r => new RegExp('(^|[^0-9])' + d + '([^0-9]|$)').test(r.name + ' ' + r.cat)), '"' + d + '" lists: ' + names(rows));
+    }
+    for (const text of ['48077', '480777027']) { const rows = await typed(text); expect(!rows.length, '"' + text + '" lists: ' + names(rows)); }
+    return pick.map(d => '"' + d + '"').join(', ') + ' list foods; 48077 and 480777027 list nothing';
+  });
+
+  /* The next two only have something to check on a bundle built with the newer import rules. */
+  const groups = twinGroups(db), TWINS = 'rows of one name and brand are all listed, in the fixed order, each with its calories per 100 g';
+  if (!groups.length) notRun(TWINS, 'the served bundle has no two Open Food Facts rows with the same name and brand');
+  else await step(TWINS, async () => {
+    /* The name is typed; the rows of the group tie, so they must come out with the Philippine barcode (480...) first, then the rows tagged PH, then the rest, each in bundle order.
+       When the list is not full every row of the group must be there; a full list (12 rows) may cut the group short or, when reference rows fill it, leave it out. */
+    const bad = []; let done = 0, tried = 0;
+    for (const g of groups.filter(v => v.length <= 6 && v.every(i => Number(db.items[i][ix.per]) !== 1))) {
+      if (tried >= 40) break;
+      const p = plains[g[0]], brand = clean(brandOf(db.items[g[0]])); if (!brand || p.length < 3 || !/[a-z]/.test(p)) continue;
+      tried++;
+      const rows = await typed(p), mine = rows.filter(r => r.src === 'off' && plain(r.name) === p && r.cat === brand && r.per);
+      const want = tieOrder(db, g).map(i => Math.round(Number(db.items[i][ix.kcal]) || 0)), got = mine.map(r => num(r.per.split('kcal')[0])), full = rows.length >= 12;
+      if (full && got.length < 2) continue;
+      done++;
+      if ((!full && got.length !== want.length) || got.join() !== want.slice(0, got.length).join()) bad.push(p + ' {' + brand + '}: listed ' + (got.join('/') || 'none') + ' kcal/100 g, the bundle has ' + want.join('/') + ' in that order');
+    }
+    expect(done > 0, 'none of the ' + tried + ' groups tried was listed');
+    expect(!bad.length, bad.length + ' of ' + done + ': ' + some(bad, 5));
+    return done + ' groups checked (' + groups.length + ' in the bundle)';
+  }, { show: true });
+
+  const plan = aliasPlan(db), ALIASES = 'barcodes from the "alias" list find their row offline, headed "Same product, another pack"';
+  if (!plan.codes.length) notRun(ALIASES, 'the served bundle has no "alias" list');
+  else await step(ALIASES, async () => {
+    const before = lookupRequests().length, k = Math.max(1, Math.floor(plan.codes.length / 20)), pick = plan.codes.filter((a, i) => i % k === 0).slice(0, 20).concat(plan.codes.filter(a => a.digits < 8).slice(0, 3));
+    for (const a of pick) {
+      const rows = await typed(a.code);
+      expect(rows.length === 1 && rows[0].name === a.name, a.code + ' should find "' + a.name + '", the list shows: ' + names(rows));
+      expect(txt(q('#food-res-head')) === ALIAS_HEAD, a.code + ' is headed "' + txt(q('#food-res-head')) + '"');
+    }
+    for (const o of plan.own.slice(0, 5)) { const rows = await typed(o.code); expect(rows.length === 1 && rows[0].name === o.name && txt(q('#food-res-head')) === BARCODE_HEAD, 'the own barcode ' + o.code + ' of "' + o.name + '" shows: ' + names(rows) + ', headed "' + txt(q('#food-res-head')) + '"'); }
+    expect(lookupRequests().length === before, 'requests to the lookup services: ' + lookupRequests().slice(before).join(', '));
+    return pick.length + ' of ' + plan.codes.length + ' alias barcodes tried';
+  }, { show: true });
+
+  await step('no script errors were raised during the run', async () => {
+    type('#ff-name', ''); await wait(200);
+    expect(!appErrors.length, appErrors.join(' | '));
+    return 'none';
+  });
+}
+
 /* ---------- suites: pick one with ?suite=NAME ---------- */
 const SUITES = {
   baseline: { about: 'The app as it was before the food-database change: stored data, search, logging, editing, deleting, settings.', run: suiteBaseline },
-  v2: { about: 'The food-database upgrade against a version 2 bundle: filter pills, pictures and icons, brand search, offline barcodes, extra nutrients, sodium or salt, schema marker, backups.', run: suiteV2 }
+  v2: { about: 'The food-database upgrade against a version 2 bundle: filter pills, pictures and icons, brand search, offline barcodes and alias barcodes, same-named rows, extra nutrients, sodium or salt, schema marker, backups.', run: suiteV2 },
+  ranking: { about: 'The order of search results on a real bundle (--db-file): reference rows before same-named products, curated rows, brands, exact product names, plurals, accents, digits, same-named rows, alias barcodes.', run: suiteRanking }
 };
 
 async function main(){

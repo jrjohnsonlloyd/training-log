@@ -62,7 +62,7 @@ A single static page (`index.html`) with no framework and no build step, a servi
 
 Strength progression uses the Epley estimate: 1RM ≈ weight × (1 + reps ÷ 30). Streaks count consecutive weeks (Monday to Sunday) at or above the weekly target.
 
-To ship a change: edit `index.html`, bump `CACHE` in `sw.js` so installed copies refresh, push to `main`.
+To ship a change: edit `index.html`, bump `CACHE` in `sw.js` so installed copies refresh, push to `main`. The bump is also required whenever `food-db.json` changes: that file is cached together with the app, so a new food list only reaches an installed phone when `CACHE` changes.
 
 ## Food data pipeline
 
@@ -88,6 +88,7 @@ python -m unittest discover -s tests -p "test_*.py"
 python tests/run_ui_smoke.py
 python tests/run_ui_smoke.py --db-file tests/fixtures/food-db.v1.sample.json
 python tests/run_ui_smoke.py --suite v2
+python tests/run_ui_smoke.py --suite ranking --db-file "<a real food-db.json with packaged products>"
 ```
 
-The first checks the import rules and the database migration. The others drive the app itself in headless Chrome: the second and third prove that food data saved by the previous version still loads and is left untouched (with the current file and with an old-format one), the fourth checks filters, photos, barcode lookup and the sodium/salt toggle.
+The first checks the import rules and the database migration. The others drive the app itself in headless Chrome: the second and third prove that food data saved by the previous version still loads and is left untouched (with the current file and with an old-format one), the fourth checks filters, photos, barcode lookup and the sodium/salt toggle. The last checks the order of search results on a large real food list (plain foods before same-named products, curated entries first, brands, plurals, accents); it skips itself when the list has fewer than 20,000 rows.
