@@ -978,7 +978,8 @@ function recentFoods(){ /* what you logged before, newest first, one row per nam
   recentMemo = { key: key, list: out }; return out;
 }
 const ALIAS_BONUS = 3; /* a curated bundle row found through one of its other names typed in full ("carne norte", "kanin") */
-const OFF_ABROAD = 0.5; /* taken off every packaged product from another market (neither tagged Philippines nor with a 480 barcode), so a Philippine product that matches as well comes first ("granola", "nescafe", "quaker"). All such rows lose the same, so their own order stays as it was: "Cheerios" by General Mills before "Cheerios minis", the most scanned "Nutella" first. */
+const OFF_ABROAD_REF = 2; /* taken off a packaged product from another market a second time when the words typed are an everyday food the reference tables know ("ketchup", "condensed milk"): a US or Asian product named just "Ketchup" then comes after the Philippine banana ketchups (its name starts with the word, worth 2.5 more than "Banana Ketchup"), as it did before the US products came in. A brand search with no reference row ("milo", "buldak") is not touched. */
+const OFF_ABROAD = 1; /* taken off every packaged product from another market (neither tagged Philippines nor with a 480 barcode), so a Philippine product that matches as well comes first ("granola", "nescafe", "quaker", "milo", "kopiko"). It was 0.5 until the Japanese, Korean and other Asian products came in; with them, a half point let three ready-to-drink Milos from Malaysia push the Philippine Milo powder out of the first six. All such rows lose the same, so their own order stays as it was: "Cheerios" by General Mills before "Cheerios minis", the most scanned "Nutella" first. */
 const ALIAS_NAMED = 7; /* ...and when its own name already holds every word ("steak" for "Beef steak, cooked", "potatoes" for "Boiled potato"), its name bonus is raised to the 7 of a whole name typed */
 /* n is ' ' + name + ' ', T the typed word with its padded forms. In the name: whole word beats start of a word beats inside a word, and a word also counts as whole when the name has it with -s or -es ("egg" in "Eggs", "tomato" in "Tomatoes, raw"); then the brand and other names for the food; a match only on the category counts least. One scan of the name settles the usual case of no match. */
 function termScore(n, name, aka, cat, T){
@@ -1048,11 +1049,11 @@ function foodSearch(q, limit, cat){
       if (s === 3 && ord[i] === 2) sc = Math.max(0, sc - OFF_ABROAD);
       /* which rows make "ref": a curated row named as typed, known by that other name (which also earns ALIAS_BONUS when its own name does not say it, else raises its name bonus to ALIAS_NAMED) or beginning with the words; a USDA row whose name or comma part is the words. A USDA row that only ends with them ("Egg sandwich on wheat bread", "Non-dairy milk") is no reference. */
       if (s !== 3) { const byAlias = s === 0 && alt.has(i) && alias(alt.get(i)); if (named > 0) { if (s === 0 || !tailOnly) ref = true; } else if (byAlias || (s === 0 && starts(pad[i]))) ref = true; if (byAlias) sc += viaAlias(n) ? (named ? 0 : ALIAS_BONUS) : Math.max(0, ALIAS_NAMED - named); }
-      scored.push({ s: sc, row: items[i], n: n, o: ord[i] * 1e7 + i, e: s === 3 ? named : 0 });
+      scored.push({ s: sc, row: items[i], n: n, o: ord[i] * 1e7 + i, e: s === 3 ? named : 0, f: s === 3 && ord[i] === 2 });
     }
   }
   /* A food the reference tables know by this name: a product label gets no extra credit for carrying the same words, so "Egg" by a supermarket brand no longer outranks "Boiled egg" and "Egg, whole, raw". With no such reference row (Milo, Nutella, Coke Zero) the product named as typed keeps its bonus and leads. */
-  if (ref) for (let i = 0; i < scored.length; i++) { const x = scored[i]; if (x.e > 0) x.s = Math.max(0, x.s - x.e); }
+  if (ref) for (let i = 0; i < scored.length; i++) { const x = scored[i]; if (x.e > 0) x.s = Math.max(0, x.s - x.e); if (x.f) x.s = Math.max(0, x.s - OFF_ABROAD_REF); }
   /* equal score: the shorter name, then the alphabet, then your own and library foods, then the bundle rows in their fixed order (Philippine barcode, Philippine tag, the rest; inside each the order of the bundle) */
   scored.sort((x, y) => y.s - x.s || x.n.length - y.n.length || (x.n < y.n ? -1 : x.n > y.n ? 1 : x.o - y.o));
   /* Every bundle row is listed: the importer only keeps two rows of one name and brand when they are different foods. Your own and library foods are listed once per name and calories. */

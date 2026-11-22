@@ -52,6 +52,8 @@ OFF_DEDUPE = os.path.join(FIXTURES, "off_dedupe.csv")
 OFF_GUARD = os.path.join(FIXTURES, "off_alias_guard.csv")
 OFF_SERVING = os.path.join(FIXTURES, "off_serving.csv")
 OFF_DOUBT = os.path.join(FIXTURES, "off_doubt.csv")
+OFF_ASIA = os.path.join(FIXTURES, "off_asia.csv")
+OFF_ASIA2 = os.path.join(FIXTURES, "off_asia2.csv")
 USDA_FLAT = os.path.join(FIXTURES, "sample_usda.csv")
 USDA_FOLDER = os.path.join(FIXTURES, "usda_fdc_mini")
 CURATED = os.path.join(FIXTURES, "local_ph_curated.json")
@@ -68,7 +70,7 @@ except Exception as exc:   # not written yet, or broken: schema tests then fail 
 
 BUILT = "2026-11-22"
 THUMB_BASE = "https://images.openfoodfacts.org/images/products/"
-REGION_ORDER = ("PH", "US", "UK", "JP", "KR")
+REGION_ORDER = ("PH", "US", "UK", "JP", "KR", "AS")
 MACROS = ("protein_g", "carbs_g", "sugars_g", "fat_g", "saturates_g", "fibre_g")
 
 BUNDLE_FIELDS = ["name", "brand", "group", "category", "regions", "barcode", "thumb", "per",
@@ -481,6 +483,39 @@ def doubt_import():
     return cached("doubt", build)
 
 
+def asia_import():
+    """off_asia.csv alone (the seven neighbouring markets), imported twice and exported with the default quotas."""
+    def build():
+        d = new_dir("asia")
+        db = os.path.join(d, "foods.sqlite")
+        bundle = os.path.join(d, "food-db.json")
+        args = ["--db", db, "--off-path", OFF_ASIA, "--export-app", bundle, "--built", BUILT, "--quiet"]
+        first = import_ok(args)
+        rows1, doc1 = snapshot(db), read_json(bundle)
+        second = import_ok(args)
+        first.update(db=db, bundle=bundle, doc=doc1, rows1=rows1, rows2=snapshot(db), doc2=read_json(bundle),
+                     summary2=second["summary"])
+        return first
+    return cached("asia", build)
+
+
+def asia2_import():
+    """off_asia2.csv with the curated fixture (step 5 rules), imported twice and exported with the default quotas."""
+    def build():
+        d = new_dir("asia2")
+        db = os.path.join(d, "foods.sqlite")
+        bundle = os.path.join(d, "food-db.json")
+        args = ["--db", db, "--curated-json", CURATED, "--off-path", OFF_ASIA2, "--export-app", bundle,
+                "--built", BUILT, "--quiet"]
+        first = import_ok(args)
+        rows1, doc1 = snapshot(db), read_json(bundle)
+        second = import_ok(args)
+        first.update(db=db, bundle=bundle, doc=doc1, rows1=rows1, rows2=snapshot(db), doc2=read_json(bundle),
+                     summary2=second["summary"])
+        return first
+    return cached("asia2", build)
+
+
 def dedupe_import():
     """off_dedupe.csv with the flat USDA file (which holds the Skippy twin), exported."""
     def build():
@@ -624,7 +659,7 @@ class FixtureFileTests(unittest.TestCase):
 
     def test_rule_fixtures_have_their_row_counts_and_complete_rows(self):
         for path, count in ((OFF_RULES, 36), (OFF_DEDUPE, 15), (OFF_GUARD, 1), (OFF_SERVING, 18),
-                            (OFF_DOUBT, 23)):
+                            (OFF_DOUBT, 23), (OFF_ASIA, 15), (OFF_ASIA2, 30)):
             with self.subTest(file=os.path.basename(path)):
                 with open(path, encoding="utf-8", newline="") as f:
                     header = f.readline().rstrip("\r\n").split("\t")
@@ -643,7 +678,7 @@ class FixtureFileTests(unittest.TestCase):
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
         self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8", "replace"))
         for name in ("sample_off.csv", "off_rules.csv", "off_dedupe.csv", "off_alias_guard.csv", "off_serving.csv",
-                     "off_doubt.csv"):
+                     "off_doubt.csv", "off_asia.csv", "off_asia2.csv"):
             with self.subTest(file=name):
                 with open(os.path.join(out, name), "rb") as made, open(os.path.join(FIXTURES, name), "rb") as kept:
                     # line endings may differ after a git checkout on Windows
@@ -2484,7 +2519,11 @@ class ForeignTagsTests(RulesCase):
 class ForeignTagsMainImportTests(FullImportCase):
     def test_one_foreign_tag(self):
         self.assertEqual(self.off_row("4901515110504")["foreign_tags"], 1)        # Kikkoman: france
-        self.assertEqual(self.off_row("8996001600269")["foreign_tags"], 1)        # Indomie: indonesia
+
+    def test_a_neighbouring_market_is_not_foreign(self):
+        # Indomie is tagged US and Indonesia; Indonesia is one of the seven "AS" markets
+        self.assertEqual(self.off_row("8996001600269")["foreign_tags"], 0)
+        self.assertEqual(self.off_row("8996001600269")["region_tags"], "US,AS")
 
     def test_two_foreign_tags(self):
         self.assertEqual(self.off_row("5000168001142")["foreign_tags"], 2)        # McVitie's: ireland, france
@@ -4711,6 +4750,710 @@ class Version3UpgradeTests(SchemaCase):
         conn.commit()
         self.assertEqual(food_schema.migrate(conn), 4)
         self.assertEqual(sorted(column_names(conn)), sorted(V4_COLUMNS))
+
+
+# --------------------------------------------------------------------------------------
+# the seven neighbouring markets (region "AS"), off_asia.csv; AS1..AS15 as in make_off_fixtures.py
+# --------------------------------------------------------------------------------------
+
+class AsiaCase(DbCase):
+    @classmethod
+    def load(cls):
+        return asia_import()
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.doc = cls.imp["doc"]
+
+    @staticmethod
+    def code(n, prefix):
+        return ean(prefix, 9000 + n)
+
+    def pools(self):
+        """{pool: [names]} read from the export summary's pool sizes and the bundle order PH, US, UK, JP, KR, AS."""
+        sizes = self.summary["export"]["off_pools"]
+        fields = self.doc["fields"]
+        off = [row[0] for row in self.doc["items"] if row[fields.index("source")] == 3]
+        out, at = {}, 0
+        for pool in ("PH", "US", "UK", "JP", "KR", "AS"):
+            out[pool] = off[at:at + sizes.get(pool, 0)]
+            at += sizes.get(pool, 0)
+        self.assertEqual(at, len(off))
+        return out
+
+
+class AsiaImportTests(AsiaCase):
+    def test_the_seven_market_tags_and_local_script_tags_become_as(self):
+        for n, prefix in ((1, "885"), (2, "761"), (3, "490"), (10, "885"), (11, "471"), (12, "300"), (13, "690"),
+                          (15, "893")):
+            with self.subTest(row="AS%d" % n):
+                self.assertEqual(self.off_row(self.code(n, prefix))["region_tags"], "AS")
+
+    def test_as_comes_after_the_five_markets(self):
+        self.assertEqual(self.off_row(self.code(4, "880"))["region_tags"], "KR,AS")
+        self.assertEqual(self.off_row(self.code(7, "001"))["region_tags"], "US,AS")
+        self.assertEqual(self.off_row(self.code(14, "500"))["region_tags"], "UK,AS")
+
+    def test_a_philippine_row_is_never_also_as(self):
+        self.assertEqual(self.off_row(self.code(5, "480"))["region_tags"], "PH")
+
+    def test_a_philippine_barcode_tagged_only_vietnam_is_not_imported(self):
+        self.absent(name="Garlic Corn Snack", codes=(self.code(6, "480"),))
+        self.assertEqual(self.summary["filtered_region"], 1)
+
+    def test_foreign_tags_do_not_count_the_seven_markets(self):
+        self.assertEqual(self.off_row(self.code(2, "761"))["foreign_tags"], 0)
+        self.assertEqual(self.off_row(self.code(12, "300"))["foreign_tags"], 1)     # France
+
+    def test_an_as_only_twin_gives_a_us_row_nothing_but_its_barcode(self):
+        row = self.off_row(self.code(8, "001"))
+        self.assertEqual(row["region_tags"], "US")
+        self.assertEqual(row["popularity"], 2)
+        self.near(row["calories_kcal"], 350)
+        self.assertIsNone(row["sugars_g"])
+        self.assertEqual(row["thumbnail_url"], make_photo(self.code(8, "001")))
+        self.assertEqual(json.loads(row["alt_barcodes"]), [[self.code(9, "888"), 90, "AS"]])
+        self.assertEqual(self.n_rows("barcode = ? OR source_ref = ?", (self.code(9, "888"),) * 2), 0)
+
+    def test_the_as_twin_barcode_finds_the_us_row_in_the_bundle(self):
+        fields = self.doc["fields"]
+        index = [i for i, row in enumerate(self.doc["items"]) if row[fields.index("name")] == "Wheat Thins Original"]
+        self.assertEqual(len(index), 1)
+        self.assertIn([index[0], int(self.code(9, "888"))], self.doc["alias"])
+
+    def test_a_second_import_changes_nothing(self):
+        self.assertEqual(self.imp["rows1"], self.imp["rows2"])
+        self.assertEqual(self.imp["doc"], self.imp["doc2"])
+
+
+class AsiaPoolTests(AsiaCase):
+    def test_each_row_lands_in_its_pool(self):
+        self.assertEqual(self.pools(), {
+            "PH": ["Cheese Potato Crisps"],                                     # AS5
+            "US": ["Peanut Butter Cups", "Wheat Thins Original"],               # AS7 (US barcode), AS8
+            "UK": ["Digestive Thins"],                                          # AS14 (British barcode)
+            "JP": ["Matcha Biscuit Sticks"],                                    # AS3 (Japanese barcode)
+            "KR": ["Honey Butter Chips"],                                       # AS4 (Korean barcode)
+            "AS": ["Tom Yum Shrimp Noodles", "Chocolate Malt Drink Powder", "Premium Oyster Sauce",
+                   "Green Curry Paste", "Pineapple Cake", "Instant Pho Beef Flavour"],   # by scans
+        })
+
+    def test_a_row_with_a_foreign_tag_and_no_market_barcode_is_left_out(self):
+        names = [row[0] for row in self.doc["items"]]
+        self.assertNotIn("Coconut Cream Dessert", names)                        # AS12
+
+    def test_the_bundle_writes_the_as_region(self):
+        fields = self.doc["fields"]
+        regions = {row[0]: row[fields.index("regions")] for row in self.doc["items"]}
+        self.assertEqual(regions["Tom Yum Shrimp Noodles"], "AS")
+        self.assertEqual(regions["Peanut Butter Cups"], "US,AS")
+        self.assertEqual(regions["Cheese Potato Crisps"], "PH")
+
+    def test_a_zero_quota_leaves_the_asia_pool_out(self):
+        d = new_dir("asia_zero")
+        db, out = os.path.join(d, "foods.sqlite"), os.path.join(d, "food-db.json")
+        shutil.copyfile(self.imp["db"], db)
+        imp = import_ok(["--db", db, "--export-app", out, "--off-quota", "AS=0", "--built", BUILT,
+                         "--quiet"])
+        self.assertEqual(imp["summary"]["export"]["off_pools"]["AS"], 0)
+        names = [row[0] for row in read_json(out)["items"]]
+        self.assertNotIn("Tom Yum Shrimp Noodles", names)
+        self.assertIn("Matcha Biscuit Sticks", names)
+
+
+class AsiaRegionRuleTests(unittest.TestCase):
+    """region_text, regions_union, only_as, _absorb and _better_twin called directly."""
+
+    @classmethod
+    def setUpClass(cls):
+        import import_foods
+        cls.m = import_foods
+
+    def kept(self, regions, barcode, source="off", doubt=None, popularity=0, thumb=None, portions="[]"):
+        return self.m._Kept((1, "k", source, "100g", 50.0, thumb, regions, barcode, 0, popularity, portions, "[]",
+                             doubt))
+
+    def test_region_text(self):
+        self.assertEqual(self.m.region_text({"AS", "US"}), "US,AS")
+        self.assertEqual(self.m.region_text({"AS", "PH", "JP"}), "PH,JP")
+        self.assertEqual(self.m.region_text({"AS", None}), "AS")
+        self.assertEqual(self.m.region_text(set()), "")
+
+    def test_regions_union(self):
+        self.assertEqual(self.m.regions_union("US", "AS"), "US,AS")
+        self.assertEqual(self.m.regions_union("PH", "US,AS"), "PH,US")
+        self.assertEqual(self.m.regions_union("KR,AS", "JP"), "JP,KR,AS")
+
+    def test_only_as(self):
+        self.assertTrue(self.m.only_as("AS"))
+        for regions in ("US,AS", "PH", "", None):
+            self.assertFalse(self.m.only_as(regions))
+
+    def test_the_seven_countries_are_listed(self):
+        for tag in ("en:thailand", "en:malaysia", "en:singapore", "en:indonesia", "en:vietnam", "en:hong-kong",
+                    "en:taiwan"):
+            self.assertEqual(self.m.OFF_COUNTRIES[tag], "AS")
+        self.assertEqual({code for code in self.m.OFF_COUNTRIES.values()}, set(REGION_ORDER))
+
+    def test_an_as_only_loser_leaves_every_kept_fact_alone(self):
+        for source, regions, barcode in (("off", "US", "0012345678905"), ("usda", "US", None),
+                                         ("curated", "PH", None), ("off", "PH", "4800344001123")):
+            with self.subTest(source=source, regions=regions):
+                keeper = self.kept(regions, barcode, source=source, popularity=1)
+                loser = self.kept("AS", "8851234567890", doubt="macro_mismatch", popularity=90,
+                                  thumb="https://x/y.jpg", portions='[["1 pack (60 g)",60]]')
+                before = keeper.changeable()
+                self.m._absorb(keeper, loser, True)
+                after = keeper.changeable()
+                self.assertEqual(after[:6] + after[7:], before[:6] + before[7:])   # all but alt_barcodes
+                self.assertEqual(json.loads(keeper.aliases), [["8851234567890", 90, "AS"]])
+
+    def test_an_as_only_keeper_merges_as_before(self):
+        keeper = self.kept("AS", "8851234567890")
+        self.m._absorb(keeper, self.kept("AS", None, popularity=7, thumb="https://x/y.jpg"), True)
+        self.assertEqual((keeper.popularity, keeper.thumbnail), (7, "https://x/y.jpg"))
+
+    def test_usda_and_philippine_keepers_take_no_as(self):
+        keeper = self.kept("US", None, source="usda")
+        self.m._absorb(keeper, self.kept("US,AS", "0012345678912"), True)
+        self.assertEqual(keeper.regions, "US")
+        keeper = self.kept("US", "4800344001123")
+        self.m._absorb(keeper, self.kept("UK,AS", "0012345678912"), True)
+        self.assertEqual(keeper.regions, "US,UK")
+        keeper = self.kept("US", "0012345678905")
+        self.m._absorb(keeper, self.kept("UK,AS", "0012345678912"), True)
+        self.assertEqual(keeper.regions, "US,UK,AS")                             # an ordinary keeper does
+
+    def test_an_as_only_row_never_replaces_a_marked_five_market_row(self):
+        better = self.m._better_twin
+        self.assertFalse(better(self.kept("US", "0012345678905", doubt="macro_mismatch"),
+                                self.kept("AS", "8851234567890")))
+        self.assertTrue(better(self.kept("AS", "8851234567890", doubt="macro_mismatch"),
+                               self.kept("AS", "8851234567906")))
+
+
+# the Japan, Korea and Asia pool rules (step 5), off_asia2.csv; B1..B30 as in make_off_fixtures.py
+class Asia2Case(AsiaCase):
+    @classmethod
+    def load(cls):
+        return asia2_import()
+
+    def bundle(self, name):
+        """The bundle row named name as a dictionary, with brand as text."""
+        fields = self.doc["fields"]
+        found = [dict(zip(fields, row)) for row in self.doc["items"] if row[0] == name]
+        self.assertEqual(len(found), 1, "expected one bundle row named %r" % name)
+        row = found[0]
+        row["brand"] = self.doc["brands"][row["brand"]] if row["brand"] >= 0 else None
+        return row
+
+
+class Asia2ImportTests(Asia2Case):
+    def test_a_snack_typed_per_serving_is_re_based_on_its_serving(self):
+        row = self.off_row(ean("885", 9101))                                   # B1
+        self.near(row["calories_kcal"], 500)
+        self.near(row["protein_g"], 6.67)
+        self.near(row["fat_g"], 26.67)
+        self.assertEqual(row["basis"], "estimate")
+        self.assertIsNone(row["doubt"])
+        self.assertEqual(json.loads(row["portions"])[0], ["30 g", 30, "serving"])
+        self.assertEqual(self.summary["asia_rebased"], 3)                      # B1, B21, B22
+
+    def test_a_kitkat_and_a_peanut_butter_typed_per_serving_are_re_based(self):
+        kitkat = self.off_row(ean("490", 9121))                                # B21
+        self.near(kitkat["calories_kcal"], 545.45)
+        self.assertEqual(kitkat["basis"], "estimate")
+        self.assertIsNone(kitkat["doubt"])
+        self.assertEqual(json.loads(kitkat["portions"])[0], ["11 g", 11, "serving"])
+        butter = self.off_row(ean("955", 9122))                                # B22
+        self.near(butter["calories_kcal"], 560)
+        self.near(butter["fat_g"], 41.33)
+        self.assertEqual(json.loads(butter["portions"])[0], ["15 g", 15, "serving"])
+
+    def test_doubtful_rows_of_these_markets_are_marked(self):
+        for n, prefix, doubt in ((2, "880", "dense_low"), (3, "885", "dense_low"), (4, "885", "drink_high"),
+                                 (5, "955", "mix_low"), (6, "880", "zero_food"), (7, "955", "per_serving_as"),
+                                 (23, "899", "drink_high"), (24, "880", "dense_low")):
+            with self.subTest(row="B%d" % n):
+                self.assertEqual(self.off_row(ean(prefix, 9100 + n))["doubt"], doubt)
+
+    def test_the_summary_counts_the_new_reasons(self):
+        self.assertEqual(self.summary["doubts"], {"dense_low": 3, "drink_high": 2, "mix_low": 1, "per_serving_as": 1,
+                                                  "zero_food": 1})
+
+    def test_a_second_import_changes_nothing(self):
+        self.assertEqual(self.imp["rows1"], self.imp["rows2"])
+        self.assertEqual(self.imp["doc"], self.imp["doc2"])
+        self.assertEqual(self.imp["summary2"]["asia_rebased"], 3)       # read again from the file, the same result
+
+
+class Asia2PoolTests(Asia2Case):
+    def test_each_row_lands_in_its_pool(self):
+        self.assertEqual(self.pools(), {
+            "PH": [],
+            # B8: no Japanese origin; B29: the Korean "Soy Sauce" of the same calories (B28) does not keep it out
+            "US": ["Zebra Cakes", "Soy Sauce"],
+            "UK": [],
+            # B20 (Japanese script, 50 scans) by its scans, B9 B10 B12 B21 B27, then the rows nobody scanned:
+            # B19 (Latin name) before B16 (Japanese script), whatever their completeness
+            "JP": ["Tuna シーチキンマイルド", "Yakult Light", "Rich Toffee Biscuit Bars", "Chibi Sours Gummy",
+                   "KitKat Wasabi", "Instant Miso Soup", "Curry Roux Medium Hot",
+                   "ZEMBヌードル 海老とブロッコリーのプーリア風"],
+            # B14 B25 B26 B28; B15 (Chicken Adobo, no brand) and B24 (nori at 7 kcal) left out
+            "KR": ["Shin Ramyun Cup", "Buldak Hot Chicken Sauce", "Cheeseburger", "Soy Sauce"],
+            # B1 B18 B11 B17 (30/2) B13 B22; B23 (oat milk at 130 kcal) and B30 (a shop's listing) left out
+            "AS": ["Lays Original Flavor", "Sweet Chilli Sauce", "Egg Mayo Sandwich", "Sriracha Chilli Sauce",
+                   "Vida Salty Lychee", "Crunchy Peanut Butter"],
+        })
+
+    def test_a_repeat_from_another_market_does_not_keep_a_us_row_out(self):
+        rows = [dict(zip(self.doc["fields"], row)) for row in self.doc["items"] if row[0] == "Soy Sauce"]
+        self.assertEqual(sorted(self.doc["brands"][row["brand"]] for row in rows), ["Kikkoman", "Sempio"])
+
+    def test_brands_names_and_labels_are_tidied_in_the_file(self):
+        self.assertEqual(self.bundle("Rich Toffee Biscuit Bars")["brand"], "Kobe Bussan")     # B10
+        seven = self.bundle("Egg Mayo Sandwich")                                                # B11
+        self.assertEqual(seven["brand"], "7-Eleven")
+        self.assertEqual(seven["aka"], ["Seven Eleven"])
+        self.assertEqual(self.bundle("Chibi Sours Gummy")["portions"][0], ["1 pack (80 g)", 80])     # B12
+        self.assertEqual(self.bundle("Vida Salty Lychee")["barcode"], ean("888", 9113))         # B13
+        self.assertEqual(self.off_row(ean("888", 9113))["name"], "12001187 Vida Salty Lychee 325ml")  # stored as read
+
+    def test_single_serve_packs_open_on_their_serving(self):
+        self.assertEqual(self.bundle("Shin Ramyun Cup")["portions"][0], ["68 g", 68])          # B14
+        self.assertEqual(self.bundle("Lays Original Flavor")["portions"][0], ["30 g", 30])     # B1, pinned
+        self.assertEqual(self.bundle("KitKat Wasabi")["portions"][0], ["11 g", 11])            # B21, pinned
+        self.assertEqual(self.bundle("Crunchy Peanut Butter")["portions"][0], ["15 g", 15])    # B22, pinned
+
+    def test_unit_and_spoon_foods_open_on_their_serving_and_a_sauce_bottle_does_not(self):
+        self.assertEqual(self.bundle("Cheeseburger")["portions"], [["160 g", 160]])            # B26, typed "160g"
+        self.assertEqual(self.bundle("Instant Miso Soup")["portions"][0], ["1 serving (18 g)", 18])     # B27
+        self.assertEqual(self.bundle("Buldak Hot Chicken Sauce")["portions"], [["100 g", 100], ["200 g", 200]])   # B25
+
+
+class AsiaRuleTests(unittest.TestCase):
+    """market_origin, asia_market, asia_doubt (through pool_doubt), asia_serving_fix and the export tidying."""
+
+    @classmethod
+    def setUpClass(cls):
+        import import_foods
+        cls.m = import_foods
+
+    def row(self, name, kcal, protein, carbs, fat, regions="AS", barcode="8851234567890", brand=None, portions=()):
+        row = self.m.blank_row("off")
+        row.update({"name": name, "brand": brand, "calories_kcal": kcal, "protein_g": protein, "carbs_g": carbs,
+                    "fat_g": fat, "region_tags": regions, "barcode": barcode, "portions": [list(p) for p in portions]})
+        return row
+
+    def doubt(self, row, serving_size="", serving_g=None, categories=""):
+        return self.m.pool_doubt(row, serving_size, serving_g, categories)
+
+    def test_market_origin_reads_a_short_japanese_code_with_the_tags(self):
+        for regions, origin in (("US", None), ("UK", None), ("US,JP", "JP"), ("JP", "JP"), ("AS", "JP"), ("US,AS", None)):
+            with self.subTest(regions=regions):
+                self.assertEqual(self.m.market_origin("0000045639494", regions), origin)
+        self.assertEqual(self.m.market_origin("4901234567894", "US"), "JP")          # a full code is trusted
+        self.assertEqual(self.m.market_origin("0000048012345", "US"), "PH")          # only Japan is read with tags
+
+    def test_asia_market(self):
+        self.assertEqual(self.m.asia_market("8851234567890", "UK"), "AS")            # Thai barcode
+        self.assertEqual(self.m.asia_market("0012345678905", "AS"), "AS")            # US barcode, tagged only AS
+        self.assertIsNone(self.m.asia_market("0012345678905", "US,AS"))
+        self.assertIsNone(self.m.asia_market("0012345678905", "PH,AS"))
+        self.assertEqual(self.m.asia_market("8801234567893", "US"), "KR")
+        self.assertIsNone(self.m.asia_market("0000045639494", "US"))
+
+    def test_snacks_seaweed_noodles_chocolate_and_nuts_with_too_few_calories(self):
+        for row in (self.row("Potato Chips Barbecue", 147, 1.6, 16.2, 8.3), self.row("Pringles original", 135, 1.4, 16.6, 7.4),
+                    self.row("Spicy Seaweed Snack", 41, 1, 1, 3, barcode="8801234567893", regions="KR"),
+                    self.row("Instant Noodles Chicken Flavour", 69, 1.5, 9.8, 2.5, portions=[("1 pack (74 g)", 74)]),
+                    self.row("Milk Chocolate", 300, 4, 30, 18), self.row("Salted Cashew Nuts", 190, 6, 8, 15)):
+            with self.subTest(name=row["name"]):
+                self.assertEqual(self.doubt(row), "dense_low")
+
+    def test_bars_nut_butters_candy_nori_and_crisps_with_too_few_calories(self):
+        for row in (self.row("KitKat Wasabi", 64, 0, 7.4, 3.6, regions="JP", barcode="4901234567894"),
+                    self.row("Kit Kat Banana", 55, 0.7, 6, 3.1, regions="JP", barcode="4901234567894"),
+                    self.row("Choco filled", 230, 3, 30, 11, regions="KR", barcode="8801234567893", brand="Pepero"),
+                    self.row("Plant Based Protein Bar", 217, 13.2, 22.3, 9.1), self.row("Fruit and nut crunch", 168, 4.1, 21.6, 7.3,
+                                                                                         brand="Pow bar"),
+                    self.row("Creamy Peanut Butter 0 Sugar Salt Added", 85, 3.7, 2.7, 6.6),
+                    self.row("Mentos Incredible Chew Grapes", 10, 0, 3, 0), self.row("Herbal Candy Original", 10, 0, 2.4, 0.1),
+                    self.row("Sushi Nori", 7, 1, 1, 0, regions="KR", barcode="8801234567893"),
+                    self.row("Honey Butter Chip", 345, 3, 31, 23, regions="KR", barcode="8801234567893"),
+                    self.row("muffin mix", 148, 1.3, 28.2, 3.3),
+                    self.row("Cup Noodle udon", 120, 2, 27, 0.5, regions="KR", barcode="8801234567893",
+                             portions=[("1 serving (38.1 g)", 38.1)]),
+                    self.row("Potato Chips", 150, 2, 18, 8, portions=[("1 slice (30 g)", 30)])):
+            with self.subTest(name=row["name"]):
+                self.assertEqual(self.doubt(row), "dense_low")
+
+    def test_bars_butters_and_candies_that_are_something_else_are_left_alone(self):
+        for row in (self.row("SURIMI BAR", 137, 13.4, 9.7, 5), self.row("Sasami Protein Bar", 107, 17.2, 7.8, 0.5),
+                    self.row("Hat Bar Cheese", 266, 14, 3, 22), self.row("Ube Boba Bar", 147, 1.3, 22.7, 5.3,
+                                                                          portions=[("1 Bar (75 g)", 75)]),
+                    self.row("Strawberry Bar", 216, 1.7, 27.6, 11.5), self.row("Cheese toppoki", 258, 1.7, 54.9, 2.7),
+                    self.row("Peanut Butter Mochi", 380, 6.7, 73.3, 6.7), self.row("Peanut Butter Liquid Meal", 384, 41.5, 41.1, 5.3),
+                    self.row("Konjac candy", 13, 0, 3.2, 0), self.row("High protein potato chips", 380, 24, 52, 8),
+                    self.row("Kimchi Pancake Mix", 215, 5, 46, 1.2), self.row("Chocolate Chip Muffin", 290, 5, 40, 12),
+                    self.row("Steamed Rice with Chips of Garlic", 150, 3, 32, 1), self.row("Yaki sushi nori", 350, 40, 40, 0),
+                    self.row("Kitkat banana split mcflurry", 100, 2.2, 15.7, 3.2, brand="Mcdonald's")):
+            with self.subTest(name=row["name"]):
+                self.assertEqual(self.doubt(row), "")
+
+    def test_milks_and_sports_drinks_with_a_glass_s_or_a_bottle_s_calories(self):
+        for row in (self.row("Oat Milk", 130, 1, 16, 6, brand="Oatside", portions=[("1 serving (200 g)", 200)]),
+                    self.row("Chocolate Malt", 148, 2, 22, 5.8, brand="Oatside"),
+                    self.row("Regular soy milk", 163, 3.2, 12.8, 8.8, portions=[("250ml", 250)]),
+                    self.row("Nutrisoy Fresh Soya Milk [No Sugar Added]", 105, 10.8, 4.5, 5),
+                    self.row("HL LOW FAT MILK", 102, 8.4, 12.4, 2), self.row("Meiji Fresh Milk", 475, 8.8, 67, 20.2),
+                    self.row("Pocari Sweat", 60, 0, 15, 0, portions=[("250 ml", 250)])):
+            with self.subTest(name=row["name"]):
+                self.assertEqual(self.doubt(row), "drink_high")
+        for row in (self.row("Oat Milk", 65, 0.6, 7.9, 3.2, brand="Oatside"), self.row("Skim Milk Powder", 358, 36, 51, 0.7),
+                    self.row("Skim Milk", 358, 34, 53.3, 1), self.row("Soy Milk Pudding", 140, 4, 20, 5),
+                    self.row("Chicken And Sweet Potato Soy Milk Stew", 127, 7.2, 9.8, 6.6),
+                    self.row("Pocari Sweat Powder For 1L", 389, 0, 97.3, 0), self.row("Pocari Sweat", 25, 0, 6.2, 0),
+                    self.row("Fresh Milk Bread", 280, 8, 50, 5)):
+            with self.subTest(name=row["name"]):
+                self.assertEqual(self.doubt(row), "")
+        self.assertEqual(self.doubt(self.row("Zero ( Protein Bar)", 0, 0, 0, 0, regions="JP", barcode="4901234567894")),
+                         "zero_food")
+
+    def test_cereals_cheeses_bean_pastes_dried_seaweed_and_stick_mixes_with_too_few_calories(self):
+        jp, kr = dict(regions="JP", barcode="4901234567894"), dict(regions="KR", barcode="8801234567893")
+        for row, reason in ((self.row("Granola", 225, 4, 39, 8.6, **jp), "dense_low"),
+                            (self.row("Real strawberry corn flakes", 106, 1.4, 24.9, 0.2), "dense_low"),
+                            (self.row("Parmesan Cheese", 27, 2.1, 0.1, 2, portions=[("5g", 5)], **jp), "dense_low"),
+                            (self.row("Cheese Slices", 39, 3.2, 0.8, 2.6, portions=[("1 Slice (17 g)", 17)]), "dense_low"),
+                            (self.row("Hot pepper paste", 45, 1, 9.2, 0.5, **kr), "dense_low"),
+                            (self.row("Miso", 30, 2, 3, 2, **jp), "dense_low"),
+                            (self.row("Sea Vegetable", 3, 0.4, 0.8, 0.1, portions=[("1 serving (2 g)", 2)], **jp), "dense_low"),
+                            (self.row("Mintia Breath Mint", 22, 0, 6.7, 0.3, **jp), "dense_low"),
+                            (self.row("Nescafe Latte Caramel", 105, 0.3, 21, 2.2, portions=[("25g", 25)]), "mix_low"),
+                            (self.row("Milk tea", 92, 0.3, 16.1, 2.9, portions=[("20.0g", 20)], **jp), "mix_low")):
+            with self.subTest(name=row["name"]):
+                self.assertEqual(self.doubt(row), reason)
+        for row in (self.row("Granola", 440, 8, 76, 12, **jp), self.row("Flakes Spanish Style", 89, 17.9, 0.9, 1.8, brand="Century Tuna"),
+                    self.row("Instant Cereal", 73, 1.5, 15.8, 0.4, portions=[("1 CAN (260 g)", 260)]),
+                    self.row("Overnight Oat Morning Cereal", 135, 8.8, 24.7, 2.7), self.row("Cottage Cheese", 98, 11, 3.4, 4.3),
+                    self.row("Camembert Cheese Chikuwa", 88, 5.9, 14.7, 0, **jp), self.row("Konjac Miso", 15, 0.6, 2.5, 0, **jp),
+                    self.row("Miso Soup", 30, 2, 3, 1, **jp), self.row("Wakame Salad", 30, 1, 5, 0.5, portions=[("1 pack (80 g)", 80)], **jp),
+                    self.row("Caffe Latte", 55, 2.5, 6, 2.3, portions=[("240 ml", 240)], **jp),
+                    self.row("Matcha Latte", 420, 6, 78, 9, portions=[("15 g", 15)], **jp)):
+            with self.subTest(name=row["name"]):
+                self.assertEqual(self.doubt(row), "")
+        granola = self.row("Granola", 240, 4, 34, 10)                              # 50 g gives 480 kcal per 100 g
+        self.assertTrue(self.m.asia_serving_fix(granola, "50.0g", 50, ""))
+        self.assertAlmostEqual(granola["calories_kcal"], 480)
+
+    def test_a_can_or_bottle_s_figures_on_sugar_water_and_milk_coffee(self):
+        jp, kr = dict(regions="JP", barcode="4901234567894"), dict(regions="KR", barcode="8801234567893")
+        for row in (self.row("Rasa Original", 100, 0, 27, 0, brand="Coca-Cola", portions=[("250ml", 250)]),
+                    self.row("G Zone White Soda", 224, 0.8, 54.8, 0, portions=[("1 can (400 ml)", 400)], **jp),
+                    self.row("Strawberry & Cream", 170, 1, 42, 0, brand="Chupa Chups", portions=[("1 Can (345ml)", 345)], **kr),
+                    self.row("Caffe Latte Nok Sweet", 113, 7.1, 10.6, 4.8, portions=[("240 ml", 240)], **jp),
+                    self.row("Original 3.6% Milk", 125, 6, 9, 7.2, portions=[("200 ml", 200)], **kr)):
+            with self.subTest(name=row["name"]):
+                self.assertEqual(self.doubt(row), "drink_high")
+        for row in (self.row("Rasa Original", 42, 0, 10.6, 0, brand="Coca-Cola", portions=[("250ml", 250)]),
+                    self.row("Blackcurrant Fruit Cordial", 116, 0, 28.8, 0, portions=[("200 ml", 200)]),
+                    self.row("Cafe Latte Waffle Cone", 237, 3.3, 33.8, 10, portions=[("160 ml", 160)], **jp),
+                    self.row("Caffe Latte", 55, 2.5, 6, 2.3, portions=[("240 ml", 240)], **jp),
+                    self.row("Royal Milk Tea Stick", 410, 5, 75, 10, portions=[("14 g", 14)])):
+            with self.subTest(name=row["name"]):
+                self.assertEqual(self.doubt(row), "")
+
+    def test_foods_named_like_snacks_that_are_not_are_left_alone(self):
+        for row in (self.row("Cookie Dough Eis", 250, 4.5, 26, 14), self.row("Macadamia Nut", 299, 5, 20, 22, brand="Häagen-Dazs"),
+                    self.row("Chicken Popcorn", 215, 17, 15, 9), self.row("Seasoned laver paste", 140, 7, 28, 0,
+                                                                            portions=[("1 tbsp (7 g)", 7)]),
+                    self.row("Ramen Pork Paitan Soup", 127, 6.5, 10, 6.8, portions=[("1 portion (47 g)", 47)]),
+                    self.row("Chashu Ramen", 52, 2, 10, 0.6, portions=[("432 g", 432)]),
+                    self.row("Potato Chips", 530, 6, 53, 33), self.row("Nori Sheets", 190, 30, 15, 2)):
+            with self.subTest(name=row["name"]):
+                self.assertEqual(self.doubt(row), "")
+
+    def test_rules_of_these_markets_are_not_asked_of_us_rows(self):
+        self.assertEqual(self.doubt(self.row("Potato Chips Barbecue", 147, 1.6, 16.2, 8.3, regions="US",
+                                             barcode="0012345678905")), "")
+        self.assertEqual(self.doubt(self.row("Kimchi Mandu", 0, 0, 0, 0, regions="US", barcode="0012345678905")), "")
+
+    def test_drinks_mixes_and_zero_calorie_foods(self):
+        self.assertEqual(self.doubt(self.row("Sprite Lemon Lime", 100, 0, 25, 0, portions=[("250 ml", 250)])),
+                         "drink_high")
+        self.assertEqual(self.doubt(self.row("Sprite Lemon Lime", 40, 0, 10, 0, portions=[("250 ml", 250)])), "")
+        self.assertEqual(self.doubt(self.row("Grape Juice", 100, 0, 25, 0, portions=[("250 ml", 250)])), "")
+        self.assertEqual(self.doubt(self.row("Glucose Cider", 75, 0, 18.7, 0, portions=[("190 ml", 190)])), "")
+        self.assertEqual(self.doubt(self.row("NESCAFE 3 in 1 Original", 41, 0.2, 7.6, 1.1, portions=[("19g", 19)])),
+                         "mix_low")
+        self.assertEqual(self.doubt(self.row("Milo Active Go", 64, 2.2, 10, 1.7, portions=[("240 g", 240)])), "")
+        self.assertEqual(self.doubt(self.row("Kimchi Mandu", 0, 0, 0, 0)), "zero_food")
+        self.assertEqual(self.doubt(self.row("Coke Light", 0, 0, 0, 0)), "")
+        self.assertEqual(self.doubt(self.row("Zero Calorie Noodles", 0, 0, 0, 0)), "")
+
+    def test_the_us_per_serving_test_runs_on_asia_rows_only(self):
+        puff = self.row("Chicken Curry Puff", 260, 9, 42, 7)
+        self.assertEqual(self.doubt(puff, "1 piece (68 g)", 68), "per_serving_as")
+        for barcode, regions in (("4901234567894", "JP"), ("8801234567893", "KR")):
+            with self.subTest(regions=regions):
+                self.assertEqual(self.doubt(self.row("Chicken Curry Puff", 260, 9, 42, 7, regions, barcode),
+                                            "1 piece (68 g)", 68), "")
+        self.assertEqual(self.doubt(self.row("Silky Pudding", 140, 3, 23, 3.5), "31g", 31), "")
+        self.assertEqual(self.doubt(self.row("Soy Milk", 45, 2, 5, 2), "180 ml", 180), "")
+
+    def test_a_short_japanese_looking_code_on_a_us_pack_gets_the_us_test(self):
+        bar = self.row("Peanut Butter Bar", 260, 9, 42, 7, regions="US", barcode="0000049403954")
+        self.assertEqual(self.doubt(bar, "1 bar (68 g)", 68), "per_serving")
+
+    def test_asia_serving_fix(self):
+        row = self.row("Lays Original", 150, 2, 18, 8, portions=[("30 g", 30)])
+        self.assertTrue(self.m.asia_serving_fix(row, "30 g", 30, ""))
+        self.assertAlmostEqual(row["calories_kcal"], 500)
+        self.assertEqual(row["portions"][0], ["30 g", 30, "serving"])
+        self.assertEqual(row["basis"], "estimate")
+        for name, kcal, label, grams in (("Lays Original", 150, "90 g", 90),      # 167 per 100 g: not believable
+                                         ("Lays Original", 150, "", None),          # no serving
+                                         ("Lays Original", 150, "200 g", 200),      # too heavy for a snack serving
+                                         ("Cheese Cake", 150, "30 g", 30)):         # not a snack
+            with self.subTest(label=label, name=name):
+                row = self.row(name, kcal, 2, 18, 8)
+                self.assertFalse(self.m.asia_serving_fix(row, label, grams, ""))
+                self.assertEqual(row["calories_kcal"], kcal)
+        for name, brand, figures, label, grams, kcal in (
+                ("Nature Valley Protein Bar", "Nature Valley", (196, 10.2, 15.4, 11.3), "1 serving (40 g)", 40, 490),
+                ("Amazing Graze Peanut Butter", None, (84, 4, 5, 5.45), "15.0g", 15, 560),
+                ("kinoko to takenoko", "kinotake", (60, 0.9, 6.1, 3.6), "11g", 11, 545.45),
+                ("Honey Butter Chip", "Calbee", (345, 3, 31, 23), "60.0g", 60, 575)):
+            with self.subTest(name=name):
+                row = self.row(name, *figures, brand=brand)
+                self.assertTrue(self.m.asia_serving_fix(row, label, grams, ""))
+                self.assertAlmostEqual(row["calories_kcal"], kcal, places=1)
+        hot_bar = self.row("Juicy Filled Sausage Hot Bar", 253, 14.9, 2.9, 20.1)       # no cereal bar: not touched
+        self.assertFalse(self.m.asia_serving_fix(hot_bar, "70 g", 70, ""))
+
+    # --- second reading of step 5 ---
+    def test_words_inside_other_words_are_no_snack_or_drink(self):
+        jp = dict(regions="JP", barcode="4901234567894")
+        puff = self.row("Malaysian Curry Puff", 280, 6, 30, 15)                         # "lay's" inside Malaysian
+        self.assertFalse(self.m.asia_serving_fix(puff, "60 g", 60, ""))
+        self.assertEqual(puff["calories_kcal"], 280)
+        for row in (self.row("Malaysian Rendang Seasoning", 350, 8, 50, 12),
+                    self.row("Takenoko Mizuni", 25, 2.5, 4, 0.2, **jp), self.row("Nameko Kinoko", 15, 1.7, 5, 0.1, **jp),
+                    self.row("Coconut Bar", 192, 2, 25, 9),                               # an ice-cream bar
+                    self.row("Lemon Soda", 50, 0, 12.5, 0, brand="라이온", portions=[("250 ml", 250)])):
+            with self.subTest(name=row["name"]):
+                self.assertEqual(self.doubt(row), "")
+        sundae = self.row("Strawberry Sundae Crunch Bar", 254, 3, 30, 13)
+        self.assertFalse(self.m.asia_serving_fix(sundae, "63 g", 63, ""))
+        snack = self.row("Kinoko no Yama", 60, 0.9, 6.1, 3.6, brand="Meiji", **jp)     # the Meiji snack still is one
+        self.assertTrue(self.m.asia_serving_fix(snack, "11g", 11, ""))
+
+    def test_kind_floors_re_base_on_the_pack_s_serving_or_keep_out(self):
+        jp, kr = dict(regions="JP", barcode="4901234567894"), dict(regions="KR", barcode="8801234567893")
+        for name, figures, label, grams, kcal in (
+                ("Bisco", (110, 1.4, 13.7, 5.3), "21.0g", 21, 523.8),
+                ("Calorie Mate Block", (200, 4.2, 21.4, 11.1), "40 g", 40, 500),
+                ("Kuri Manju", (49, 0.9, 10.3, 0.4), "15g", 15, 326.7),
+                ("Cooking Sake", (13, 0, 0.2, 0), "15 ml", 15, 86.7),
+                ("Worcestershire sauce", (19, 0.1, 4.8, 0), "15ml", 15, 126.7),
+                ("ISOPRO", (94, 20, 2.7, 0.4), "25 g", 25, 376),
+                ("Okame Natto", (81, 6.4, 6.6, 3.9), "40 grams", 40, 202.5),
+                ("Sari Roti Tawar Kupas", (100, 3, 17, 2), "40 g", 40, 250)):
+            with self.subTest(name=name):
+                row = self.row(name, *figures, portions=[(label, grams)], **jp)
+                self.assertTrue(self.m.asia_serving_fix(row, label, grams, ""))
+                self.assertAlmostEqual(row["calories_kcal"], kcal, places=1)
+                self.assertEqual(row["portions"][0][1:], [grams, "serving"])
+                self.assertEqual(row["basis"], "estimate")
+                self.assertEqual(self.doubt(row, label, grams), "")
+        for row in (self.row("Soft-Boiled Eggs", 433, 39.3, 4, 29.3, portions=[("15 g", 15)], **jp),     # several eggs
+                    self.row("Royal Bread", 60, 2.1, 10.5, 1, portions=[("340 g", 340)], **jp),
+                    self.row("Crepe Roll", 198, 2.1, 27, 9.1, **jp), self.row("100% Pure Honey", 67, 0, 16.4, 0),
+                    self.row("Roasted dried filefish", 79, 16.2, 0.8, 0.7, portions=[("80.0g", 80)], **kr),
+                    self.row("Rolled Oats", 175, 6.2, 31.2, 3.1, portions=[("65 g", 65)], **jp)):
+            with self.subTest(name=row["name"]):
+                self.assertEqual(self.doubt(row), "dense_low")
+        for row in (self.row("Smoked Quail Eggs", 280, 20, 1, 20, **kr), self.row("Ice Monaka", 150, 3, 25, 5, **jp),
+                    self.row("Egg Sandwich", 230, 9, 25, 11, **jp), self.row("Mirinda Orange", 48, 0, 12, 0),
+                    self.row("Boiled Egg", 140, 12.5, 0.3, 10, **jp), self.row("Bread", 260, 9, 47, 4, **jp),
+                    self.row("Hot Spring Poached Egg & Sauce", 140, 11, 2, 9, **jp),
+                    self.row("Mirin Style Seasoning", 40, 0, 10, 0, **jp)):
+            with self.subTest(name=row["name"]):
+                self.assertEqual(self.doubt(row), "")
+
+    def test_per_serving_as_leaves_servings_near_100_g_coconut_milk_and_ice_pops_alone(self):
+        for name, figures, label, grams in (("Grass Jelly Drink", (60, 0, 15, 0), "120 g", 120),
+                                            ("Steamed Bao", (215, 7, 35, 5), "1 piece (85 g)", 85),
+                                            ("Coconut Milk", (180, 1.5, 3, 18), "1 cup (60 g)", 60),
+                                            ("Mango Ice Pop", (90, 0, 22.5, 0), "1 pop (65 g)", 65)):
+            with self.subTest(name=name):
+                self.assertEqual(self.doubt(self.row(name, *figures), label, grams), "")
+        self.assertEqual(self.doubt(self.row("Chicken Curry Puff", 260, 9, 42, 7), "1 piece (68 g)", 68), "per_serving_as")
+
+    def test_nut_drinks_tea_bottles_zero_oils_and_dry_noodle_packs(self):
+        self.assertEqual(self.doubt(self.row("Almond Original", 33, 0.5, 3, 2, portions=[("1 glass (180 g)", 180)])), "")
+        self.assertEqual(self.doubt(self.row("Tehbotol sosro original", 80, 0, 19, 0, portions=[("350ml", 350)])), "drink_high")
+        self.assertEqual(self.doubt(self.row("Teh kotak teh melati", 70, 0, 18, 0, portions=[("200 ml", 200)])), "drink_high")
+        self.assertEqual(self.doubt(self.row("Orange soft drink", 110, 0, 26, 0, brand="Fanta",
+                                             regions="JP", barcode="4901234567894")), "drink_high")
+        self.assertEqual(self.doubt(self.row("Avocado Oil", 0, 0, 0, 0, portions=[("15 ml", 15)])), "zero_food")
+        self.assertEqual(self.doubt(self.row("Butterbear Water", 0, 0, 0, 0)), "")
+        self.assertEqual(self.doubt(self.row("Spicy stir fried noodles", 213, 4.8, 28.1, 8.7, brand="Koka")), "dense_low")
+        self.assertEqual(self.doubt(self.row("Oriental Kitchen Instant Noodles", 193, 3.6, 27.2, 7.8, brand="Mama",
+                                             portions=[("85.0g", 85)])), "dense_low")
+        for row in (self.row("Perencah Bihun Goreng", 221, 5.8, 25.2, 10.8, portions=[("1 portion (30 g)", 30)]),
+                    self.row("Korean stir-fried sweet potato noodle sauce", 200, 3.8, 39, 2.8),
+                    self.row("Mi Goreng Cup", 200, 4, 28, 8, brand="Indomie"),
+                    self.row("Mi Goreng", 460, 9, 60, 20, brand="Indomie")):
+            with self.subTest(name=row["name"]):
+                self.assertEqual(self.doubt(row), "")
+
+    def test_infant_formula_and_supplements_of_these_markets(self):
+        for row in (self.row("NAN Optipro 2", 483, 14.6, 58.4, 21.2), self.row("Creatine Monohydrate", 0, 0, 0, 0),
+                    self.row("Vitamin C 1000mg", 0, 0, 0, 0), self.row("hMB 3000 with CREATINE", 345, 52, 30.7, 0),
+                    self.row("Growing Up Milk", 450, 15, 55, 20, regions="KR", barcode="8801234567893")):
+            with self.subTest(name=row["name"]):
+                self.assertEqual(self.doubt(row), "not_food")
+        self.assertEqual(self.doubt(self.row("Follow-up milk", 450, 15, 55, 20), "", None, "Dairies, Infant formulas"), "not_food")
+        for row in (self.row("Protein & Creatine Caramel Bar", 343, 30, 17.8, 17),
+                    self.row("Beauti Jelly Collagen 1,000 mg + High Vitamin C", 40, 0.7, 9.3, 0, portions=[("150 g", 150)]),
+                    self.row("UHT Milk Sugar Formula", 60, 3, 6, 3),
+                    self.row("Creatine Monohydrate", 0, 0, 0, 0, regions="US", barcode="0012345678905")):
+            with self.subTest(name=row["name"], regions=row["region_tags"]):
+                self.assertNotEqual(self.doubt(row), "not_food")
+
+    def test_away_from_asia(self):
+        korean = frozenset(("seoul milk",))
+        for args, away in ((("0000088031304", "Calvé", "Pindakaas"), 1),
+                           (("0000088081878", "Trader Joes", "Almond Cashew Macadamia Nut Milk"), 1),
+                           (("0000088002934", "Seoul Milk", "Live Apple Juice"), 0),          # a Korean brand
+                           (("0000088004396", "빙그레", "콩두유"), 0),                          # Hangul
+                           (("4515389000092", "Lidl", "Butter Cookies"), 1),
+                           (("4901234567894", "Meiji", "Lidl-free Chocolate"), 0),
+                           (("4901234567894", "Kirkland", "カシューナッツ"), 0)):
+            with self.subTest(args=args):
+                self.assertEqual(self.m.away_from_asia(*args, korean), away)
+
+    def test_asia_brand(self):
+        for brand, shown in (("株式会社 神戸物産", "Kobe Bussan"), ("Shimadaya シマダヤ", "Shimadaya"), ("7-11", "7-Eleven"),
+                             ("7/11", "7-Eleven"), ("Seven Eleven Japan", "7-Eleven"), ("Lotte Chilsung Beverage Co. Ltd.",
+                                                                                         "Lotte Chilsung Beverage"),
+                             ("Thai Preserved Food Factory Co. Ltd.", "Thai Preserved Food Factory"), ("롯데햄", "Lotte Ham"),
+                             ("Kuro Goma Latte • 九鬼産業", "Kuki Sangyo"), ("Orion Corp", "Orion"), ("ヤマキ醸造", "ヤマキ醸造"),
+                             ("Nissin", "Nissin"), (None, None),
+                             # a Japanese brand in the table must stand by itself, or before a company word
+                             ("日清食品", "Nissin"), ("日清", "Nissin"), ("日清フーズ", "Nisshin Foods"),
+                             ("日清製粉ウェルナ", "Nisshin Seifun Welna"), ("日清オイリオ", "Nisshin Oillio"),
+                             ("明治", "Meiji"), ("株式会社 明治", "Meiji"), ("明治乳業", "Meiji"), ("明治屋", "Meidi-ya"),
+                             ("ライオン菓子", "Lion"), ("ALPRRON アルプロン", "Alpron"), ("CoCo壱番屋", "CoCo Ichibanya"),
+                             ("ネスレ日本", "Nestlé"), ("森永製菓", "Morinaga"), ("บอส", "Boss"), ("ไวตามิ้ลค์", "Vitamilk"),
+                             # what is left must still be a brand
+                             ("The 미식", "The 미식"), ("Tomato Corporation", "Tomato Corporation"), ("Trading Co.", "Trading Co."),
+                             ("Peanut Butter & Co.", "Peanut Butter & Co"), ("& You Konnyaku", "You Konnyaku"),
+                             ("佐々木食品株式会社 (Sasaki Shokuhin Co.- Ltd.)", "Sasaki Shokuhin"),
+                             ("Bull-Dog Sauce Co.", "Bull-Dog Sauce"), ("Meiji Co., Ltd.", "Meiji")):
+            with self.subTest(brand=brand):
+                self.assertEqual(self.m.asia_brand(brand), shown)
+
+    def test_asia_name(self):
+        for name, shown in (("12001187 Vida Salty Lychee", "Vida Salty Lychee"), ("Kraft Cheddar 160g", "Kraft Cheddar"),
+                            ("Hi-Calcium Soya Milk (250 mL x 6)", "Hi-Calcium Soya Milk"),
+                            ("Tostitos tortilla chips imp", "Tostitos tortilla chips"), ("milku coklat btl 200ML", "milku coklat btl"),
+                            ("Pocari Sweat Powder For 1L", "Pocari Sweat Powder For 1L"), ("Nescafe 3 in 1 20g", "Nescafe 3 in 1 20g"),
+                            ("7Up 330ml", "7Up 330ml"), ("Kit Kat 深いカカオの香り", "Kit Kat 深いカカオの香り"),
+                            # a multipack in brackets goes whole, never half of it
+                            ("NEXTAR strawberry cookies - 106 g (8 x 13.3 g)", "NEXTAR strawberry cookies"),
+                            ("Yakult 5 x 80ml", "Yakult"), ("Mama Instant Noodles - Shrimp Tom Yum 1X60G",
+                                                           "Mama Instant Noodles - Shrimp Tom Yum"),
+                            ("Glico Pocky With Chocolate Coating 119G (9 Packs)", "Glico Pocky With Chocolate Coating"),
+                            ("Maggi Soy Bean Dipping Sauce Size 200 ML.", "Maggi Soy Bean Dipping Sauce"),
+                            ("KitKat matcha fun size", "KitKat matcha fun size"), ("-196 Kiwi", "-196 Kiwi"),
+                            ("Pocky King Size 200g", "Pocky King Size"), ("Kit Kat Family Size 400 g", "Kit Kat Family Size"),
+                            ("Lay's Party Size 150g", "Lay's Party Size"),
+                            ("Broccoli -Frozen-", "Broccoli -Frozen-"),
+                            ("ION SUPPLY DRINK POCARI SWEAT 内容量:900ml", "ION SUPPLY DRINK POCARI SWEAT"),
+                            ("Instant Noodles Pork Flavour [Only one image]", "Instant Noodles Pork Flavour"),
+                            # a " - Brand" tail said again and again
+                            ("Nissin Frozen Sanuki Udon - Nissin - Nissin - Nissin", "Nissin Frozen Sanuki Udon"),
+                            ("UFO - Nissin Yakisoba - Nissin Yakisoba - Nissin Yakisoba", "UFO - Nissin Yakisoba"),
+                            ("Choco Cookie - Pepero - Pepero", "Choco Cookie - Pepero")):
+            with self.subTest(name=name):
+                self.assertEqual(self.m.asia_name(name), shown)
+        self.assertEqual(self.m.asia_name("Thai tea - Vitamilk", "Vitamilk"), "Thai tea")       # the row's own brand
+        self.assertEqual(self.m.asia_name("Thai tea - Vitamilk", "Boss"), "Thai tea - Vitamilk")
+
+    def test_asia_label(self):
+        for label, grams, shown in (("1袋(80g)", 80, "1 pack (80 g)"), ("14粒(21g)", 21, "14 pieces (21 g)"),
+                                    ("1本(110ml)", 110, "1 bottle (110 ml)"), ("1本(20g)", 20, "1 stick (20 g)"),
+                                    ("1 ซอง (80 g)", 80, "1 sachet (80 g)"), ("1 食 (120 g)", 120, "1 serving (120 g)"),
+                                    ("1 袋 (Bag) (60 g)", 60, "1 pack (60 g)"), ("2 개 (50 g)", 50, "2 pieces (50 g)"),
+                                    ("1.0 portion (30 g)", 30, "1 serving (30 g)"), ("1 barre (75 ml)", 75, "1 bar (75 ml)"),
+                                    ("8 gm (8 g)", 8, "8 g (8 g)"), ("1 食を温める場合は約 (150 g)", 150, "1 食を温める場合は約 (150 g)"),
+                                    # labels that are no label
+                                    ("386 kcal (85 g)", 85, "85 g"), ("6.52 1 Can (185 g)", 185, "1 Can (185 g)"),
+                                    ("1 2000 ml (2000 ml)", 2000, "2000 ml"), ("1 8 (180 ml)", 180, "180 ml"),
+                                    ("1 120 g", 120, "120 g"), ("1 200 ml.", 200, "200 ml"), ("1 l (160 g)", 160, "160 g"),
+                                    ("1060 oz (30 g)", 30, "30 g"), ("1 serving (30 g)", 30, "1 serving (30 g)")):
+            with self.subTest(label=label):
+                self.assertEqual(self.m.asia_label(label, grams), shown)
+
+    def test_asia_portions(self):
+        def item(name, kcal, portions):
+            return {"name": name, "calories_kcal": kcal, "per_unit": "100g", "portions": json.dumps(portions),
+                    "category": "supermarket", "group_label": None, "source": "off", "brand": None,
+                    "region_tags": "AS", "barcode": "8851234567890"}
+        for name, kcal, portions, first in (
+                ("Indomie Mi Goreng", 475, [["80 g", 80]], ["80 g", 80]),
+                ("NESCAFE 3 in 1 Original", 444, [["18g", 18]], ["18 g", 18]),
+                ("Meiji Yoghurt Strawberry", 90, [["135 g", 135]], ["135 g", 135]),
+                ("Chibi Sours Gummy", 330, [["1袋(80g)", 80]], ["1 pack (80 g)", 80]),
+                ("Potato Chips", 530, [["30 g", 30]], ["100 g", 100]),
+                ("Karamucho Stick Snack", 520, [["20 g", 20]], ["100 g", 100]),
+                # decided on the label as stored and as shown: a bare weight on a unit food stays first
+                ("Cheeseburger", 289, [["160g", 160]], ["160 g", 160]),
+                ("Simmered Hamburger Steak Bento", 173, [["270g", 270]], ["270 g", 270]),
+                # unit foods by their name
+                ("Egg Onigiri", 163, [["1 serving (135 g)", 135]], ["1 serving (135 g)", 135]),
+                ("Choco Pie", 512, [["1 serving (34 g)", 34]], ["1 serving (34 g)", 34]),
+                ("Melona Ice Bar", 171, [["1 serving (70 g)", 70]], ["1 serving (70 g)", 70]),
+                ("King Size Mandu", 200, [["420 g", 420]], ["100 g", 100]),                 # the bag
+                ("Pizza Flavour Potato Chips", 439, [["126 g", 126]], ["100 g", 100]),      # crisps
+                ("Pizza Potato", 553, [["126 g", 126]], ["100 g", 100]),                    # crisps named after a pizza
+                ("Cheese Cream Sandwich", 480, [["27 g", 27]], ["100 g", 100]),             # a biscuit
+                ("Crispy sandwich caramel", 520, [["67 g, 1 bar", 67]], ["100 g", 100]),
+                # a bare weight on crisps opens on 100 g whether it was stored "33g" or "33 g"
+                ("Doritos Taco", 512, [["33g", 33]], ["100 g", 100]),
+                ("Potato Chips", 530, [["33g", 33]], ["100 g", 100]),
+                ("Jagabee Usushio", 580, [["40.0g", 40]], ["100 g", 100]),
+                # a soup or drink powder whose figures are the made-up cup's: not its 7 g stick
+                ("Instant Miso Soup", 28, [["1 serving (18 g)", 18]], ["100 g", 100]),
+                ("Blendy Matcha", 29, [["7.6g", 7.6]], ["100 g", 100]),
+                ("Shijimi (Clam) Miso Soup", 145, [["18 g", 18]], ["18 g", 18]),            # a miso paste is
+                ("Crispy Potato Corn Dogs", 322, [["1 serving (90 g)", 90]], ["1 serving (90 g)", 90]),
+                # spoon and sachet foods
+                ("Miso Soup With Tofu & Seaweed", 172, [["1 serving (21.5 g)", 21.5]], ["1 serving (21.5 g)", 21.5]),
+                ("Instant Miso Soup", 171, [["1 serving (14.6 g)", 14.6]], ["1 serving (14.6 g)", 14.6]),
+                ("Chicken Stock Cubes", 297, [["2 g", 2]], ["2 g", 2]),
+                ("Cheetos Butter Roasted Corn", 567, [["1 serving (30 g)", 30]], ["100 g", 100]),
+                # a sauce bottle or a 2 litre bottle is no serving; a meal in sauce is
+                ("Sauce Buldak", 300, [["200 g", 200]], ["100 g", 100]),
+                ("Sports Drink, Sweet", 13, [["1 2000 ml (2000 ml)", 2000]], ["100 g", 100]),
+                ("Sardines In Tomato Sauce", 94, [["1 tin (125 g)", 125]], ["1 tin (125 g)", 125])):
+            with self.subTest(name=name):
+                got = self.m.asia_portions(item(name, kcal, portions), portions)
+                self.assertEqual(got[0], first)
+                self.assertNotIn(["100 g", 100], got[1:])
+
+    def test_half_latin(self):
+        self.assertEqual(self.m.half_latin("ZEMBヌードル 海老とブロッコリーのプーリア風"), 0)
+        self.assertEqual(self.m.half_latin("Yakisoba 焼きそば UFO"), 1)
+        self.assertEqual(self.m.half_latin("Crème brûlée"), 1)
+
+
+def make_photo(code, version=3):
+    return "%s%s/%s/%s/%s/front_en.%d.200.jpg" % (THUMB_BASE, code[0:3], code[3:6], code[6:9], code[9:], version)
 
 
 if __name__ == "__main__":
