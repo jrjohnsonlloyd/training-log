@@ -666,8 +666,8 @@ async function suiteV2(){
     expect(row.thumb === PANCIT_THUMB, 'data-thumb is "' + row.thumb + '"');
     expect(row.dcat === 'supermarket', 'data-cat is "' + row.dcat + '"');
     expect(row.cat === 'Lucky Me!', 'the muted line starts with "' + row.cat + '", expected the brand');
-    expect(row.sub.indexOf('1 pack') >= 0, 'the serving is not on the muted line: ' + row.sub);
-    expect(row.kcal === 280, 'the row shows ' + row.kcal + ' kcal for the default serving, expected 280');
+    /* the default portion: the pack in the hand-written sample, 100 g in a bundle built with the 100 g rule */
+    expect((row.sub.indexOf('1 pack') >= 0 && row.kcal === 280) || (row.sub.indexOf('100 g') >= 0 && row.kcal === 467), 'the muted line / kcal of the default portion are "' + row.sub + '" / ' + row.kcal + ', expected 1 pack = 280 or 100 g = 467');
     const img = w.seen.find(x => x.src === PANCIT_THUMB);
     expect(img, 'no picture element was created for that address; created: ' + (w.seen.map(x => x.src).join(', ') || 'none'));
     expect(img.inThumb && img.loading === 'lazy' && img.decoding === 'async' && img.referrerpolicy === 'no-referrer' && img.alt === '', 'picture attributes: ' + JSON.stringify(img));
@@ -747,10 +747,12 @@ async function suiteV2(){
     expect(old, 'food-library.json no longer has "' + ADOBO + '", so this check proves nothing');
     const rows = await search('chicken adobo', r => !!rowNamed(r, ADOBO)), hits = rows.filter(r => r.name === ADOBO);
     expect(hits.length === 1, hits.length + ' rows named "' + ADOBO + '": ' + names(rows));
-    expect(hits[0].kcal === 214 && hits[0].sub.indexOf('1 serving with sauce (152 g)') >= 0, 'the row left is not the bundle row: ' + hits[0].kcal + ' kcal, ' + hits[0].sub + ' (the library item has ' + old.kcal + ' kcal)');
+    /* the bundle row lists 152 g = 214 kcal first in the hand-written sample, 100 g = 141 kcal first in a bundle built with the 100 g rule; the library item has 215 */
+    const adoboDefault = r => (r.kcal === 214 && r.sub.indexOf('1 serving with sauce (152 g)') >= 0) || (r.kcal === 141 && r.sub.indexOf('100 g') >= 0);
+    expect(adoboDefault(hits[0]), 'the row left is not the bundle row: ' + hits[0].kcal + ' kcal, ' + hits[0].sub + ' (the library item has ' + old.kcal + ' kcal)');
     const aka = (await search('adobong manok', r => !!rowNamed(r, ADOBO))).filter(r => r.name === ADOBO);
-    expect(aka.length === 1 && aka[0].kcal === 214, 'searching by the other name "adobong manok" gives ' + aka.length + ' rows');
-    return 'one row, 214 kcal per 152 g (library item: ' + old.kcal + ' kcal, hidden)';
+    expect(aka.length === 1 && adoboDefault(aka[0]), 'searching by the other name "adobong manok" gives ' + aka.length + ' rows');
+    return 'one row, ' + hits[0].kcal + ' kcal for its default portion (library item: ' + old.kcal + ' kcal, hidden)';
   });
 
   await step('typing an exact name and leaving the field fills the form: curated bundle row first, else the library item', async () => {
@@ -758,8 +760,10 @@ async function suiteV2(){
     expect(plainOnly.length === 1, 'food-library.json has ' + plainOnly.length + ' items named "Pancit canton", so this check proves nothing');
     const leave = text => fire(type('#ff-name', text), 'change');
     leave('chicken adobo');
-    await waitFor(() => Number(q('#ff-kcal').value) === 214, 2000, 'the curated row\'s 214 kcal in the form (it shows "' + q('#ff-kcal').value + '")');
-    const sel = q('[data-ff="pi"]'); expect(visible(q('#ff-pi-wrap')) && txt(sel.selectedOptions[0]) === '1 serving with sauce (152 g)', 'the serving picker of the curated row is not showing');
+    await waitFor(() => visible(q('#ff-pi-wrap')), 2000, 'the serving picker of the curated row (the form shows "' + q('#ff-kcal').value + '" kcal)');
+    const sel = q('[data-ff="pi"]'); expect(Array.from(sel.options).some(o => txt(o) === '1 serving with sauce (152 g)'), 'the serving picker of the curated row has no "1 serving with sauce (152 g)"');
+    selectOption('[data-ff="pi"]', '1 serving with sauce (152 g)');          /* choose it explicitly: 100 g may be the default */
+    expect(Number(q('#ff-kcal').value) === 214, 'the curated row\'s 214 kcal for 152 g in the form (it shows "' + q('#ff-kcal').value + '")');
     leave('Pancit canton');
     await waitFor(() => Number(q('#ff-kcal').value) === Math.round(plainOnly[0].kcal), 2000, 'the library item\'s ' + plainOnly[0].kcal + ' kcal in the form (it shows "' + q('#ff-kcal').value + '")');
     expect(!visible(q('#ff-pi-wrap')), 'a serving picker is showing for a library item');
@@ -775,7 +779,7 @@ async function suiteV2(){
       for (const code of forms) {
         type('#ff-name', 'x'); await waitFor(() => !visible(q('#food-res')), 2000, 'the list to hide between barcodes');
         const rows = await search(code, r => r.length === 1 && r[0].name === PANCIT);
-        expect(rows[0].kcal === 280 && rows[0].thumb === PANCIT_THUMB, code + ' shows ' + rows[0].kcal + ' kcal, data-thumb ' + rows[0].thumb);
+        expect((rows[0].kcal === 280 || rows[0].kcal === 467) && rows[0].thumb === PANCIT_THUMB, code + ' shows ' + rows[0].kcal + ' kcal (1 pack 280 or 100 g 467), data-thumb ' + rows[0].thumb);
         expect(/barcode/i.test(txt(q('#food-res-head'))), 'the header does not say it is a barcode match: ' + txt(q('#food-res-head')));
         tried.push(code);
       }
@@ -901,6 +905,7 @@ async function suiteV2(){
     const rows = await search(PANCIT_CODE, r => r.length === 1 && r[0].name === PANCIT);
     click('food-use', { i: rows[0].i });
     await waitFor(() => q('#ff-name') && q('#ff-name').value === PANCIT && !visible(q('#food-res')), 3000, 'the food in the form');
+    selectOption('[data-ff="pi"]', '1 pack (60 g)');                           /* choose the pack explicitly: 100 g may be the default */
     expect(Number(q('#ff-kcal').value) === 280, 'the form shows ' + q('#ff-kcal').value + ' kcal');
     const sel = q('[data-ff="pi"]'), chosen = sel && sel.selectedOptions[0] ? txt(sel.selectedOptions[0]) : '';
     expect(visible(q('#ff-pi-wrap')) && chosen === '1 pack (60 g)', 'the serving size chosen is "' + chosen + '"');

@@ -2118,8 +2118,8 @@ class BundleTests(BundleCase):
     def test_portions_have_the_default_first(self):
         self.assertEqual(self.rec(name="Chickenjoy 1 pc (thigh)")["portions"], [["1 thigh", 125]])
         self.assertEqual(self.rec(name="Sinangag (garlic fried rice)")["portions"],
-                         [["1 cup", 160], ["1/2 cup", 80], ["1 platter", 320]])
-        self.assertEqual(self.rec(name="Banana, raw")["portions"], [["1 banana", 126]])
+                         [["100 g", 100], ["1 cup", 160], ["1/2 cup", 80], ["1 platter", 320]])   # 100 g first (rule)
+        self.assertEqual(self.rec(name="Banana, raw")["portions"], [["1 banana", 126]])        # a counted fruit keeps its unit
 
     def test_portion_without_grams_has_null(self):
         self.assertEqual(self.rec(name="Flat White (tall)")["portions"], [["1 tall (12 fl oz)", None]])
@@ -2147,6 +2147,196 @@ class BundleTests(BundleCase):
         for gone in ("Pancit Canton Kalamansi", "Choco Pie", "Meiji Milk Choco",
                      "Jack 'n Jill Chippy BBQ", "Skippy Creamy Peanut Butter", "SkyFlakes Crackers"):
             self.assertNotIn(gone, names)
+
+
+class DefaultPortionTests(unittest.TestCase):
+    """The 100 g default rule of the exporter (default_portions in scripts/import_foods.py)."""
+
+    @classmethod
+    def setUpClass(cls):
+        import import_foods
+        cls.rule = staticmethod(import_foods.default_portions)
+
+    def apply(self, name, group, portions, category="whole_food", per_unit="100g"):
+        item = {"name": name, "group_label": group, "category": category, "per_unit": per_unit}
+        return self.rule(item, portions)
+
+    def assertKeeps(self, name, group, portions, category="whole_food"):
+        self.assertEqual(self.apply(name, group, portions, category), portions, name)
+
+    def assertHundredFirst(self, name, group, portions, category="whole_food"):
+        got = self.apply(name, group, portions, category)
+        self.assertEqual(got[0], ["100 g", 100], name)
+        self.assertEqual(got[1:], [p for p in portions if p[1] != 100], name)
+
+    # ---- general case
+    def test_cooked_rice_gets_100_g_first_and_keeps_the_others_in_order(self):
+        self.assertEqual(self.apply("Steamed white rice", "Rice & staples", [["1 cup cooked", 158], ["1 bowl", 250]]),
+                         [["100 g", 100], ["1 cup cooked", 158], ["1 bowl", 250]])
+
+    def test_meat_cuts_are_weighed_not_counted(self):
+        self.assertHundredFirst("Beef, steak", "Beef, excludes ground", [["1 regular", 160], ["1 thick", 240]])
+        self.assertHundredFirst("Chicken thigh, cooked", "Meat & poultry", [["1 thigh", 80]])
+        self.assertHundredFirst("Chicken wing", "Chicken, whole pieces", [["1 wing", 35]])
+        self.assertHundredFirst("Salmon fillet", "Fish", [["1 fillet", 140]])
+
+    def test_cheese_cereal_vegetables_and_packaged_snacks_get_100_g_first(self):
+        self.assertHundredFirst("Cheddar cheese", "Dairy & eggs", [["1 slice", 21], ["1 cup, shredded", 113]])
+        self.assertHundredFirst("Cornflakes", "Breakfast Cereals", [["1 cup", 28]])
+        self.assertHundredFirst("Potato, boiled", "Vegetables", [["1 medium", 170]])
+        self.assertHundredFirst("Potato chips", "Snacks", [["1 bag", 28]], "supermarket")
+
+    def test_an_existing_100_g_portion_is_not_listed_twice(self):
+        self.assertEqual(self.apply("Sweet potato", "Vegetables", [["1 serving", 100], ["1 medium", 150]]),
+                         [["100 g", 100], ["1 medium", 150]])
+
+    def test_rows_per_serving_without_portions_or_without_gram_weight_are_untouched(self):
+        self.assertEqual(self.apply("Garlic fried rice", "Rice", [["1 cup", None]], per_unit="serving"), [["1 cup", None]])
+        self.assertEqual(self.apply("Garlic fried rice", "Rice", []), [])
+        self.assertEqual(self.apply("Garlic fried rice", "Rice", [["1 cup", None]]), [["1 cup", None]])
+
+    # ---- exceptions a to d keep the food's own default portion first
+    def test_a_eating_out_keeps_the_item(self):
+        self.assertKeeps("Big Mac", "McDonald's", [["1 burger", 215]], "dining_out")
+        self.assertKeeps("Steamed rice", "Chicken restaurant", [["1 cup", 158]], "dining_out")
+
+    def test_b_drinks_keep_the_cup_or_can(self):
+        self.assertKeeps("Milk, whole", "Milk, whole", [["1 cup", 244]])
+        self.assertKeeps("Coffee, brewed", "Coffee", [["1 cup (8 fl oz)", 240]])
+        self.assertKeeps("Cola", "Soft drinks", [["1 can (12 fl oz)", 368]], "supermarket")
+        self.assertKeeps("Orange juice, raw", "Fruits and Fruit Juices", [["1 cup", 248]])
+        self.assertKeeps("Beer", "Beverages", [["1 can (12 fl oz)", 356]])
+        self.assertKeeps("Soymilk", "Beverages", [["1 cup", 243]])
+        self.assertKeeps("Banana smoothie", "Smoothies and grain drinks", [["1 bottle", 450]])
+        self.assertKeeps("Whole milk", "Drinks", [["1 cup", 244]])
+
+    def test_b_a_drink_without_any_portion_has_nothing_to_keep(self):
+        self.assertEqual(self.apply("Tea, brewed", "Tea", []), [])
+
+    def test_b_dry_milk_powder_is_not_a_drink(self):
+        self.assertHundredFirst("Milk, dry, whole", "Dairy and Egg Products", [["1 cup", 128]])
+
+    def test_c_foods_counted_in_units_keep_the_unit(self):
+        self.assertKeeps("Egg, whole, raw", "Eggs and omelets", [["1 egg", 50], ["1 cup", 245]])
+        self.assertKeeps("Fried egg", "Dairy & eggs", [["1 fried egg", 55]])
+        self.assertKeeps("Banana", "Fruit", [["1 banana", 126], ["1 cup, sliced", 150]])
+        self.assertKeeps("Apples, raw, with skin", "Fruits and Fruit Juices", [["1 medium (3\" dia)", 182]])
+        self.assertKeeps("White bread", "Yeast breads", [["1 medium or regular slice", 28]])
+        self.assertKeeps("Pandesal", "Bread & bakery", [["1 roll", 45]])
+        self.assertKeeps("Cookies, chocolate chip", "Baked Products", [["1 cookie", 16]], "supermarket")
+        self.assertKeeps("Pizza, cheese", "Pizza", [["1 slice", 107]])
+        self.assertKeeps("Cheeseburger", "Burgers", [["1 sandwich", 120]])
+        self.assertKeeps("Pork dumplings", "Egg rolls, dumplings, sushi", [["1 piece", 25]])
+        self.assertKeeps("Nutrition bar", "Nutrition bars", [["1 bar", 50]])
+        self.assertKeeps("Ice cream cone", "Ice cream and frozen dairy desserts", [["1 cone", 70]])
+
+    def test_c_the_same_foods_by_the_cup_or_weight_are_weighed(self):
+        self.assertHundredFirst("Strawberries, raw", "Fruits and Fruit Juices", [["1 cup", 152]])
+        self.assertHundredFirst("Ice cream, vanilla", "Ice cream and frozen dairy desserts", [["1 cup", 132]])
+        self.assertHundredFirst("Bread crumbs", "Baked Products", [["1 cup", 108]])
+        self.assertHundredFirst("Apricots, dried", "Fruits and Fruit Juices", [["1 piece", 8]])
+
+    def test_d_foods_used_by_the_spoon_keep_the_spoon(self):
+        self.assertKeeps("Olive oil", "Fats and Oils", [["1 tablespoon", 13.5]])
+        self.assertKeeps("Butter", "Dairy & eggs", [["1 pat", 5], ["1 tablespoon", 14]])
+        self.assertKeeps("Peanut butter", "Nuts and seeds", [["1 tablespoon", 16]])
+        self.assertKeeps("Jam or jelly", "Jams, syrups, toppings", [["1 tablespoon", 20]])
+        self.assertKeeps("Sugar, white", "Sugars and honey", [["1 teaspoon", 4.2]])
+        self.assertKeeps("Ketchup", "Tomato-based condiments", [["1 packet", 9]], "supermarket")
+        self.assertKeeps("Salt", "Spices and Herbs", [["1 tsp", 6]])
+
+    def test_d_the_same_foods_listed_by_the_cup_are_weighed(self):
+        self.assertHundredFirst("Pasta sauce", "Soups, Sauces, and Gravies", [["1/2 cup", 125]])
+
+    def test_a_packet_of_instant_oatmeal_is_not_a_spoonful_of_sugar(self):
+        self.assertHundredFirst("Cereals, instant oatmeal, brown sugar, dry", "Breakfast Cereals", [["1 packet", 43]])
+        self.assertHundredFirst("Cereals, Quaker, Instant Oatmeal, fruit and cream variety, dry", "Breakfast Cereals", [["1 packet", 35]])
+
+    # ---- second-pass review: patterns seen in the real USDA rows
+    def test_with_salt_or_reduced_fat_in_the_name_does_not_make_a_spoon_food(self):
+        self.assertHundredFirst("Carrots, cooked, boiled, drained, with salt", "Vegetables and Vegetable Products", [["1 tbsp", 9.7], ["1/2 cup slices", 78]])
+        self.assertHundredFirst("Cheese, Parmesan, dry grated, reduced fat", "Cheese", [["1 tablespoon", 7]])
+        self.assertKeeps("White sugar", "Pantry", [["1 teaspoon", 4.2]])
+        self.assertKeeps("Nuts, cashew butter, plain, with salt added", "Nut and Seed Products", [["1 tbsp", 16]])
+
+    def test_a_small_bare_serving_of_a_condiment_counts_as_a_spoonful(self):
+        self.assertKeeps("Salsa, red", "Tomato-based condiments", [["1 serving", 32], ["1 tablespoon", 16]])
+        self.assertKeeps("Sugar", "Sugars and honey", [["1 serving", 8], ["1 cup", 200]])
+        self.assertHundredFirst("Cherry pie filling", "Jams, syrups, toppings", [["1 serving", 130], ["1 cup", 260]])
+        self.assertHundredFirst("Cookies, Archway, Molasses", "Baked Products", [["1 serving", 26]])
+
+    def test_a_bare_serving_is_not_a_unit(self):
+        self.assertHundredFirst("Croissant", "Doughnuts, sweet rolls, pastries", [["1 serving", 70], ["1 mini croissant", 28]])
+        self.assertKeeps("Frankfurter, meat", "Sausages and Luncheon Meats", [["1 serving (1 hot dog)", 52]])
+
+    def test_units_found_by_name_outside_their_usual_group(self):
+        self.assertKeeps("Snacks, granola bars, hard, plain", "Snacks", [["1 bar", 21]])
+        self.assertKeeps("Enchilada, beef", "Other Mexican mixed dishes", [["1 enchilada, any size", 150], ["1 cup", 170]])
+        self.assertKeeps("Pizza, meat topping, thick crust, frozen, cooked", "Fast Foods", [["1 slice 1/8 of 12\" pizza", 103]])
+        self.assertKeeps("Ice cream bar, chocolate covered", "Dairy and Egg Products", [["1 bar", 50]])
+        self.assertKeeps("Popsicle", "Gelatins, ices, sorbets", [["1 single stick", 50]])
+        self.assertKeeps("Cake, angelfood, dry mix, prepared", "Baked Products", [["1 piece (1/12 of 10\" dia)", 50]])
+        self.assertHundredFirst("Beef, sandwich steaks, flaked, chopped, formed", "Beef Products", [["1 steak", 56]])
+        self.assertHundredFirst("Corn chips, plain", "Tortilla, corn, other chips", [["1 small bag", 28]])
+
+    def test_plant_milks_nectars_and_made_up_powders_are_drinks(self):
+        self.assertKeeps("Silk Light Vanilla, soymilk", "Legumes and Legume Products", [["1 cup", 243]])
+        self.assertKeeps("Mango nectar, canned", "Fruits and Fruit Juices", [["1 cup", 251]])
+        self.assertKeeps("Milk, dry, reconstituted, nonfat", "Milk, nonfat", [["1 cup", 244]])
+        self.assertHundredFirst("Milk, dry, not reconstituted", "Ingredient", [["1 serving", 43], ["1 cup", 128]])
+
+    def test_protein_powder_and_bouillon_keep_the_scoop_or_cube(self):
+        self.assertKeeps("Nutritional powder mix, whey based", "Protein and nutritional powders", [["1 scoop", 26]])
+        self.assertKeeps("Soup, chicken broth cubes, dry", "Soups, Sauces, and Gravies", [["1 cube", 4.8]])
+        self.assertHundredFirst("Soup, ramen noodle, any flavor, dry", "Soups, Sauces, and Gravies", [["1 package without flavor packet", 81]])
+
+    # ---- e: "default_portion" in the curated list, end to end
+    def curated_bundle(self, entries):
+        d = new_dir("default_portion")
+        path = os.path.join(d, "curated.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"version": 1, "items": entries}, f)
+        db, bundle = os.path.join(d, "foods.sqlite"), os.path.join(d, "food-db.json")
+        imp = import_ok(["--db", db, "--curated-json", path, "--export-app", bundle, "--quiet"])
+        doc = read_json(bundle)
+        rows = {r[0]: dict(zip(doc["fields"], r)) for r in doc["items"]}
+        return imp, db, rows
+
+    @staticmethod
+    def entry(name, mode=None, category="whole_food", group="Test", serving=("1 cup", 150)):
+        e = {"name": name, "brand": None, "group": group, "category": category, "region_tags": ["PH"],
+             "barcode": None, "thumbnail_url": None, "aka": [],
+             "serving": {"label": serving[0], "grams": serving[1]},
+             "extra_portions": [{"label": "1 bowl", "grams": 300}], "nutrition_per": "100g",
+             "calories_kcal": 100, "protein_g": 5, "carbs_g": 10, "sugars_g": None, "fat_g": 2,
+             "saturates_g": None, "fibre_g": None, "sodium_mg": None, "basis": "estimate", "src": None, "notes": ""}
+        if mode:
+            e["default_portion"] = mode
+        return e
+
+    def test_e_serving_keeps_the_stated_serving_first_where_the_rule_would_not(self):
+        _imp, db, rows = self.curated_bundle([self.entry("Test stew", "serving"), self.entry("Test stew two")])
+        self.assertEqual(rows["Test stew"]["portions"], [["1 cup", 150], ["1 bowl", 300]])     # no marker in the bundle
+        self.assertEqual(rows["Test stew two"]["portions"], [["100 g", 100], ["1 cup", 150], ["1 bowl", 300]])
+
+    def test_e_100g_forces_100_g_first_even_for_a_drink(self):
+        _imp, db, rows = self.curated_bundle([self.entry("Test tea", "100g", group="Tea"),
+                                              self.entry("Test coffee", group="Coffee")])
+        self.assertEqual(rows["Test tea"]["portions"], [["100 g", 100], ["1 cup", 150], ["1 bowl", 300]])
+        self.assertEqual(rows["Test coffee"]["portions"], [["1 cup", 150], ["1 bowl", 300]])
+        conn = open_db(db)
+        try:   # the database itself holds the forced order, no schema change
+            stored = conn.execute("SELECT portions FROM food_items WHERE name = 'Test tea'").fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(json.loads(stored), [["100 g", 100], ["1 cup", 150], ["1 bowl", 300]])
+
+    def test_e_an_unknown_value_skips_the_entry_with_a_warning(self):
+        imp, _db, rows = self.curated_bundle([self.entry("Test odd", "both"), self.entry("Test fine")])
+        self.assertNotIn("Test odd", rows)
+        self.assertIn("Test fine", rows)
+        self.assertEqual(imp["summary"]["invalid"], 1)
+        self.assertIn("default_portion", imp["stderr"])
 
 
 class BundleMaxOffTests(BundleCase):
