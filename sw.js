@@ -1,6 +1,6 @@
 /* Training Log service worker: app shell cached for offline use; the page itself is fetched network-first so updates land on the next open.
    food-db.json is cached with the shell and answered from the cache, so a new bundle only reaches an installed phone when CACHE changes: bump it with every new food-db.json. */
-const CACHE = 'training-log-v11';
+const CACHE = 'training-log-v12';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './food-library.json', './food-db.json', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())); });
 self.addEventListener('activate', e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim())); });

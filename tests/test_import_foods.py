@@ -17,10 +17,17 @@ How these tests are built
 What the main import must end up with (hand count)
   curated  11 read: 8 kept, 3 skipped as invalid (bad category, bad region, no calories)
   usda     13 read: 1 invalid (no calories), 1 loses to a curated row -> 11 kept
-  off      32 read: 2 filtered by region, 6 invalid, 7 lose a de-duplication -> 17 kept
+  off      52 read: 2 filtered by region, 6 invalid, 7 lose a de-duplication -> 37 kept
   duplicates 8: barcode C3/A1, U2/A3, Choco Pie pair, Meiji pair;
                 name+brand Chippy pair, Skippy, SkyFlakes, Pork Adobo
-  total_rows 36
+  total_rows 56
+  app bundle: 8 curated + 11 USDA + 29 Open Food Facts rows chosen by the pool rules (see OFF_POOLS)
+
+The rule fixtures (off_rules.csv, off_dedupe.csv, off_alias_guard.csv) and the importer that makes
+them are described in tests/fixtures/make_off_fixtures.py. Every expected value below was derived by
+hand from the audit digests (the CORRECTED recommendations) and the decision list of the
+Open Food Facts import task, never from importer output. Details the specification leaves open
+are not asserted.
 """
 import csv
 import gzip
@@ -40,6 +47,9 @@ FIXTURES = os.path.join(HERE, "fixtures")
 IMPORTER = os.path.join("scripts", "import_foods.py")   # relative: the importer is started from REPO
 
 OFF_TSV = os.path.join(FIXTURES, "sample_off.csv")
+OFF_RULES = os.path.join(FIXTURES, "off_rules.csv")
+OFF_DEDUPE = os.path.join(FIXTURES, "off_dedupe.csv")
+OFF_GUARD = os.path.join(FIXTURES, "off_alias_guard.csv")
 USDA_FLAT = os.path.join(FIXTURES, "sample_usda.csv")
 USDA_FOLDER = os.path.join(FIXTURES, "usda_fdc_mini")
 CURATED = os.path.join(FIXTURES, "local_ph_curated.json")
@@ -69,12 +79,16 @@ V2_COLUMNS = ["id", "name", "brand", "group_label", "category", "region_tags", "
               "thumbnail_url", "per_unit", "calories_kcal", "protein_g", "carbs_g", "sugars_g",
               "fat_g", "saturates_g", "fibre_g", "sodium_mg", "portions", "aka", "basis",
               "source", "source_priority", "source_ref", "popularity", "name_key"]
+V3_NEW_COLUMNS = ["foreign_tags", "completeness", "alt_barcodes"]
+V3_COLUMNS = V2_COLUMNS + V3_NEW_COLUMNS
 
-OFF_COLUMNS = ["code", "product_name", "product_name_en", "brands", "countries_tags",
-               "image_front_small_url", "serving_size", "serving_quantity", "unique_scans_n",
-               "energy-kcal_100g", "energy-kj_100g", "energy_100g", "proteins_100g",
-               "carbohydrates_100g", "sugars_100g", "fat_100g", "saturated-fat_100g",
-               "fiber_100g", "sodium_100g", "salt_100g"]
+# Every column the importer reads from the Open Food Facts export that the fixtures must carry.
+OFF_COLUMNS = ["code", "product_name", "product_name_en", "generic_name", "brands", "categories_en",
+               "countries_tags", "image_front_small_url", "image_small_url", "serving_size",
+               "serving_quantity", "completeness", "unique_scans_n", "energy-kcal_100g",
+               "energy-kj_100g", "energy_100g", "proteins_100g", "carbohydrates_100g",
+               "carbohydrates-total_100g", "sugars_100g", "fat_100g", "saturated-fat_100g",
+               "fiber_100g", "sodium_100g", "salt_100g", "alcohol_100g"]
 USDA_FLAT_COLUMNS = ["fdc_id", "data_type", "description", "brand_owner", "gtin_upc",
                      "food_category", "serving_size_g", "household_serving", "energy_kcal",
                      "energy_kj", "protein_g", "carbohydrate_g", "sugars_g", "fat_g",
@@ -82,27 +96,130 @@ USDA_FLAT_COLUMNS = ["fdc_id", "data_type", "description", "brand_owner", "gtin_
 
 SUMMARY_KEYS = {"read", "kept", "filtered_region", "invalid", "duplicates", "total_rows"}
 
-# Open Food Facts rows that survive the main import, in the order the app bundle must
-# list them: PH-tagged rows first, then by popularity (unique_scans_n), highest first.
-OFF_EXPORT_ORDER = [
-    "Kikkoman Soy Sauce",            # PH,UK,JP  260 scans
-    "Chippy BBQ",                    # PH,US      80
-    "Milo Activ-Go Powder",          # PH         55
-    "Snickers",                      # 950
-    "Shin Ramyun",                   # 640
-    "Weetabix Original",             # 420
-    "Pocky Chocolate",               # 310
-    "Kewpie Mayonnaise",             # 130
-    "Oi Ocha Green Tea",             # 90
-    "Banana Flavored Milk",          # 75
-    "Baked Beans in Tomato Sauce",   # 33
-    "Meiji Milk Chocolate",          # 20
-    "Deli Roast Chicken Slices",     # 15
-    "Choco Pie Original",            # 10
-    "Bamboo Salt Seasoning",         # 5
-    "Corner Shop Flapjack",          # 3
-    "Calpis Water",                  # blank -> 0
+# Open Food Facts rows of the main import that the app bundle must list, pool by pool, as
+# (name, barcode as the bundle writes it; 0 = no barcode). Hand-derived: the Philippine slice is
+# every row tagged PH or with a 480 barcode, by scans; the other pools are filled in the order
+# KR, JP, AS, US, UK by rank = scans (times 3 for a brand on two or more PH-tagged rows), then
+# completeness, and are written in the order PH, US, UK, JP, KR, AS.
+OFF_PH = [
+    ("Chippy BBQ", "4800016644504"),                    # PH,US 300 (80 own, 300 from the merged pack)
+    ("Kikkoman Soy Sauce", "4901515110504"),            # PH,UK,JP 260 (one foreign tag; PH slice has no test)
+    ("Milo Activ-Go Powder", "4800361413480"),          # PH 55
+    ("Bear Brand Powdered Milk", "4800361002950"),      # PH 12
+    ("チョコ", "3012345000012"),                          # PH 7: no typeable name, no macros, French barcode
+    ("Pinoy Spread Peanut", "4800001234500"),           # tagged US only, barcode prefix 480, 3 scans
 ]
+OFF_US = [
+    ("Nesquik Chocolate Powder", "0028000242008"),      # rank 30 = 10 scans x 3 (Nestle is on two PH rows)
+    ("Maltesers", "0040000579816"),                     # 25 (brand Mars)
+    ("Kikkoman Teriyaki Sauce", "0041390000189"),       # 20: Kikkoman is on one PH row only, no boost
+    ("Maltesers", "0040000579847"),                     # 10 (Mars Food, 480 kcal: not a repeat of 500 kcal)
+    ("Plain Crackers Salted", "0070000000019"),         # 8, completeness 90
+    ("Gouda Cheese Slices", "4002468135795"),           # 8, completeness 50; tags US + world + european-union
+]
+OFF_UK = [
+    ("Snickers", "5000159407236"),                      # 950
+    ("Weetabix Original", "5010029000023"),             # 420
+    ("McVitie's Digestive Biscuits", "5000168001142"),  # 386: two foreign tags, barcode prefix 500, no division
+    ("Pot Noodle Original Curry", "5000300000011"),     # 150
+    ("Baked Beans in Tomato Sauce", "5000169005743"),   # 33
+    ("Deli Roast Chicken Slices", 0),                   # 15
+    ("Corner Shop Flapjack", 0),                        # 3
+]
+OFF_JP = [
+    ("Pocky Chocolate", "4901330502881"),               # 310
+    ("Kewpie Mayonnaise", "4901577000010"),             # 130, tagged JP,US: the JP pool is filled before US
+    ("Oi Ocha Green Tea", "4514603365511"),             # 90
+    ("Meiji Milk Chocolate", "4902777000015"),          # 20
+    ("Black Thunder Chocolate Bar", "4903032230116"),   # 0 scans, Latin-letter brand and a photo
+]
+OFF_KR = [
+    ("Shin Ramyun", "8801043014830"),                   # 640, tagged US,KR: the KR pool is filled first
+    ("Banana Flavored Milk", "8801056038861"),          # 75
+    ("Choco Pie Original", "8801117760007"),            # 10
+    ("Bamboo Salt Seasoning", "8801007000015"),         # 5
+]
+OFF_AS = [
+    ("Indomie Mi Goreng", "8996001600269"),             # 29, tagged US + Indonesia, barcode prefix 899
+]
+OFF_POOLS = (("PH", OFF_PH), ("US", OFF_US), ("UK", OFF_UK), ("JP", OFF_JP), ("KR", OFF_KR), ("AS", OFF_AS))
+OFF_EXPORT_ORDER = OFF_PH + OFF_US + OFF_UK + OFF_JP + OFF_KR + OFF_AS
+
+# Open Food Facts rows that stay in the database but must not be exported, with the reason.
+OFF_LEFT_OUT = {
+    "Calpis Water": "protein, carbs and fat are all blank",
+    "Fromage Blanc Nature": "two foreign tags (France, Germany) and a barcode prefix (301) of no wanted market",
+    "Halva Peanut Bar": "tagged Japan only with barcode prefix 460: it belongs to no pool",
+    "ポッキー チョコレート": "no run of three Latin letters in the name",
+    "Meltykiss Premium Chocolate": "never scanned and no photo",
+    "Plain Wafer Rolls": "never scanned and no brand",
+    "Hokkaido Milk Caramel": "never scanned and the brand has no Latin letter or digit",
+}
+# The second "Maltesers" row (brand Mars Wrigley, 500.4 kcal) is left out as well: its plain name
+# and rounded calories (500) are already taken by the Mars row. It is checked by brand, not by name.
+
+# Barcodes of merged rows that the bundle must list under "alias", keyed by the survivor's name.
+# Codes are written as numbers, so leading zeros are gone. All three merged rows had scans and PH tags.
+MAIN_ALIASES = {
+    "Chippy BBQ": {4800016644511},                       # the 300-scan "Jack 'n Jill Chippy BBQ" pack
+    "CREAMY PEANUT BUTTER": {37600105002},               # USDA survivor (flat file: the name is as written); the 210-scan Skippy pack (037600105002)
+    "Skyflakes Crackers": {4800092110016},               # curated survivor; the 150-scan PH,US pack
+}
+
+# The version 2 table, as food_schema created it before version 3 existed (kept here by hand
+# so that the upgrade tests do not depend on the code under test).
+V2_SCHEMA = (
+    """CREATE TABLE food_items (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        name            TEXT NOT NULL,
+        brand           TEXT,
+        group_label     TEXT,
+        category        TEXT NOT NULL DEFAULT 'whole_food' CHECK (category IN ('supermarket', 'dining_out', 'whole_food')),
+        region_tags     TEXT NOT NULL DEFAULT '',
+        barcode         TEXT,
+        thumbnail_url   TEXT,
+        per_unit        TEXT NOT NULL DEFAULT '100g' CHECK (per_unit IN ('100g', 'serving')),
+        calories_kcal   REAL NOT NULL,
+        protein_g       REAL,
+        carbs_g         REAL,
+        sugars_g        REAL,
+        fat_g           REAL,
+        saturates_g     REAL,
+        fibre_g         REAL,
+        sodium_mg       REAL,
+        portions        TEXT NOT NULL DEFAULT '[]',
+        aka             TEXT NOT NULL DEFAULT '[]',
+        basis           TEXT,
+        source          TEXT NOT NULL,
+        source_priority INTEGER NOT NULL,
+        source_ref      TEXT,
+        popularity      INTEGER NOT NULL DEFAULT 0,
+        name_key        TEXT NOT NULL DEFAULT ''
+    )""",
+    "CREATE UNIQUE INDEX idx_food_items_barcode ON food_items (barcode) WHERE barcode IS NOT NULL",
+    "CREATE INDEX idx_food_items_name_key ON food_items (name_key)",
+    "CREATE INDEX idx_food_items_category ON food_items (category)",
+    "CREATE INDEX idx_food_items_source_priority ON food_items (source_priority)",
+    "CREATE UNIQUE INDEX idx_food_items_source_ref ON food_items (source, source_ref)"
+    " WHERE source_ref IS NOT NULL",
+    "PRAGMA user_version = 2",
+)
+# (id, name, brand, category, region_tags, barcode, thumbnail_url, calories_kcal, protein_g, carbs_g,
+#  fat_g, sodium_mg, portions, aka, basis, source, source_priority, source_ref, popularity, name_key)
+V2_ROWS = [
+    (3, "Chicken adobo", None, "whole_food", "PH", None, None, 141.0, 15.7, 3.3, 6.5, None,
+     '[["1 serving with sauce",152]]', '["adobong manok"]', "database", "curated", 1, "chicken-adobo", 0,
+     "|chicken adobo"),
+    (4, "Banana, raw", None, "whole_food", "US", None, None, 97.0, 0.74, 23.0, 0.29, 0.0,
+     '[["1 banana",126]]', "[]", "database", "usda", 2, "survey:2709224", 0, "|banana raw"),
+    (9, "Weetabix Original", "Weetabix", "supermarket", "UK", "5010029000023",
+     "https://images.openfoodfacts.org/images/products/501/002/900/0023/front_en.2.200.jpg",
+     365.9, 12.0, 69.0, 2.0, 112.0, '[["2 biscuits (37.5 g)",37.5]]', "[]", "database", "off", 3,
+     "5010029000023", 420, "weetabix|original"),
+]
+V2_ROW_COLUMNS = ("id, name, brand, category, region_tags, barcode, thumbnail_url, calories_kcal, protein_g,"
+                  " carbs_g, fat_g, sodium_mg, portions, aka, basis, source, source_priority, source_ref,"
+                  " popularity, name_key")
 
 
 # --------------------------------------------------------------------------------------
@@ -305,15 +422,74 @@ def reversed_runs_import():
     return cached("reversed", build)
 
 
-def max_off_import():
+def quota_import(quota):
+    """The full main import, exported with --off-quota (a string such as "US=1,UK=0") and no --built."""
     def build():
-        d = new_dir("max_off")
+        d = new_dir("quota")
         db = os.path.join(d, "foods.sqlite")
         bundle = os.path.join(d, "food-db.json")
-        imp = import_ok(full_args(db, bundle, ["--max-off", "1", "--quiet"]))
+        imp = import_ok(full_args(db, bundle, ["--off-quota", quota, "--quiet"]))
         imp.update(db=db, bundle=bundle, doc=read_json(bundle))
         return imp
-    return cached("max_off", build)
+    return cached("quota:" + quota, build)
+
+
+def rules_import():
+    """off_rules.csv alone (one row per validation branch), no export."""
+    def build():
+        d = new_dir("rules")
+        db = os.path.join(d, "foods.sqlite")
+        imp = import_ok(["--db", db, "--off-path", OFF_RULES, "--quiet"])
+        imp.update(db=db)
+        return imp
+    return cached("rules", build)
+
+
+def dedupe_import():
+    """off_dedupe.csv with the flat USDA file (which holds the Skippy twin), exported."""
+    def build():
+        d = new_dir("dedupe")
+        db = os.path.join(d, "foods.sqlite")
+        bundle = os.path.join(d, "food-db.json")
+        args = ["--db", db, "--usda-path", USDA_FLAT, "--off-path", OFF_DEDUPE, "--export-app", bundle,
+                "--built", BUILT, "--quiet"]
+        first = import_ok(args)
+        rows1, doc1 = snapshot(db), read_json(bundle)
+        second = import_ok(args)
+        rows2, doc2 = snapshot(db), read_json(bundle)
+        first.update(db=db, bundle=bundle, doc=doc1, rows1=rows1, rows2=rows2, doc2=doc2,
+                     summary2=second["summary"])
+        return first
+    return cached("dedupe", build)
+
+
+def alias_guard_import():
+    """off_dedupe.csv, then off_alias_guard.csv (a row whose barcode an earlier merge stored as an alias)."""
+    def build():
+        d = new_dir("guard")
+        db = os.path.join(d, "foods.sqlite")
+        bundle = os.path.join(d, "food-db.json")
+        import_ok(["--db", db, "--off-path", OFF_DEDUPE, "--quiet"])
+        imp = import_ok(["--db", db, "--off-path", OFF_GUARD, "--export-app", bundle, "--quiet"])
+        imp.update(db=db, bundle=bundle, doc=read_json(bundle))
+        return imp
+    return cached("guard", build)
+
+
+def old_rules_database():
+    """A database whose Open Food Facts rows all have completeness NULL (as the old rules left them)."""
+    def build():
+        d = new_dir("old_rules")
+        db = os.path.join(d, "foods.sqlite")
+        shutil.copyfile(full_import()["db"], db)
+        conn = open_db(db)
+        try:
+            conn.execute("UPDATE food_items SET completeness = NULL WHERE source = 'off'")
+            conn.commit()
+        finally:
+            conn.close()
+        return {"db": db, "dir": d}
+    return cached("old_rules_db", build)
 
 
 class DbCase(unittest.TestCase):
@@ -403,12 +579,48 @@ class FixtureFileTests(unittest.TestCase):
         for col in OFF_COLUMNS:
             self.assertIn(col, header)
 
-    def test_off_fixture_has_32_complete_rows(self):
+    def test_off_fixture_has_52_complete_rows(self):
         rows = self.off_rows()
-        self.assertEqual(len(rows), 32)
+        self.assertEqual(len(rows), 52)
         for row in rows:
             self.assertNotIn(None, row, "a row has more cells than the header")
             self.assertNotIn(None, row.values(), "a row has fewer cells than the header")
+
+    def test_rule_fixtures_have_their_row_counts_and_complete_rows(self):
+        for path, count in ((OFF_RULES, 36), (OFF_DEDUPE, 15), (OFF_GUARD, 1)):
+            with self.subTest(file=os.path.basename(path)):
+                with open(path, encoding="utf-8", newline="") as f:
+                    header = f.readline().rstrip("\r\n").split("\t")
+                    f.seek(0)
+                    rows = list(csv.DictReader(f, delimiter="\t"))
+                for col in OFF_COLUMNS:
+                    self.assertIn(col, header)
+                self.assertEqual(len(rows), count)
+                for row in rows:
+                    self.assertNotIn(None, row)
+                    self.assertNotIn(None, row.values())
+
+    def test_the_csv_fixtures_are_exactly_what_the_generator_writes(self):
+        out = new_dir("fixture_check")
+        proc = subprocess.run([sys.executable, "-B", os.path.join(FIXTURES, "make_off_fixtures.py"), out],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8", "replace"))
+        for name in ("sample_off.csv", "off_rules.csv", "off_dedupe.csv", "off_alias_guard.csv"):
+            with self.subTest(file=name):
+                with open(os.path.join(out, name), "rb") as made, open(os.path.join(FIXTURES, name), "rb") as kept:
+                    # line endings may differ after a git checkout on Windows
+                    self.assertEqual(made.read().replace(b"\r\n", b"\n"), kept.read().replace(b"\r\n", b"\n"))
+
+    def test_selection_anchors_carry_the_columns_a_pool_needs(self):
+        # A1, A2, A4 and A5 must stay selected: completeness, scans, photo, Latin brand, three macros.
+        by_code = {r["code"]: r for r in self.off_rows()}
+        for code in ("4807770270123", "5000159407236", "8801043014830", "4901330502881"):
+            with self.subTest(code=code):
+                row = by_code[code]
+                for col in ("completeness", "unique_scans_n", "image_front_small_url", "brands",
+                            "proteins_100g", "carbohydrates_100g", "fat_100g"):
+                    self.assertNotEqual(row[col], "", col)
+                self.assertNotIn("en:france", row["countries_tags"])
 
     def test_off_fixture_holds_the_six_anchor_rows(self):
         by_code = {}
@@ -485,8 +697,8 @@ class SchemaModuleCase(unittest.TestCase):
 
 
 class SchemaConstantsTests(SchemaModuleCase):
-    def test_latest_version_is_2(self):
-        self.assertEqual(food_schema.LATEST_VERSION, 2)
+    def test_latest_version_is_3(self):
+        self.assertEqual(food_schema.LATEST_VERSION, 3)
 
     def test_categories(self):
         self.assertEqual(tuple(food_schema.CATEGORIES), ("supermarket", "dining_out", "whole_food"))
@@ -552,6 +764,112 @@ class NormalizeBarcodeTests(SchemaModuleCase):
 
     def test_result_is_text(self):
         self.assertIsInstance(food_schema.normalize_barcode("5000159407236"), str)
+
+
+class BarcodeOriginTests(SchemaModuleCase):
+    """barcode_origin(canonical barcode): the market the prefix was registered in, or None.
+
+    PH 480; JP 450-459 and 490-499; KR 880; UK 500-509; US 000-019, 030-039 and 060-139;
+    AS (the Philippines' neighbour markets) 885, 955, 888, 899, 893, 489, 471 and 690-699.
+    A 14-digit code loses its first digit; an EAN-8 (canonical form 00000 + 8 digits) is read
+    from its own first three digits and is only accepted for PH, JP and KR.
+    """
+
+    def origin(self, barcode):
+        if not hasattr(food_schema, "barcode_origin"):
+            self.fail("food_schema.barcode_origin does not exist")
+        return food_schema.barcode_origin(barcode)
+
+    def check(self, expected):
+        for barcode, origin in expected.items():
+            with self.subTest(barcode=barcode):
+                self.assertEqual(self.origin(barcode), origin)
+
+    def test_prefix_480_is_the_philippines(self):
+        self.check({"4807770270123": "PH", "4800016644504": "PH"})
+
+    def test_prefixes_next_to_480_are_not_the_philippines(self):
+        self.check({"4797770270123": None, "4817770270123": None})
+
+    def test_prefixes_450_to_459_are_japan(self):
+        self.check({"4501234567890": "JP", "4514603365511": "JP", "4591234567890": "JP"})
+
+    def test_prefixes_490_to_499_are_japan(self):
+        self.check({"4901330502881": "JP", "4987035332510": "JP", "4991234567890": "JP"})
+
+    def test_prefixes_460_to_479_are_not_japan(self):
+        self.check({"4491234567890": None, "4601234000019": None, "4701234567890": None})
+
+    def test_prefix_880_is_south_korea(self):
+        self.check({"8801043014830": "KR"})
+
+    def test_prefixes_next_to_880_are_not_south_korea(self):
+        self.check({"8791234567890": None, "8811234567890": None})
+
+    def test_prefixes_500_to_509_are_the_united_kingdom(self):
+        self.check({"5000159407236": "UK", "5010029000023": "UK", "5091234567890": "UK"})
+
+    def test_prefix_510_is_not_the_united_kingdom(self):
+        self.check({"5101234567890": None})
+
+    def test_prefixes_000_to_019_are_the_united_states(self):
+        # a 12-digit UPC-A in its canonical 13-digit form starts with one extra zero
+        self.check({"0016000275287": "US", "0037600105002": "US", "0096619123452": "US",
+                    "0191234567890": "US"})
+
+    def test_prefixes_030_to_039_are_the_united_states(self):
+        self.check({"0301234567890": "US", "0391234567890": "US"})
+
+    def test_prefixes_060_to_139_are_the_united_states(self):
+        self.check({"0601234567890": "US", "0811620020015": "US", "1001234567890": "US",
+                    "1391234567890": "US"})
+
+    def test_prefixes_between_the_united_states_ranges_are_none(self):
+        self.check({"0291234567890": None, "0401234567890": None, "0591234567890": None,
+                    "1401234567890": None})
+
+    def test_asian_neighbour_prefixes(self):
+        self.check({"8851234567890": "AS",     # Thailand
+                    "9551234567890": "AS",     # Malaysia
+                    "8881234567890": "AS",     # Singapore
+                    "8996001600269": "AS",     # Indonesia
+                    "8931234567890": "AS",     # Vietnam
+                    "4891234567890": "AS",     # Hong Kong
+                    "4711234567890": "AS"})    # Taiwan
+
+    def test_prefixes_690_to_699_are_asian_neighbours(self):
+        self.check({"6901234567890": "AS", "6951234567890": "AS", "6991234567890": "AS"})
+
+    def test_prefixes_next_to_the_asian_ones_are_none(self):
+        self.check({"6891234567890": None, "7001234567890": None, "8841234567890": None,
+                    "8861234567890": None})
+
+    def test_other_prefixes_are_none(self):
+        self.check({"3017620422003": None,     # France
+                    "4000417025005": None,     # Germany
+                    "8000500066027": None,     # Italy
+                    "5449000054227": None,     # Belgium
+                    "6111259347861": None})    # Morocco
+
+    def test_14_digits_drop_the_first_digit(self):
+        self.check({"14807770270123": "PH", "18801043014830": "KR", "10012345678902": "US",
+                    "13017620422003": None})
+
+    def test_ean_8_uses_its_own_first_three_digits(self):
+        self.check({"0000048012345": "PH", "0000049123456": "JP", "0000045123456": "JP",
+                    "0000088012345": "KR"})
+
+    def test_ean_8_is_only_accepted_for_ph_jp_and_kr(self):
+        self.check({"0000050123456": None,     # 501 would be the United Kingdom
+                    "0000001234565": None,     # 012 would be the United States
+                    "0000088512345": None,     # 885 would be an Asian neighbour
+                    "0000030123456": None})
+
+    def test_none_is_none(self):
+        self.assertIsNone(self.origin(None))
+
+    def test_normalised_upc_a_is_the_united_states(self):
+        self.assertEqual(self.origin(food_schema.normalize_barcode("016000275287")), "US")
 
 
 class NameKeyTests(SchemaModuleCase):
@@ -682,7 +1000,23 @@ class SchemaCase(SchemaModuleCase):
         return conn
 
     def fresh_v2(self):
+        """A brand-new file brought to the latest version (the name is historic)."""
         conn = self.connect()
+        food_schema.migrate(conn)
+        return conn
+
+    def v2_with_rows(self):
+        """A version 2 file as the scripts wrote it before version 3 existed, with three rows."""
+        conn = self.connect()
+        for statement in V2_SCHEMA:
+            conn.execute(statement)
+        marks = ", ".join("?" for _ in V2_ROWS[0])
+        conn.executemany("INSERT INTO food_items (%s) VALUES (%s)" % (V2_ROW_COLUMNS, marks), V2_ROWS)
+        conn.commit()
+        return conn
+
+    def upgraded_from_v2(self):
+        conn = self.v2_with_rows()
         food_schema.migrate(conn)
         return conn
 
@@ -709,14 +1043,25 @@ class FreshDatabaseMigrationTests(SchemaCase):
         conn = self.connect()
         self.assertIs(conn.row_factory, sqlite3.Row)
 
-    def test_fresh_database_reaches_version_2(self):
+    def test_fresh_database_reaches_version_3(self):
         conn = self.connect()
-        self.assertEqual(food_schema.migrate(conn), 2)
-        self.assertEqual(user_version(conn), 2)
+        self.assertEqual(food_schema.migrate(conn), 3)
+        self.assertEqual(user_version(conn), 3)
 
-    def test_fresh_database_has_every_version_2_column(self):
+    def test_fresh_database_has_every_version_3_column(self):
         cols = column_names(self.fresh_v2())
-        self.assertEqual(sorted(set(V2_COLUMNS) - set(cols)), [], "missing columns")
+        self.assertEqual(sorted(set(V3_COLUMNS) - set(cols)), [], "missing columns")
+
+    def test_fresh_database_has_no_other_columns(self):
+        self.assertEqual(sorted(column_names(self.fresh_v2())), sorted(V3_COLUMNS))
+
+    def test_new_columns_have_the_documented_types(self):
+        conn = self.fresh_v2()
+        info = {tuple(r)[1]: tuple(r) for r in conn.execute("PRAGMA table_info('food_items')").fetchall()}
+        # (cid, name, type, notnull, default, pk)
+        self.assertEqual((info["foreign_tags"][2].upper(), info["foreign_tags"][3]), ("INTEGER", 1))
+        self.assertEqual((info["completeness"][2].upper(), info["completeness"][3]), ("INTEGER", 0))
+        self.assertEqual((info["alt_barcodes"][2].upper(), info["alt_barcodes"][3]), ("TEXT", 1))
 
     def test_fresh_database_has_no_version_1_nutrient_columns(self):
         cols = column_names(self.fresh_v2())
@@ -730,17 +1075,18 @@ class FreshDatabaseMigrationTests(SchemaCase):
     def test_migrating_twice_changes_nothing(self):
         conn = self.fresh_v2()
         before = schema_sql(conn)
-        self.assertEqual(food_schema.migrate(conn), 2)
+        self.assertEqual(food_schema.migrate(conn), 3)
         self.assertEqual(schema_sql(conn), before)
-        self.assertEqual(user_version(conn), 2)
+        self.assertEqual(user_version(conn), 3)
 
     def test_version_survives_closing_and_reopening(self):
         conn = food_schema.connect(self.db_path)
         food_schema.migrate(conn)
         conn.close()
         again = self.connect()
-        self.assertEqual(user_version(again), 2)
+        self.assertEqual(user_version(again), 3)
         self.assertIn("calories_kcal", column_names(again))
+        self.assertIn("alt_barcodes", column_names(again))
 
 
 class Version1UpgradeTests(SchemaCase):
@@ -750,10 +1096,10 @@ class Version1UpgradeTests(SchemaCase):
         self.assertEqual(column_names(conn), V1_COLUMNS)
         self.assertEqual(user_version(conn), 1)
 
-    def test_upgrade_returns_and_stores_version_2(self):
+    def test_upgrade_returns_and_stores_version_3(self):
         conn = self.v1_with_rows()
-        self.assertEqual(food_schema.migrate(conn), 2)
-        self.assertEqual(user_version(conn), 2)
+        self.assertEqual(food_schema.migrate(conn), 3)
+        self.assertEqual(user_version(conn), 3)
 
     def test_upgrade_keeps_every_row(self):
         conn = self.upgraded()
@@ -782,9 +1128,16 @@ class Version1UpgradeTests(SchemaCase):
         for old in ("kcal", "protein", "carbs", "fat"):
             self.assertNotIn(old, cols)
 
-    def test_upgrade_has_every_version_2_column(self):
+    def test_upgrade_has_every_version_3_column(self):
         cols = column_names(self.upgraded())
-        self.assertEqual(sorted(set(V2_COLUMNS) - set(cols)), [], "missing columns")
+        self.assertEqual(sorted(set(V3_COLUMNS) - set(cols)), [], "missing columns")
+
+    def test_upgrade_gives_old_rows_the_new_column_defaults(self):
+        rows = self.by_id(self.upgraded())
+        for rid, row in rows.items():
+            with self.subTest(id=rid):
+                self.assertEqual((row["foreign_tags"], row["completeness"], row["alt_barcodes"]),
+                                 (0, None, "[]"))
 
     def test_upgrade_keeps_group_portions_source_and_source_ref(self):
         rows = self.by_id(self.upgraded())
@@ -835,7 +1188,7 @@ class Version1UpgradeTests(SchemaCase):
         conn = self.upgraded()
         before_rows = dict_rows(conn, "SELECT * FROM food_items ORDER BY id")
         before_schema = schema_sql(conn)
-        self.assertEqual(food_schema.migrate(conn), 2)
+        self.assertEqual(food_schema.migrate(conn), 3)
         self.assertEqual(dict_rows(conn, "SELECT * FROM food_items ORDER BY id"), before_rows)
         self.assertEqual(schema_sql(conn), before_schema)
 
@@ -849,7 +1202,7 @@ class Version1UpgradeTests(SchemaCase):
         food_schema.migrate(conn)
         conn.close()
         again = self.connect()
-        self.assertEqual(user_version(again), 2)
+        self.assertEqual(user_version(again), 3)
         self.assertEqual(sorted(self.by_id(again)), [1, 2, 7, 12])
 
     def test_rows_added_after_the_upgrade_get_new_ids(self):
@@ -857,6 +1210,81 @@ class Version1UpgradeTests(SchemaCase):
         cur = conn.execute("INSERT INTO food_items (name, calories_kcal, source, source_priority)"
                            " VALUES ('New food', 10, 'curated', 1)")
         self.assertGreater(cur.lastrowid, 12)
+
+
+class Version2UpgradeTests(SchemaCase):
+    """A version 2 file (the layout before foreign_tags, completeness and alt_barcodes)."""
+
+    def test_the_hand_built_file_is_a_version_2_file(self):
+        conn = self.v2_with_rows()
+        self.assertEqual(user_version(conn), 2)
+        self.assertEqual(column_names(conn), V2_COLUMNS)
+
+    def test_upgrade_returns_and_stores_version_3(self):
+        conn = self.v2_with_rows()
+        self.assertEqual(food_schema.migrate(conn), 3)
+        self.assertEqual(user_version(conn), 3)
+
+    def test_upgrade_adds_the_three_new_columns(self):
+        cols = column_names(self.upgraded_from_v2())
+        self.assertEqual(sorted(set(V3_COLUMNS) - set(cols)), [], "missing columns")
+
+    def test_upgrade_keeps_every_row_and_its_id(self):
+        rows = self.by_id(self.upgraded_from_v2())
+        self.assertEqual({i: rows[i]["name"] for i in rows},
+                         {3: "Chicken adobo", 4: "Banana, raw", 9: "Weetabix Original"})
+
+    def test_upgrade_keeps_every_old_value(self):
+        rows = self.by_id(self.upgraded_from_v2())
+        names = [c.strip() for c in V2_ROW_COLUMNS.split(",")]
+        for old in V2_ROWS:
+            with self.subTest(id=old[0]):
+                row = rows[old[0]]
+                self.assertEqual(tuple(row[c] for c in names), old)
+
+    def test_old_rows_get_foreign_tags_zero(self):
+        rows = self.by_id(self.upgraded_from_v2())
+        self.assertEqual({r["foreign_tags"] for r in rows.values()}, {0})
+
+    def test_old_rows_get_no_completeness(self):
+        rows = self.by_id(self.upgraded_from_v2())
+        self.assertEqual({r["completeness"] for r in rows.values()}, {None})
+
+    def test_old_rows_get_an_empty_alt_barcodes_list(self):
+        rows = self.by_id(self.upgraded_from_v2())
+        self.assertEqual({r["alt_barcodes"] for r in rows.values()}, {"[]"})
+
+    def test_upgrade_is_idempotent(self):
+        conn = self.upgraded_from_v2()
+        before_rows = dict_rows(conn, "SELECT * FROM food_items ORDER BY id")
+        before_schema = schema_sql(conn)
+        self.assertEqual(food_schema.migrate(conn), 3)
+        self.assertEqual(dict_rows(conn, "SELECT * FROM food_items ORDER BY id"), before_rows)
+        self.assertEqual(schema_sql(conn), before_schema)
+
+    def test_upgrade_is_committed(self):
+        conn = self.v2_with_rows()
+        food_schema.migrate(conn)
+        conn.close()
+        again = food_schema.connect(self.db_path)
+        self.addCleanup(again.close)
+        self.assertEqual(user_version(again), 3)
+        self.assertEqual(sorted(self.by_id(again)), [3, 4, 9])
+
+    def test_rows_added_after_the_upgrade_get_new_ids(self):
+        conn = self.upgraded_from_v2()
+        cur = conn.execute("INSERT INTO food_items (name, calories_kcal, source, source_priority)"
+                           " VALUES ('New food', 10, 'curated', 1)")
+        self.assertGreater(cur.lastrowid, 9)
+
+    def test_an_upgraded_and_a_fresh_database_have_the_same_columns(self):
+        upgraded = column_names(self.upgraded_from_v2())
+        tmp = tempfile.TemporaryDirectory(prefix="tl_schema_", ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        other = food_schema.connect(os.path.join(tmp.name, "fresh.sqlite"))
+        self.addCleanup(other.close)
+        food_schema.migrate(other)
+        self.assertEqual(sorted(upgraded), sorted(column_names(other)))
 
 
 class _ConstraintChecks:
@@ -889,9 +1317,21 @@ class _ConstraintChecks:
                            " VALUES ('Plain food', 100, 'curated', 1)").lastrowid
         row = dict_rows(conn, "SELECT * FROM food_items WHERE id = ?", (rid,))[0]
         self.assertEqual({k: row[k] for k in ("category", "region_tags", "per_unit", "portions",
-                                              "aka", "popularity", "name_key")},
+                                              "aka", "popularity", "name_key", "foreign_tags",
+                                              "completeness", "alt_barcodes")},
                          {"category": "whole_food", "region_tags": "", "per_unit": "100g",
-                          "portions": "[]", "aka": "[]", "popularity": 0, "name_key": ""})
+                          "portions": "[]", "aka": "[]", "popularity": 0, "name_key": "",
+                          "foreign_tags": 0, "completeness": None, "alt_barcodes": "[]"})
+
+    def test_foreign_tags_cannot_be_null(self):
+        conn = self.make_db()
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.insert(conn, foreign_tags=None)
+
+    def test_alt_barcodes_cannot_be_null(self):
+        conn = self.make_db()
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.insert(conn, alt_barcodes=None)
 
     def test_the_three_categories_are_accepted(self):
         conn = self.make_db()
@@ -975,6 +1415,11 @@ class UpgradedSchemaConstraintTests(_ConstraintChecks, SchemaCase):
         return self.upgraded()
 
 
+class UpgradedFromV2SchemaConstraintTests(_ConstraintChecks, SchemaCase):
+    def make_db(self):
+        return self.upgraded_from_v2()
+
+
 # --------------------------------------------------------------------------------------
 # importer: summary line
 # --------------------------------------------------------------------------------------
@@ -984,15 +1429,15 @@ class SummaryTests(FullImportCase):
         self.assertEqual(sorted(SUMMARY_KEYS - set(self.summary)), [])
 
     def test_read_counts_per_source(self):
-        self.assertEqual(self.summary["read"], {"curated": 11, "usda": 13, "off": 32})
+        self.assertEqual(self.summary["read"], {"curated": 11, "usda": 13, "off": 52})
 
     def test_kept_counts_per_source(self):
-        self.assertEqual(self.summary["kept"], {"curated": 8, "usda": 11, "off": 17})
+        self.assertEqual(self.summary["kept"], {"curated": 8, "usda": 11, "off": 37})
 
     def test_kept_counts_match_the_database(self):
         in_db = {r["source"]: r["n"] for r in
                  self.q("SELECT source, COUNT(*) AS n FROM food_items GROUP BY source")}
-        self.assertEqual(in_db, {"curated": 8, "usda": 11, "off": 17})
+        self.assertEqual(in_db, {"curated": 8, "usda": 11, "off": 37})
 
     def test_filtered_region_count(self):
         self.assertEqual(self.summary["filtered_region"], 2)
@@ -1005,13 +1450,19 @@ class SummaryTests(FullImportCase):
         self.assertEqual(self.summary["duplicates"], 8)
 
     def test_total_rows(self):
-        self.assertEqual(self.summary["total_rows"], 36)
+        self.assertEqual(self.summary["total_rows"], 56)
 
     def test_total_rows_matches_the_database(self):
-        self.assertEqual(self.n_rows(), 36)
+        self.assertEqual(self.n_rows(), 56)
 
-    def test_database_is_at_version_2(self):
-        self.assertEqual(self.db.execute("PRAGMA user_version").fetchone()[0], 2)
+    def test_database_is_at_version_3(self):
+        self.assertEqual(self.db.execute("PRAGMA user_version").fetchone()[0], 3)
+
+    def test_the_last_line_is_still_one_json_object_with_the_old_keys(self):
+        self.assertEqual(parse_summary(self.imp["stdout"]), self.summary)
+        self.assertEqual(sorted(SUMMARY_KEYS - set(self.summary)), [])
+        self.assertEqual(set(self.summary["read"]), {"curated", "usda", "off"})
+        self.assertEqual(set(self.summary["kept"]), {"curated", "usda", "off"})
 
 
 # --------------------------------------------------------------------------------------
@@ -1405,9 +1856,14 @@ class DedupNameBrandTests(FullImportCase):
         self.assertEqual(self.n_rows("barcode = ? OR source_ref = ?",
                                      ("0037600105002", "0037600105002")), 0)
 
-    def test_usda_name_survivor_inherits_the_off_thumbnail(self):
+    def test_usda_name_survivor_takes_no_thumbnail_from_the_name_step_loser(self):
+        # DD-3: a name + brand match is not proof of the same pack, so no pack photo goes onto a USDA row
         row = self.one_row("name_key = ?", ("skippy|creamy peanut butter",))
-        self.assertEqual(row["thumbnail_url"], THUMB_BASE + "003/760/010/5002/front_en.6.200.jpg")
+        self.assertIsNone(row["thumbnail_url"])
+
+    def test_usda_name_survivor_keeps_the_dropped_barcode_as_an_alias(self):
+        row = self.one_row("name_key = ?", ("skippy|creamy peanut butter",))
+        self.assertIn("0037600105002", row["alt_barcodes"])
 
     def test_usda_name_survivor_region_tags_are_the_union(self):
         # USDA row is US, the dropped Open Food Facts row US and PH
@@ -1419,13 +1875,23 @@ class DedupNameBrandTests(FullImportCase):
         self.assertEqual((row["source"], row["name"]), ("curated", "Skyflakes Crackers"))
         self.near(row["calories_kcal"], 476.0)    # the Open Food Facts row says 480
 
-    def test_survivor_without_a_barcode_takes_the_dropped_rows_barcode(self):
+    def test_curated_survivor_takes_no_barcode_from_the_name_step_loser(self):
+        # DD-3 (corrected): no curated or USDA row takes a barcode or photo from a name-step loser
         row = self.one_row("name_key = ?", ("my san|skyflakes crackers",))
-        self.assertEqual(row["barcode"], "4800092110016")
+        self.assertIsNone(row["barcode"])
 
-    def test_survivor_without_a_thumbnail_takes_the_dropped_rows_thumbnail(self):
+    def test_curated_survivor_takes_no_thumbnail_from_the_name_step_loser(self):
         row = self.one_row("name_key = ?", ("my san|skyflakes crackers",))
-        self.assertEqual(row["thumbnail_url"], THUMB_BASE + "480/009/211/0016/front_en.8.200.jpg")
+        self.assertIsNone(row["thumbnail_url"])
+
+    def test_curated_survivor_keeps_the_dropped_barcode_as_an_alias(self):
+        row = self.one_row("name_key = ?", ("my san|skyflakes crackers",))
+        self.assertIn("4800092110016", row["alt_barcodes"])
+        self.assertEqual(self.n_rows("barcode = '4800092110016' OR source_ref = '4800092110016'"), 0)
+
+    def test_curated_region_tags_never_change_in_a_merge(self):
+        # the dropped Open Food Facts row is tagged PH and US; the curated row stays PH
+        self.assertEqual(self.one_row("name_key = ?", ("my san|skyflakes crackers",))["region_tags"], "PH")
 
     def test_curated_beats_usda_on_name(self):
         row = self.one_row("name_key = ?", ("|pork adobo",))
@@ -1433,8 +1899,25 @@ class DedupNameBrandTests(FullImportCase):
         self.near(row["calories_kcal"], 228.0)    # the USDA row says 236
         self.assertEqual(self.n_rows("source_ref = 'survey:2706555'"), 0)
 
-    def test_curated_over_usda_survivor_region_tags_are_the_union(self):
-        self.assertEqual(self.one_row("name_key = ?", ("|pork adobo",))["region_tags"], "PH,US")
+    def test_curated_over_usda_region_tags_never_change(self):
+        # the USDA row is tagged US; a curated row's regions are not widened by a merge
+        self.assertEqual(self.one_row("name_key = ?", ("|pork adobo",))["region_tags"], "PH")
+
+    def test_name_survivor_takes_the_larger_popularity_of_the_group(self):
+        # DD-5: the survivor Chippy BBQ had 80 scans, the merged pack 300
+        self.assertEqual(self.one_row("name_key = ?", ("jack n jill|chippy bbq",))["popularity"], 300)
+
+    def test_name_survivor_keeps_the_dropped_barcode_as_an_alias(self):
+        row = self.one_row("name_key = ?", ("jack n jill|chippy bbq",))
+        self.assertIn("4800016644511", row["alt_barcodes"])
+
+    def test_the_survivor_stays_a_plain_database_figure(self):
+        # the merged pack had one blank macro (carbs, estimated as 59.5 g) but lost to the fuller row
+        self.assertEqual(self.one_row("name_key = ?", ("jack n jill|chippy bbq",))["basis"], "database")
+
+    def test_rows_that_merged_nothing_have_an_empty_alias_list(self):
+        self.assertEqual(self.off_row("5000159407236")["alt_barcodes"], "[]")
+        self.assertEqual(self.off_row("4901330502881")["alt_barcodes"], "[]")
 
     def test_no_two_rows_share_a_barcode(self):
         dupes = self.q("SELECT barcode, COUNT(*) AS n FROM food_items WHERE barcode IS NOT NULL"
@@ -1760,12 +2243,12 @@ class OffOnlyImportTests(DbCase):
         return off_only_import()
 
     def test_summary_lists_all_three_sources_even_when_unused(self):
-        self.assertEqual(self.summary["read"], {"curated": 0, "usda": 0, "off": 32})
+        self.assertEqual(self.summary["read"], {"curated": 0, "usda": 0, "off": 52})
 
     def test_kept_count(self):
-        # 32 read - 2 filtered - 6 invalid - 3 duplicates (Choco Pie, Meiji, Chippy)
-        self.assertEqual(self.summary["kept"], {"curated": 0, "usda": 0, "off": 21})
-        self.assertEqual(self.n_rows(), 21)
+        # 52 read - 2 filtered - 6 invalid - 3 duplicates (Choco Pie, Meiji, Chippy)
+        self.assertEqual(self.summary["kept"], {"curated": 0, "usda": 0, "off": 41})
+        self.assertEqual(self.n_rows(), 41)
 
     def test_filtered_invalid_and_duplicate_counts(self):
         self.assertEqual((self.summary["filtered_region"], self.summary["invalid"],
@@ -1848,22 +2331,22 @@ class IdempotentRerunTests(unittest.TestCase):
         cls.r = rerun_import()
 
     def test_first_run_has_36_rows(self):
-        self.assertEqual(self.r["first"]["total_rows"], 36)
+        self.assertEqual(self.r["first"]["total_rows"], 56)
 
     def test_second_run_reports_the_same_total_rows(self):
-        self.assertEqual(self.r["second"]["total_rows"], 36)
+        self.assertEqual(self.r["second"]["total_rows"], 56)
 
     def test_second_run_reports_the_same_kept_counts(self):
-        self.assertEqual(self.r["second"]["kept"], {"curated": 8, "usda": 11, "off": 17})
+        self.assertEqual(self.r["second"]["kept"], {"curated": 8, "usda": 11, "off": 37})
 
     def test_second_run_reads_the_same_inputs(self):
-        self.assertEqual(self.r["second"]["read"], {"curated": 11, "usda": 13, "off": 32})
+        self.assertEqual(self.r["second"]["read"], {"curated": 11, "usda": 13, "off": 52})
 
     def test_second_run_reports_the_same_filtered_and_invalid_counts(self):
         self.assertEqual((self.r["second"]["filtered_region"], self.r["second"]["invalid"]), (2, 10))
 
     def test_row_count_is_unchanged_in_the_database(self):
-        self.assertEqual(len(self.r["rows2"]), 36)
+        self.assertEqual(len(self.r["rows2"]), 56)
 
     def test_rows_are_identical_after_the_second_run(self):
         self.assertEqual(self.r["rows2"], self.r["rows1"])
@@ -1887,8 +2370,8 @@ class SeparateRunsTests(unittest.TestCase):
         self.assertEqual(self.r["summary"]["read"], {"curated": 11, "usda": 0, "off": 0})
 
     def test_final_counts_match_the_combined_run(self):
-        self.assertEqual(self.r["summary"]["kept"], {"curated": 8, "usda": 11, "off": 17})
-        self.assertEqual(self.r["summary"]["total_rows"], 36)
+        self.assertEqual(self.r["summary"]["kept"], {"curated": 8, "usda": 11, "off": 37})
+        self.assertEqual(self.r["summary"]["total_rows"], 56)
 
     def test_later_curated_row_replaces_the_off_row_already_stored(self):
         conn = open_db(self.r["db"])
@@ -1905,6 +2388,564 @@ class SeparateRunsTests(unittest.TestCase):
 # --------------------------------------------------------------------------------------
 # importer: exported app bundle
 # --------------------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------------------
+# importer: schema version 3 facts (foreign tags, completeness) and the new Open Food Facts columns
+# --------------------------------------------------------------------------------------
+
+def ean(prefix, n):
+    """The 13-digit code the fixture generator makes: 3 prefix digits + 9-digit serial + a last digit."""
+    return "%s%09d0" % (prefix, n)
+
+
+class RulesCase(DbCase):
+    """off_rules.csv alone: 36 rows, one per rule branch, written by tests/fixtures/make_off_fixtures.py."""
+
+    @classmethod
+    def load(cls):
+        return rules_import()
+
+    def present(self, code):
+        return self.n_rows("source = 'off' AND (source_ref = ? OR barcode = ?)", (code, code)) == 1
+
+    def assertDropped(self, code):
+        self.assertEqual(self.n_rows("source_ref = ? OR barcode = ?", (code, code)), 0,
+                         "the row with code %s should have been dropped" % code)
+
+
+class RulesSummaryTests(RulesCase):
+    def test_counts(self):
+        # 36 rows; dropped as invalid: digits-only name, "XY", 0 kcal with macros, a plain 231 kcal with no
+        # macros, the larger-tolerance bar, the 5 g sugar chews, the 101 g wafer, the not-label-round chicken
+        self.assertEqual(self.summary["read"], {"curated": 0, "usda": 0, "off": 36})
+        self.assertEqual(self.summary["invalid"], 8)
+        self.assertEqual(self.summary["filtered_region"], 0)
+        self.assertEqual(self.summary["duplicates"], 0)
+        self.assertEqual(self.summary["kept"], {"curated": 0, "usda": 0, "off": 28})
+        self.assertEqual(self.summary["total_rows"], 28)
+
+
+class ForeignTagsTests(RulesCase):
+    """foreign_tags = country tags that are neither wanted (PH US UK JP KR) nor neutral."""
+
+    def test_two_foreign_countries_count_two(self):
+        self.assertEqual(self.off_row(ean("001", 3001))["foreign_tags"], 2)       # united-states, france, germany
+
+    def test_every_neutral_tag_counts_zero_even_with_spaces_after_the_commas(self):
+        # united-kingdom, scotland, england, wales, northern-ireland, angleterre, angle, international,
+        # world, puerto-rico, guam, american-samoa (one tag follows a ", ")
+        self.assertEqual(self.off_row(ean("500", 3002))["foreign_tags"], 0)
+
+    def test_europe_and_european_union_are_neutral(self):
+        self.assertEqual(self.off_row(ean("001", 3003))["foreign_tags"], 0)       # united-states, world, european-union, europe
+
+    def test_a_plain_wanted_country_row_counts_zero(self):
+        self.assertEqual(self.off_row(ean("500", 3005))["foreign_tags"], 0)
+
+
+class ForeignTagsMainImportTests(FullImportCase):
+    def test_one_foreign_tag(self):
+        self.assertEqual(self.off_row("4901515110504")["foreign_tags"], 1)        # Kikkoman: france
+        self.assertEqual(self.off_row("8996001600269")["foreign_tags"], 1)        # Indomie: indonesia
+
+    def test_two_foreign_tags(self):
+        self.assertEqual(self.off_row("5000168001142")["foreign_tags"], 2)        # McVitie's: ireland, france
+        self.assertEqual(self.off_row("3012345678903")["foreign_tags"], 2)        # Fromage Blanc: france, germany
+
+    def test_neutral_tags_only(self):
+        self.assertEqual(self.off_row("4002468135795")["foreign_tags"], 0)        # Gouda: world, european-union
+
+    def test_curated_and_usda_rows_have_none(self):
+        self.assertEqual(self.n_rows("source <> 'off' AND foreign_tags <> 0"), 0)
+
+
+class CompletenessTests(RulesCase):
+    """completeness is stored as an integer percent: round(100 * completeness), NULL when blank."""
+
+    def test_float_noise_cannot_reorder_rows(self):
+        self.assertEqual(self.off_row(ean("500", 3002))["completeness"], 79)      # 0.7874999
+        self.assertEqual(self.off_row(ean("001", 3003))["completeness"], 79)      # 0.7875
+
+    def test_a_half_is_fifty(self):
+        self.assertEqual(self.off_row(ean("500", 3004))["completeness"], 50)
+
+    def test_a_blank_completeness_is_null(self):
+        self.assertIsNone(self.off_row(ean("500", 3005))["completeness"])
+
+    def test_the_stored_value_is_an_integer(self):
+        kinds = {r[0] for r in self.q("SELECT DISTINCT typeof(completeness) FROM food_items WHERE completeness IS NOT NULL")}
+        self.assertEqual(kinds, {"integer"})
+
+def full_completeness():
+    def build():
+        conn = open_db(full_import()["db"])
+        try:
+            return {r["source_ref"]: r["completeness"] for r in
+                    conn.execute("SELECT source_ref, completeness FROM food_items WHERE source = 'off'")}
+        finally:
+            conn.close()
+    return cached("full_completeness", build)
+
+
+class CompletenessMainImportTests(unittest.TestCase):
+    def test_the_two_float_spellings_of_79_percent_agree(self):
+        values = full_completeness()
+        self.assertEqual((values["5000159407236"], values["4901330502881"]), (79, 79))   # 0.7875 and 0.7874999
+
+    def test_a_blank_completeness_is_null(self):
+        self.assertIsNone(full_completeness()["4901340036512"])                   # Calpis Water
+
+    def test_a_completeness_of_one_is_one_hundred(self):
+        self.assertEqual(full_completeness()["4514603365511"], 100)               # Oi Ocha Green Tea
+
+    def test_other_values_are_percent_integers(self):
+        values = full_completeness()
+        self.assertEqual((values["4800016644504"], values["8801043014830"], values["8801056038861"]),
+                         (80, 90, 55))
+
+
+class CarbohydratesTotalTests(RulesCase):
+    def test_carbohydrates_total_is_used_when_carbohydrates_is_blank(self):
+        self.near(self.off_row(ean("480", 6001))["carbs_g"], 8.5)
+
+    def test_carbohydrates_100g_wins_when_both_are_given(self):
+        self.near(self.off_row(ean("001", 6002))["carbs_g"], 62.0)                # total says 65
+
+
+class ImageSmallUrlTests(RulesCase):
+    def test_image_small_url_is_used_when_the_front_photo_column_is_blank(self):
+        self.assertEqual(self.off_row(ean("480", 6001))["thumbnail_url"],
+                         THUMB_BASE + "480/000/006/0010/front_en.5.200.jpg")
+
+    def test_a_row_with_no_photo_column_value_has_none(self):
+        self.assertIsNone(self.off_row(ean("001", 6002))["thumbnail_url"])
+
+
+# --------------------------------------------------------------------------------------
+# importer: validation of Open Food Facts rows (VAL-1 to VAL-6)
+# --------------------------------------------------------------------------------------
+
+class Val5NameTests(RulesCase):
+    def test_html_entities_are_decoded_in_name_and_brand_up_to_three_times(self):
+        row = self.off_row(ean("500", 5001))
+        self.assertEqual(row["name"], "Crunchy oats&honey")                        # "&amp;" once
+        self.assertEqual(row["brand"], "M&S")                                     # "&amp;amp;amp;" three times
+
+    def test_a_name_of_digits_only_drops_the_row(self):
+        self.assertDropped("6111259347861")
+
+    def test_a_single_character_name_is_replaced_by_the_generic_name(self):
+        self.assertEqual(self.off_row(ean("001", 5003))["name"], "Chocolate flavoured cereal")
+
+    def test_two_latin_letters_without_a_digit_are_junk(self):
+        self.assertDropped(ean("500", 5007))
+
+    def test_a_letter_plus_digit_name_is_a_real_name(self):
+        self.assertEqual(self.off_row(ean("480", 5004))["name"], "c2")
+
+    def test_a_single_cjk_character_is_a_real_name(self):
+        self.assertEqual(self.off_row(ean("490", 5005))["name"], "麺")
+
+    def test_text_after_ingredients_is_cut_off_the_name(self):
+        self.assertEqual(self.off_row(ean("001", 5006))["name"], "SWEET PICKLE")
+
+    def test_a_placeholder_brand_becomes_null(self):
+        self.assertIsNone(self.off_row(ean("001", 5006))["brand"])                # "no brand"
+
+    def test_a_real_brand_is_kept(self):
+        self.assertEqual(self.off_row(ean("480", 5004))["brand"], "C2")
+
+    def test_a_generic_name_not_in_the_name_is_added_to_aka(self):
+        self.assertIn("Apple Green Tea", json.loads(self.off_row(ean("480", 5004))["aka"]))
+
+    def test_a_generic_name_already_inside_the_name_is_not_added(self):
+        self.assertEqual(json.loads(self.off_row(ean("500", 5001))["aka"]), [])   # "Crunchy oats" is in the name
+
+    def test_a_generic_name_without_a_latin_letter_is_not_added(self):
+        self.assertEqual(json.loads(self.off_row(ean("490", 5005))["aka"]), [])
+
+
+class Val3SodiumTests(RulesCase):
+    """sodium a = sodium_100g x 1000 mg, salt b = salt_100g x 400 mg."""
+
+    def sodium(self, code):
+        return self.off_row(code)["sodium_mg"]
+
+    def test_a_sodium_out_of_range_falls_back_to_salt(self):
+        self.near(self.sodium(ean("001", 3001)), 440.0)       # sodium 45 g = 45 000 mg, salt 1.1 g
+
+    def test_both_figures_within_25_percent_use_sodium(self):
+        self.near(self.sodium(ean("500", 3002)), 500.0)       # 500 mg against 600 mg
+
+    def test_a_unit_slip_takes_the_larger_figure(self):
+        self.near(self.sodium(ean("001", 3003)), 700.0)       # 1.75 mg against 700 mg
+
+    def test_a_false_zero_takes_the_salt_figure(self):
+        self.near(self.sodium(ean("500", 3004)), 56.0)        # sodium 0, salt 0.14 g
+
+    def test_a_real_conflict_is_null_and_the_row_is_kept(self):
+        row = self.off_row(ean("500", 3005))                  # 500 mg against 1 500 mg
+        self.assertIsNone(row["sodium_mg"])
+        self.near(row["calories_kcal"], 350.0)
+
+
+class Val3SodiumOffOnlyTests(DbCase):
+    """The anchor rows with only Open Food Facts around, so none of them lost to a curated or USDA row."""
+
+    @classmethod
+    def load(cls):
+        return off_only_import()
+
+    def test_sodium_only_and_salt_only_rows_are_unchanged(self):
+        self.near(self.off_row("0016000275287")["sodium_mg"], 497.0)   # sodium 0.497 g, no salt
+        self.near(self.off_row("5000159407236")["sodium_mg"], 252.0)   # salt 0.63 g, no sodium
+
+    def test_agreeing_figures_use_sodium(self):
+        self.near(self.off_row("4807770270123")["sodium_mg"], 1500.0)  # sodium 1.5 g, salt 3.75 g = 1 500 mg
+
+    def test_sodium_over_the_limit_with_no_salt_is_null(self):
+        self.assertIsNone(self.off_row("8801007000015")["sodium_mg"])  # 45 g and no salt
+
+
+class Val8SodiumTests(RulesCase):
+    def test_sodium_typed_in_mg_is_nulled_when_a_serving_would_hold_over_4000_mg(self):
+        row = self.off_row(ean("480", 8001))                  # 28 000 mg per 100 g, 30 g serving: 8 400 mg
+        self.assertIsNone(row["sodium_mg"])
+        self.near(row["calories_kcal"], 520.0)
+
+    def test_a_salty_food_is_kept_when_a_serving_holds_under_4000_mg(self):
+        self.near(self.off_row(ean("500", 8002))["sodium_mg"], 8000.0)   # 8 000 mg per 100 g, 30 g: 2 400 mg
+
+    def test_the_rule_is_off_for_a_100_g_serving(self):
+        self.near(self.off_row(ean("500", 8003))["sodium_mg"], 28000.0)
+
+
+class Val1CalorieTests(RulesCase):
+    def test_zero_calories_with_real_macros_is_dropped(self):
+        self.assertDropped(ean("500", 1001))
+
+    def test_a_consistent_row_is_kept(self):
+        self.assertTrue(self.present(ean("500", 8002)))
+        self.assertTrue(self.present(ean("001", 6005)))
+
+    def test_an_alcoholic_drink_named_vodka_is_kept_with_its_calories(self):
+        row = self.off_row(ean("500", 1002))
+        self.near(row["calories_kcal"], 231.0)
+
+    def test_the_same_numbers_without_an_alcohol_cue_are_dropped(self):
+        self.assertDropped(ean("500", 1003))
+
+    def test_the_larger_tolerance_is_used_not_the_sum(self):
+        # 222 kcal against 432 kcal from the macros (sugars 49 g) for a 16 g serving
+        self.assertDropped(ean("500", 1004))
+
+    def test_a_zero_sugar_sweetener_with_low_calories_is_kept(self):
+        self.near(self.off_row(ean("500", 1005))["calories_kcal"], 5.0)
+
+    def test_the_same_sweetener_with_5_g_sugars_is_dropped(self):
+        self.assertDropped(ean("500", 1006))
+
+    def test_a_row_whose_calories_match_its_sugars_but_not_its_carbs_survives_the_ceiling(self):
+        # Pocari Sweat: 25 kcal, carbs 0, sugars 5.8: the ceiling uses the larger of the two
+        self.assertTrue(self.present("4987035332510"))
+
+
+class Val2RepairTests(RulesCase):
+    def test_r1_zero_kcal_with_a_kilojoule_figure_is_repaired_as_an_estimate(self):
+        row = self.off_row(ean("480", 2001))                  # 2042 kJ / 4.184 = 488.0
+        self.near(row["calories_kcal"], 488.0)
+        self.assertEqual(row["basis"], "estimate")
+
+    def test_r1_is_not_used_when_protein_carbs_and_fat_add_up_to_more_than_100(self):
+        self.assertDropped(ean("480", 2002))                  # 25 + 70 + 6 = 101
+
+    def test_r2_macros_entered_per_30_g_serving_are_scaled_to_100_g(self):
+        row = self.off_row(ean("001", 2003))                  # factor 100 / 30; calories are kept
+        self.near(row["calories_kcal"], 700.0)
+        expected = {"protein_g": 10.0, "carbs_g": 13.33, "sugars_g": 3.33, "fat_g": 73.33,
+                    "saturates_g": 6.67, "fibre_g": 10.0}
+        for col, value in expected.items():
+            with self.subTest(col=col):
+                self.near(row[col], value, places=2)
+
+    def test_r2_scales_a_round_sodium_figure_too(self):
+        self.near(self.off_row(ean("001", 2003))["sodium_mg"], 416.7)   # 125 mg x 100 / 30
+
+    def test_r2_macros_entered_per_500_ml_bottle_are_scaled_to_100_ml(self):
+        row = self.off_row(ean("001", 2004))                  # factor 100 / 500
+        self.near(row["calories_kcal"], 49.0)
+        expected = {"protein_g": 4.0, "carbs_g": 6.0, "sugars_g": 5.6, "fat_g": 1.0, "saturates_g": 0.6,
+                    "fibre_g": 0.0}
+        for col, value in expected.items():
+            with self.subTest(col=col):
+                self.near(row[col], value, places=2)
+        self.near(row["sodium_mg"], 100.0)
+
+    def test_r2_is_refused_when_the_macros_are_not_multiples_of_half_a_gram(self):
+        self.assertDropped(ean("500", 2005))                  # protein 22.3 g
+
+
+class Val4SugarsSaturatesTests(RulesCase):
+    def test_sugars_far_above_carbs_become_null_when_the_calories_follow_carbs(self):
+        row = self.off_row(ean("500", 6003))                  # carbs 14.7, sugars 74.7, 70 kcal
+        self.assertIsNone(row["sugars_g"])
+        self.near(row["carbs_g"], 14.7)
+
+    def test_carbs_take_the_sugars_value_when_the_calories_follow_sugars(self):
+        row = self.off_row("4987035332510")                   # 25 kcal, carbs 0, sugars 5.8
+        self.near(row["carbs_g"], 5.8)
+        self.near(row["sugars_g"], 5.8)
+
+    def test_sugars_slightly_above_carbs_are_clamped_to_carbs(self):
+        self.near(self.off_row(ean("001", 6005))["sugars_g"], 4.83)   # carbs 4.83, sugars 4.88
+
+    def test_saturates_far_above_fat_become_null(self):
+        row = self.off_row(ean("001", 6002))                  # fat 1.61, saturates 6.45
+        self.assertIsNone(row["saturates_g"])
+        self.near(row["fat_g"], 1.61)
+
+    def test_saturates_slightly_above_fat_are_clamped_to_fat(self):
+        self.near(self.off_row(ean("001", 6005))["saturates_g"], 1.5)  # fat 1.5, saturates 1.8
+
+
+class Val6PortionTests(RulesCase):
+    def portions(self, code):
+        return json.loads(self.off_row(code)["portions"])
+
+    def test_a_thousands_separator_text_multiplies_the_quantity_by_1000(self):
+        self.assertEqual(self.portions(ean("480", 6001)), [["1,330g", 1330]])
+
+    def test_a_bare_number_serving_of_30_without_a_quantity_becomes_30_g(self):
+        self.assertEqual(self.portions(ean("001", 6002)), [["30 g", 30]])
+
+    def test_a_bare_number_under_5_gives_no_portion(self):
+        self.assertEqual(self.portions(ean("500", 6003)), [])
+
+    def test_a_portion_worth_more_than_1000_kcal_is_not_stored(self):
+        self.assertEqual(self.portions(ean("500", 6004)), [])          # 400 kcal x 300 g / 100 = 1 200
+
+    def test_a_100_g_serving_text_is_not_stored_but_the_row_is_kept(self):
+        self.assertEqual(self.portions(ean("500", 8003)), [])          # "1 serving (100 g)"
+
+    def test_a_100_g_portion_with_another_unit_word_is_stored(self):
+        self.assertEqual(self.portions(ean("001", 6005)), [["1 cup (100 g)", 100]])
+
+    def test_a_bare_one_gram_portion_is_not_stored(self):
+        self.assertEqual(self.portions(ean("500", 6006)), [])
+
+
+class Val6PortionMainImportTests(FullImportCase):
+    def test_a_100_g_serving_is_not_stored(self):
+        self.assertEqual(self.portions_of(self.off_row("2000000012345")), [])     # Deli Roast: "100 g"
+
+    def test_ordinary_portions_are_still_stored(self):
+        self.assertEqual(self.portions_of(self.off_row("5000159407236")), [["48 g", 48]])
+        self.assertEqual(self.portions_of(self.off_row("4901340036512")), [["500 ml", 500]])
+
+
+class SingleBlankMacroTests(RulesCase):
+    """When exactly one of protein, carbs, fat is blank and the calories imply 1 to 100 g, it is filled."""
+
+    def test_a_blank_carbs_value_is_filled_from_the_calories_as_an_estimate(self):
+        row = self.off_row(ean("001", 7001))                  # (459 - 4 x 9.4 - 9 x 18.8) / 4 = 63.05
+        self.near(row["carbs_g"], 63.05, places=2)
+        self.assertEqual(row["basis"], "estimate")
+
+    def test_a_value_that_works_out_below_1_g_is_left_blank(self):
+        row = self.off_row(ean("001", 7002))                  # protein = (290 - 200 - 90) / 4 = 0
+        self.assertIsNone(row["protein_g"])
+        self.assertEqual(row["basis"], "database")
+
+    def test_nothing_is_filled_when_protein_carbs_and_fat_would_exceed_105_g(self):
+        row = self.off_row(ean("001", 7003))                  # carbs would be 52.5, total 112.5
+        self.assertIsNone(row["carbs_g"])
+        self.assertEqual(row["basis"], "database")
+
+    def test_two_blank_macros_are_not_filled(self):
+        row = self.off_row(ean("500", 6004))                  # only protein (10 g) is given, 400 kcal
+        self.assertEqual((row["carbs_g"], row["fat_g"], row["basis"]), (None, None, "database"))
+        self.near(row["protein_g"], 10.0)
+
+
+class SingleBlankMainImportTests(FullImportCase):
+    def test_three_blank_macros_are_not_filled(self):
+        row = self.off_row("4901340036512")                   # Calpis Water: calories only
+        for col in ("protein_g", "carbs_g", "fat_g"):
+            self.assertIsNone(row[col], col)
+
+
+# --------------------------------------------------------------------------------------
+# importer: de-duplication of Open Food Facts rows (DD-1 to DD-8, SEL-8)
+# --------------------------------------------------------------------------------------
+
+class DedupeCase(unittest.TestCase):
+    """off_dedupe.csv with the flat USDA file, imported twice and exported (15 rows in five groups)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.imp = dedupe_import()
+        cls.doc = cls.imp["doc"]
+        cls.db = open_db(cls.imp["db"])
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.db.close()
+
+    def rows(self, name_key):
+        return self.db.execute("SELECT * FROM food_items WHERE name_key = ?", (name_key,)).fetchall()
+
+    def survivor(self, name_key):
+        found = self.rows(name_key)
+        self.assertEqual(len(found), 1, "expected one row with the key %r, found %d" % (name_key, len(found)))
+        return found[0]
+
+    def bundle_row(self, barcode):
+        fields = self.doc["fields"]
+        found = [dict(zip(fields, r)) for r in self.doc["items"] if r[fields.index("barcode")] == barcode]
+        self.assertEqual(len(found), 1, "expected one bundle row with barcode %s" % barcode)
+        return found[0]
+
+    def aliases_by_survivor(self):
+        fields = self.doc["fields"]
+        out = {}
+        for entry in self.doc.get("alias", []):
+            item = self.doc["items"][entry[0]]
+            out[item[fields.index("barcode")]] = set(entry[1:])
+        return out
+
+
+class Dd1CalorieGateTests(DedupeCase):
+    def test_a_row_within_10_percent_of_the_larger_calories_merges(self):
+        # 100 / 111 / 112 kcal: 111 merges into the 100 kcal row (11 <= 11.1), 112 does not (12 > 11.2)
+        rows = self.rows("kelloggs|corn flakes plain")
+        self.assertEqual(sorted((r["barcode"], r["calories_kcal"]) for r in rows),
+                         [("0038000000011", 100.0), ("0038000000035", 112.0)])
+
+    def test_the_merged_rows_barcode_is_gone_from_the_database_as_a_row(self):
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM food_items WHERE barcode = '0038000000028'"
+                                         " OR source_ref = '0038000000028'").fetchone()[0], 0)
+
+    def test_two_kcal_and_six_kcal_merge_inside_the_5_kcal_floor(self):
+        row = self.survivor("pepsi|diet cola zero")
+        self.assertEqual((row["barcode"], row["calories_kcal"]), ("0012000000014", 2.0))
+
+    def test_an_open_food_facts_row_300_kcal_from_a_usda_row_at_594_does_not_merge_into_it(self):
+        rows = self.rows("skippy|creamy peanut butter")
+        self.assertEqual(sorted((r["source"], r["barcode"]) for r in rows),
+                         [("off", "0037600100002"), ("usda", "0037600110754")])
+
+
+class Dd1WinnerOrderTests(DedupeCase):
+    def test_a_row_whose_energy_matches_its_macros_beats_a_fuller_row_that_does_not(self):
+        # X: 546 kcal with 4P+4C+9F = 420 (7 numbers); Y: 496 kcal (3 numbers). Y wins.
+        row = self.survivor("planters|mixed nut clusters")
+        self.assertEqual((row["barcode"], row["calories_kcal"]), ("0029000000022", 496.0))
+
+    def test_the_loser_barcode_is_kept_as_an_alias(self):
+        self.assertIn("0029000000015", self.survivor("planters|mixed nut clusters")["alt_barcodes"])
+
+
+class Dd5PopularityTests(DedupeCase):
+    def test_the_survivor_takes_the_larger_popularity(self):
+        self.assertEqual(self.survivor("planters|mixed nut clusters")["popularity"], 20)    # own 5, merged 20
+
+    def test_the_survivor_keeps_its_own_popularity_when_it_is_larger(self):
+        self.assertEqual(self.survivor("munchies|chocolate wafer bites")["popularity"], 50)
+
+    def test_the_first_kept_row_of_a_group_keeps_nine_scans(self):
+        row = [r for r in self.rows("kelloggs|corn flakes plain") if r["barcode"] == "0038000000011"][0]
+        self.assertEqual(row["popularity"], 9)
+
+
+class Dd2AliasDatabaseTests(DedupeCase):
+    def test_every_alias_is_kept_in_the_database_whatever_its_popularity(self):
+        text = self.survivor("munchies|chocolate wafer bites")["alt_barcodes"]
+        json.loads(text)
+        for code in ("5010000000019", "4901234567894", "0040000000029"):
+            self.assertIn(code, text)
+
+    def test_the_survivors_own_barcode_is_not_its_own_alias(self):
+        row = self.survivor("munchies|chocolate wafer bites")
+        self.assertNotIn(row["barcode"], row["alt_barcodes"])
+
+    def test_alias_lists_are_json_and_duplicate_free(self):
+        for row in self.db.execute("SELECT name_key, alt_barcodes FROM food_items"):
+            codes = json.loads(row["alt_barcodes"])
+            self.assertIsInstance(codes, list, row["name_key"])
+            self.assertEqual(len(codes), len({json.dumps(c) for c in codes}), row["name_key"])
+
+
+class Dd2AliasBundleTests(DedupeCase):
+    def test_alias_entries_point_at_the_right_survivors(self):
+        self.assertEqual(self.aliases_by_survivor(), {
+            "0038000000011": {38000000028},                         # the 111 kcal pack, 4 scans
+            "0012000000014": {12000000021},                         # the 6 kcal pack, 1 scan
+            "0029000000022": {29000000015},                         # the 525 kcal pack
+            "0040000000012": {4901234567894, 40000000029},          # JP-tagged (0 scans) and 2-scan packs
+            "3012345000050": {40000000036, 4801234000019},          # a 4-scan US pack and a PH pack
+        })
+
+    def test_an_alias_whose_own_row_had_no_scans_and_no_ph_jp_kr_tag_is_filtered_out(self):
+        listed = {code for entry in self.doc["alias"] for code in entry[1:]}
+        self.assertNotIn(5010000000019, listed)                     # UK-tagged, never scanned
+
+    def test_a_never_scanned_jp_tagged_alias_is_kept(self):
+        self.assertIn(4901234567894, self.aliases_by_survivor()["0040000000012"])
+
+    def test_a_survivor_without_a_portion_takes_the_merged_rows_portion(self):
+        self.assertIn(["30 g", 30], self.bundle_row("0040000000012")["portions"])
+
+    def test_the_alias_codes_are_integers_without_leading_zeros(self):
+        for entry in self.doc["alias"]:
+            for code in entry[1:]:
+                self.assertIs(type(code), int)
+        self.assertIn(12000000021, self.aliases_by_survivor()["0012000000014"])
+
+
+class Sel8AndDd7Tests(DedupeCase):
+    def test_the_survivor_takes_the_smallest_foreign_tag_count_of_its_group(self):
+        row = self.survivor("hazelo|hazelnut spread jar")
+        self.assertEqual(row["foreign_tags"], 0)             # it came with france + germany; the others have none
+
+    def test_a_ph_tagged_row_does_not_win_a_tie_break(self):
+        row = self.survivor("hazelo|hazelnut spread jar")
+        self.assertEqual(row["barcode"], "3012345000050")    # the fuller row, not the PH-tagged one
+        self.assertEqual(row["region_tags"], "PH,US")
+
+    def test_the_survivor_is_exported(self):
+        self.assertEqual(self.bundle_row("3012345000050")["name"], "Hazelnut Spread Jar")
+
+
+class DedupeRerunTests(DedupeCase):
+    def test_a_second_run_leaves_the_same_rows(self):
+        self.assertEqual(self.imp["rows2"], self.imp["rows1"])
+
+    def test_a_second_run_writes_the_same_bundle(self):
+        self.assertEqual(self.imp["doc2"], self.doc)
+
+
+class AliasGuardTests(unittest.TestCase):
+    """A stored alias that has since become a row's own barcode must not be exported."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.imp = alias_guard_import()
+        cls.doc = cls.imp["doc"]
+
+    def listed(self):
+        return {code for entry in self.doc.get("alias", []) for code in entry[1:]}
+
+    def test_the_new_row_owns_the_barcode_in_the_bundle(self):
+        fields = self.doc["fields"]
+        owners = [r[0] for r in self.doc["items"] if r[fields.index("barcode")] == "0038000000028"]
+        self.assertEqual(owners, ["Totally Different Snack"])
+
+    def test_that_code_is_not_listed_as_an_alias(self):
+        self.assertNotIn(38000000028, self.listed())
+
+    def test_other_aliases_are_still_listed(self):
+        self.assertIn(29000000015, self.listed())
+
 
 class BundleCase(unittest.TestCase):
     doc = None
@@ -1952,10 +2993,10 @@ class BundleTests(BundleCase):
         self.assertEqual(self.doc["thumbBase"], THUMB_BASE)
 
     def test_counts(self):
-        self.assertEqual(self.doc["counts"], {"curated": 8, "usda": 11, "off": 17})
+        self.assertEqual(self.doc["counts"], {"curated": 8, "usda": 11, "off": 29})
 
     def test_items_hold_every_row(self):
-        self.assertEqual(len(self.doc["items"]), 36)
+        self.assertEqual(len(self.doc["items"]), 48)
 
     def test_every_row_has_one_value_per_field(self):
         for row in self.doc["items"]:
@@ -2137,16 +3178,72 @@ class BundleTests(BundleCase):
 
     # ---- order
     def test_rows_are_grouped_curated_survey_other_usda_off(self):
-        self.assertEqual([r["source"] for r in self.recs()], [0] * 8 + [1] * 3 + [2] * 8 + [3] * 17)
+        self.assertEqual([r["source"] for r in self.recs()], [0] * 8 + [1] * 3 + [2] * 8 + [3] * 29)
 
-    def test_off_rows_are_ph_first_then_by_popularity(self):
-        self.assertEqual([r["name"] for r in self.recs() if r["source"] == 3], OFF_EXPORT_ORDER)
+    def test_off_rows_come_in_pool_order_ph_us_uk_jp_kr_as(self):
+        got = [(r["name"], r["barcode"]) for r in self.recs() if r["source"] == 3]
+        self.assertEqual(got, OFF_EXPORT_ORDER)
 
     def test_dropped_duplicates_are_not_exported(self):
         names = [r["name"] for r in self.recs()]
         for gone in ("Pancit Canton Kalamansi", "Choco Pie", "Meiji Milk Choco",
                      "Jack 'n Jill Chippy BBQ", "Skippy Creamy Peanut Butter", "SkyFlakes Crackers"):
             self.assertNotIn(gone, names)
+
+    # ---- alias
+    def test_alias_is_a_list_of_item_index_then_integer_codes(self):
+        alias = self.doc["alias"]
+        self.assertIsInstance(alias, list)
+        for entry in alias:
+            self.assertIsInstance(entry, list)
+            self.assertGreaterEqual(len(entry), 2)
+            self.assertIs(type(entry[0]), int)
+            self.assertTrue(0 <= entry[0] < len(self.doc["items"]), entry)
+            for code in entry[1:]:
+                self.assertIs(type(code), int, entry)
+
+    def test_alias_points_at_the_right_item_index(self):
+        by_name = {}
+        for entry in self.doc["alias"]:
+            by_name.setdefault(self.doc["items"][entry[0]][0], set()).update(entry[1:])
+        self.assertEqual(by_name, MAIN_ALIASES)
+
+    def test_alias_codes_have_no_leading_zeros_and_equal_the_stored_barcodes(self):
+        # the USDA survivor of "Skippy" lists the 12-digit UPC 037600105002 as the number 37600105002
+        entry = [e for e in self.doc["alias"] if self.doc["items"][e[0]][0] == "CREAMY PEANUT BUTTER"][0]
+        self.assertEqual(entry[1:], [37600105002])
+
+    def test_alias_does_not_list_a_survivors_own_barcode(self):
+        own = {int(r["barcode"]) for r in self.recs() if r["barcode"]}
+        listed = {code for entry in self.doc["alias"] for code in entry[1:]}
+        self.assertEqual(own & listed, set())
+
+    def test_alias_never_names_an_item_twice(self):
+        indexes = [entry[0] for entry in self.doc["alias"]]
+        self.assertEqual(len(indexes), len(set(indexes)))
+
+    def test_version_and_fields_are_unchanged_by_the_alias_key(self):
+        self.assertEqual(self.doc["version"], 2)
+        self.assertEqual(self.doc["fields"], BUNDLE_FIELDS)
+
+    # ---- the 100 g default serving for Open Food Facts rows
+    def test_packaged_rows_get_100_g_first(self):
+        self.assertEqual(self.rec(name="Snickers")["portions"], [["100 g", 100], ["48 g", 48]])
+        self.assertEqual(self.rec(name="Weetabix Original")["portions"],
+                         [["100 g", 100], ["2 biscuits (37.5 g)", 37.5]])
+        self.assertEqual(self.rec(name="Baked Beans in Tomato Sauce")["portions"],
+                         [["100 g", 100], ["1/2 can (200 g)", 200]])
+        self.assertEqual(self.rec(name="Pocky Chocolate")["portions"], [["100 g", 100], ["1 pack (36 g)", 36]])
+
+    def test_a_packaged_drink_keeps_its_ml_serving_first(self):
+        self.assertEqual(self.rec(name="Banana Flavored Milk")["portions"], [["240 ml", 240]])
+
+    def test_a_spoon_food_keeps_its_spoon_first(self):
+        self.assertEqual(self.rec(name="Kewpie Mayonnaise")["portions"], [["1 tbsp (15 g)", 15]])
+        self.assertEqual(self.rec(name="Kikkoman Soy Sauce")["portions"], [["1 tbsp (15 ml)", 15]])
+
+    def test_a_row_whose_only_portion_is_100_g_has_none_stored_and_none_exported(self):
+        self.assertEqual(self.rec(name="Deli Roast Chicken Slices")["portions"], [])
 
 
 class DefaultPortionTests(unittest.TestCase):
@@ -2157,8 +3254,10 @@ class DefaultPortionTests(unittest.TestCase):
         import import_foods
         cls.rule = staticmethod(import_foods.default_portions)
 
-    def apply(self, name, group, portions, category="whole_food", per_unit="100g"):
-        item = {"name": name, "group_label": group, "category": category, "per_unit": per_unit}
+    def apply(self, name, group, portions, category="whole_food", per_unit="100g", source="usda"):
+        # a real food_items row also names its source, which the Open Food Facts cases below rely on
+        item = {"name": name, "group_label": group, "category": category, "per_unit": per_unit,
+                "source": source}
         return self.rule(item, portions)
 
     def assertKeeps(self, name, group, portions, category="whole_food"):
@@ -2290,6 +3389,33 @@ class DefaultPortionTests(unittest.TestCase):
         self.assertKeeps("Soup, chicken broth cubes, dry", "Soups, Sauces, and Gravies", [["1 cube", 4.8]])
         self.assertHundredFirst("Soup, ramen noodle, any flavor, dry", "Soups, Sauces, and Gravies", [["1 package without flavor packet", 81]])
 
+    # ---- Open Food Facts rows: no group label, category supermarket
+    def off(self, name, portions):
+        return self.apply(name, None, portions, "supermarket", source="off")
+
+    def test_off_a_packaged_food_gets_100_g_first(self):
+        self.assertEqual(self.off("Snickers", [["48 g", 48]]), [["100 g", 100], ["48 g", 48]])
+        self.assertEqual(self.off("Weetabix Original", [["2 biscuits (37.5 g)", 37.5]]),
+                         [["100 g", 100], ["2 biscuits (37.5 g)", 37.5]])
+
+    def test_off_a_portion_in_ml_cl_l_or_fl_oz_marks_a_drink_that_keeps_its_serving(self):
+        for label, amount in (("240 ml", 240), ("1 can (33 cl)", 330), ("1 bottle (1 l)", 1000),
+                              ("12 fl oz", 355)):
+            with self.subTest(label=label):
+                self.assertEqual(self.off("Mystery Soda Lime", [[label, amount]]), [[label, amount]])
+
+    def test_off_a_name_that_says_drink_keeps_its_serving(self):
+        self.assertEqual(self.off("Orange Juice", [["1 cup (240 g)", 240]]), [["1 cup (240 g)", 240]])
+
+    def test_off_a_unit_food_keeps_its_unit(self):
+        self.assertEqual(self.off("Granola Bar Oats", [["1 bar (40 g)", 40]]), [["1 bar (40 g)", 40]])
+
+    def test_off_a_spoon_food_keeps_its_spoon(self):
+        self.assertEqual(self.off("Peanut Butter Creamy", [["2 tbsp (32 g)", 32]]), [["2 tbsp (32 g)", 32]])
+
+    def test_off_a_row_without_portions_has_none(self):
+        self.assertEqual(self.off("Snickers", []), [])
+
     # ---- e: "default_portion" in the curated list, end to end
     def curated_bundle(self, entries):
         d = new_dir("default_portion")
@@ -2339,33 +3465,168 @@ class DefaultPortionTests(unittest.TestCase):
         self.assertIn("default_portion", imp["stderr"])
 
 
-class BundleMaxOffTests(BundleCase):
-    """--max-off 1 and no --built."""
+class BundleSelectionTests(BundleCase):
+    """Which Open Food Facts rows the main import puts in the app bundle, and in what order (SEL-1 to SEL-6)."""
 
     @classmethod
     def setUpClass(cls):
-        cls.imp = max_off_import()
+        cls.doc = read_json(full_import()["bundle"])
+        cls.off = [(r["name"], r["barcode"], r["brand"]) for r in cls.recs_of(cls.doc) if r["source"] == 3]
+
+    @staticmethod
+    def recs_of(doc):
+        return [dict(zip(doc["fields"], row)) for row in doc["items"]]
+
+    def names(self):
+        return [n for n, _b, _br in self.off]
+
+    def barcodes(self):
+        return [b for _n, b, _br in self.off]
+
+    def test_the_philippine_slice_includes_a_480_row_tagged_only_united_states(self):
+        self.assertIn("Pinoy Spread Peanut", self.names())
+        self.assertEqual(self.rec(name="Pinoy Spread Peanut")["regions"], "US")
+
+    def test_the_philippine_slice_is_written_first_by_scans(self):
+        self.assertEqual([n for n, _b, _br in self.off][:6],
+                         ["Chippy BBQ", "Kikkoman Soy Sauce", "Milo Activ-Go Powder", "Bear Brand Powdered Milk",
+                          "チョコ", "Pinoy Spread Peanut"])
+
+    def test_a_ph_tagged_row_with_an_untypeable_name_and_foreign_tags_is_kept(self):
+        row = self.rec(name="チョコ")
+        self.assertEqual((row["regions"], row["barcode"]), ("PH", "3012345000012"))
+        self.assertEqual((row["protein"], row["carbs"], row["fat"]), (None, None, None))
+
+    def test_a_foreign_tagged_row_with_a_barcode_of_no_wanted_market_is_left_out(self):
+        self.assertNotIn("Fromage Blanc Nature", self.names())
+
+    def test_a_foreign_tagged_row_with_a_wanted_barcode_prefix_is_kept(self):
+        self.assertIn("McVitie's Digestive Biscuits", self.names())      # Ireland + France tags, prefix 500
+        self.assertIn("Indomie Mi Goreng", self.names())                 # Indonesia tag, prefix 899
+
+    def test_neutral_tags_do_not_count_as_foreign(self):
+        # tagged United States + world + european-union, German barcode: kept only because no tag is foreign
+        self.assertIn("Gouda Cheese Slices", self.names())
+
+    def test_an_untypeable_name_is_left_out_of_the_pools(self):
+        self.assertNotIn("ポッキー チョコレート", self.names())
+
+    def test_a_japan_only_tag_with_a_russian_barcode_belongs_to_no_pool(self):
+        self.assertNotIn("Halva Peanut Bar", self.names())
+
+    def test_a_row_without_protein_carbs_and_fat_is_left_out_of_the_pools(self):
+        self.assertNotIn("Calpis Water", self.names())
+
+    def test_a_zero_scan_row_needs_a_latin_letter_brand_and_a_photo(self):
+        self.assertIn("Black Thunder Chocolate Bar", self.names())       # brand Yuraku + photo
+        self.assertNotIn("Meltykiss Premium Chocolate", self.names())    # brand, no photo
+        self.assertNotIn("Plain Wafer Rolls", self.names())              # photo, no brand
+        self.assertNotIn("Hokkaido Milk Caramel", self.names())          # photo, brand in kanji only
+
+    def test_every_listed_left_out_row_is_absent(self):
+        for name, why in OFF_LEFT_OUT.items():
+            with self.subTest(name=name, why=why):
+                self.assertNotIn(name, self.names())
+
+    def test_a_brand_on_two_ph_rows_counts_triple_and_a_brand_on_one_does_not(self):
+        order = self.names()
+        # Nestle (accent folded) is on Milo and Bear Brand: 10 scans x 3 = 30 beats Maltesers at 25
+        self.assertLess(order.index("Nesquik Chocolate Powder"), order.index("Maltesers"))
+        # Kikkoman is on one PH row only: 20 scans stay 20 and rank below Maltesers at 25
+        self.assertLess(order.index("Maltesers"), order.index("Kikkoman Teriyaki Sauce"))
+
+    def test_equal_rank_is_broken_by_completeness(self):
+        order = self.names()
+        self.assertLess(order.index("Plain Crackers Salted"), order.index("Gouda Cheese Slices"))   # 90 % before 50 %
+
+    def test_popularity_is_not_divided_by_foreign_tags(self):
+        order = self.names()
+        # 386 scans with two foreign tags would drop to 128 if divided, below the 150 of Pot Noodle
+        self.assertLess(order.index("McVitie's Digestive Biscuits"), order.index("Pot Noodle Original Curry"))
+
+    def test_a_row_repeating_a_taken_plain_name_and_rounded_kcal_is_skipped(self):
+        maltesers = [(b, br) for n, b, br in self.off if n == "Maltesers"]
+        self.assertEqual(maltesers, [("0040000579816", self.brand_index("Mars")),
+                                     ("0040000579847", self.brand_index("Mars Food"))])
+        self.assertNotIn("0040000579830", self.barcodes())               # Mars Wrigley, 500.4 kcal
+
+    def brand_index(self, name):
+        return self.doc["brands"].index(name)
+
+    def test_the_pools_come_out_in_the_expected_order_and_size(self):
+        position = 0
+        for pool, rows in OFF_POOLS:
+            with self.subTest(pool=pool):
+                self.assertEqual([(n, b) for n, b, _br in self.off[position:position + len(rows)]], rows)
+            position += len(rows)
+        self.assertEqual(position, len(self.off))
+
+    def test_the_kr_pool_is_filled_before_us_so_shin_ramyun_is_a_kr_row(self):
+        self.assertIn(("Shin Ramyun", "8801043014830"), OFF_KR)
+        self.assertNotIn(("Shin Ramyun", "8801043014830"), OFF_US)
+        self.assertEqual(self.rec(name="Shin Ramyun")["regions"], "US,KR")
+
+    def test_the_jp_pool_is_filled_before_us_so_kewpie_is_a_jp_row(self):
+        self.assertEqual(self.names().index("Kewpie Mayonnaise"),
+                         len(OFF_PH + OFF_US + OFF_UK) + 1)
+
+
+class QuotaCase(BundleCase):
+    quota = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.imp = quota_import(cls.quota)
         cls.doc = cls.imp["doc"]
 
-    def test_every_ph_tagged_off_row_is_still_exported(self):
-        names = [r["name"] for r in self.recs() if r["source"] == 3]
-        for ph in OFF_EXPORT_ORDER[:3]:
-            self.assertIn(ph, names)
+    def off_names(self):
+        return [(r["name"], r["barcode"]) for r in self.recs() if r["source"] == 3]
 
-    def test_only_the_most_popular_other_off_row_is_exported(self):
-        names = [r["name"] for r in self.recs() if r["source"] == 3]
-        self.assertEqual(names, OFF_EXPORT_ORDER[:3] + ["Snickers"])
+
+class OffQuotaTruncationTests(QuotaCase):
+    """--off-quota US=1,UK=1,JP=3,KR=2,AS=1 (and no --built): each pool keeps its best rows."""
+    quota = "US=1,UK=1,JP=3,KR=2,AS=1"
+
+    def test_each_pool_keeps_only_its_quota(self):
+        expected = OFF_PH + OFF_US[:1] + OFF_UK[:1] + OFF_JP[:3] + OFF_KR[:2] + OFF_AS[:1]
+        self.assertEqual(self.off_names(), expected)
+
+    def test_the_philippine_slice_is_not_limited_by_any_quota(self):
+        self.assertEqual(self.off_names()[:len(OFF_PH)], OFF_PH)
 
     def test_curated_and_usda_rows_are_not_limited(self):
         sources = [r["source"] for r in self.recs()]
         self.assertEqual((sources.count(0), sources.count(1), sources.count(2)), (8, 3, 8))
 
     def test_the_database_still_holds_every_off_row(self):
-        self.assertEqual(self.imp["summary"]["kept"]["off"], 17)
-        self.assertEqual(self.imp["summary"]["total_rows"], 36)
+        self.assertEqual(self.imp["summary"]["kept"]["off"], 37)
+        self.assertEqual(self.imp["summary"]["total_rows"], 56)
 
     def test_built_defaults_to_an_empty_string(self):
         self.assertEqual(self.doc["built"], "")
+
+
+class OffQuotaZeroPoolTests(QuotaCase):
+    """A pool may be 0: UK=0 leaves the UK-only rows out; US=2 keeps the two best US rows."""
+    quota = "US=2,UK=0,JP=3500,KR=2500,AS=1500"
+
+    def test_a_pool_set_to_zero_exports_nothing(self):
+        uk_only = {n for n, _b in OFF_UK}
+        self.assertEqual({n for n, _b in self.off_names()} & (uk_only - {"Kikkoman Soy Sauce"}), set())
+
+    def test_the_other_pools_are_filled_as_usual(self):
+        expected = OFF_PH + OFF_US[:2] + OFF_JP + OFF_KR + OFF_AS
+        self.assertEqual(self.off_names(), expected)
+
+
+class OffQuotaAllZeroTests(QuotaCase):
+    quota = "US=0,UK=0,JP=0,KR=0,AS=0"
+
+    def test_only_the_philippine_slice_is_exported(self):
+        self.assertEqual(self.off_names(), OFF_PH)
+        self.assertEqual(self.doc["counts"]["off"], len(OFF_PH))
+
+
 
 
 # --------------------------------------------------------------------------------------
@@ -2381,15 +3642,37 @@ class CommandLineTests(unittest.TestCase):
         imp = import_ok(["--db", self.db, "--curated-json", CURATED, "--quiet"], isolated=True)
         self.assertEqual(imp["summary"]["kept"]["curated"], 8)
 
-    def test_creates_the_database_at_version_2(self):
+    def test_creates_the_database_at_version_3(self):
         self.assertFalse(os.path.exists(self.db))
         import_ok(["--db", self.db, "--curated-json", CURATED, "--quiet"])
         conn = open_db(self.db)
         try:
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 3)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM food_items").fetchone()[0], 8)
+            self.assertEqual(sorted(set(V3_NEW_COLUMNS) - set(column_names(conn))), [])
         finally:
             conn.close()
+
+    def test_upgrades_an_existing_version_2_database_and_keeps_its_rows(self):
+        conn = sqlite3.connect(self.db)
+        for statement in V2_SCHEMA:
+            conn.execute(statement)
+        marks = ", ".join("?" for _ in V2_ROWS[0])
+        conn.executemany("INSERT INTO food_items (%s) VALUES (%s)" % (V2_ROW_COLUMNS, marks), V2_ROWS)
+        conn.commit()
+        conn.close()
+        summary = import_ok(["--db", self.db, "--curated-json", CURATED, "--quiet"])["summary"]
+        conn = open_db(self.db)
+        try:
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 3)
+            old = {r["id"]: r for r in conn.execute("SELECT * FROM food_items WHERE id IN (3, 4, 9)")}
+        finally:
+            conn.close()
+        self.assertEqual(sorted(old), [3, 4, 9], "a version 2 row was lost")
+        self.assertEqual(old[9]["name"], "Weetabix Original")
+        self.assertEqual((old[9]["barcode"], old[9]["popularity"]), ("5010029000023", 420))
+        self.assertEqual(summary["kept"]["usda"], 1)
+        self.assertEqual(summary["kept"]["off"], 1)
 
     def test_curated_only_summary(self):
         summary = import_ok(["--db", self.db, "--curated-json", CURATED, "--quiet"])["summary"]
@@ -2408,7 +3691,7 @@ class CommandLineTests(unittest.TestCase):
         summary = import_ok(["--db", self.db, "--curated-json", CURATED, "--quiet"])["summary"]
         conn = open_db(self.db)
         try:
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 3)
             old = conn.execute("SELECT name, calories_kcal, source_ref FROM food_items WHERE id = 5").fetchone()
         finally:
             conn.close()
@@ -2431,10 +3714,67 @@ class CommandLineTests(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertTrue(err.strip(), "no message on stderr")
 
-    def test_non_numeric_max_off_exits_non_zero(self):
-        code, _out, _err = run_importer(["--db", self.db, "--curated-json", CURATED,
-                                         "--max-off", "many"])
+    def test_non_numeric_off_quota_exits_non_zero_with_a_message(self):
+        code, _out, err = run_importer(["--db", self.db, "--curated-json", CURATED,
+                                        "--off-quota", "US=many,UK=1,JP=1,KR=1,AS=1"])
         self.assertNotEqual(code, 0)
+        self.assertTrue(err.strip(), "no message on stderr")
+
+    def test_the_documented_default_quotas_give_the_same_bundle_as_no_option(self):
+        out = os.path.join(self.dir, "food-db.json")
+        import_ok(full_args(self.db, out, ["--built", BUILT, "--quiet",
+                                           "--off-quota", "US=12000,UK=2500,JP=3500,KR=2500,AS=1500"]))
+        self.assertEqual(read_json(out), read_json(full_import()["bundle"]))
+
+
+class CompletenessGuardTests(unittest.TestCase):
+    """export_app refuses a database whose Open Food Facts rows all have completeness NULL (old rules)."""
+
+    def setUp(self):
+        self.dir = new_dir("guard_cli")
+        self.out = os.path.join(self.dir, "food-db.json")
+
+    def assertRefused(self, code, err):
+        self.assertNotEqual(code, 0)
+        self.assertTrue(err.strip(), "no message on stderr")
+        self.assertTrue(any(word in err.lower() for word in ("completeness", "re-import", "reimport", "old rules")),
+                        "the message does not say what is wrong: %r" % err[-300:])
+        self.assertFalse(os.path.exists(self.out), "a food list was written anyway")
+
+    def test_a_database_made_by_the_old_rules_is_refused(self):
+        db = os.path.join(self.dir, "old.sqlite")
+        shutil.copyfile(old_rules_database()["db"], db)
+        code, _out, err = run_importer(["--db", db, "--export-app", self.out, "--quiet"])
+        self.assertRefused(code, err)
+
+    def test_a_file_without_a_completeness_column_gives_such_a_database_and_is_refused(self):
+        db = os.path.join(self.dir, "comma.sqlite")
+        path = os.path.join(self.dir, "off_commas.csv")
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["code", "product_name", "countries_tags", "energy-kcal_100g"])
+            w.writerow(["5012345678900", "Oat Biscuits plain", "en:united-kingdom", "450"])
+        code, _out, err = run_importer(["--db", db, "--off-path", path, "--export-app", self.out, "--quiet"])
+        self.assertRefused(code, err)
+
+    def test_one_row_with_a_completeness_is_enough_to_export(self):
+        db = os.path.join(self.dir, "partly.sqlite")
+        shutil.copyfile(old_rules_database()["db"], db)
+        conn = open_db(db)
+        try:
+            conn.execute("UPDATE food_items SET completeness = 79 WHERE source = 'off' AND source_ref = '5000159407236'")
+            conn.commit()
+        finally:
+            conn.close()
+        import_ok(["--db", db, "--export-app", self.out, "--quiet"])
+        self.assertTrue(os.path.isfile(self.out))
+
+    def test_a_database_without_any_off_row_still_exports(self):
+        db = os.path.join(self.dir, "curated.sqlite")
+        import_ok(["--db", db, "--curated-json", CURATED, "--export-app", self.out, "--quiet"])
+        self.assertEqual(read_json(self.out)["counts"], {"curated": 8, "usda": 0, "off": 0})
+
+
 
 
 if __name__ == "__main__":

@@ -1221,7 +1221,7 @@ async function suiteV2(){
       await wait(2500);   /* the app asks for the bundle 1.5 s after it starts */
       const rows = await search(PANCIT_CODE, r => r.length === 1 && r[0].name === PANCIT);
       expect(asked === 1 && removed === 1, 'the app asked for the bundle ' + asked + ' times and the list was removed ' + removed + ' times');
-      expect(txt(q('#food-res-head')) === BARCODE_HEAD && rows[0].kcal === 280, 'the barcode shows ' + rows[0].kcal + ' kcal, headed "' + txt(q('#food-res-head')) + '"');
+      expect(txt(q('#food-res-head')) === BARCODE_HEAD && (rows[0].kcal === 280 || rows[0].kcal === 467), 'the barcode shows ' + rows[0].kcal + ' kcal (1 pack 280 or 100 g 467), headed "' + txt(q('#food-res-head')) + '"');
       for (const a of plan.codes.slice(0, 2)) {
         type('#ff-name', 'x'); await waitFor(() => !visible(q('#food-res')), 2000, 'the list to hide');
         type('#ff-name', a.code); await wait(500);

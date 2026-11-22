@@ -17,14 +17,16 @@ file). It is used here as the layout version:
     1  the first table: name, group, four numbers per 100 g, portions, source
     2  adds brand, category, regions, barcode, thumbnail, sugars / saturates / fibre /
        sodium, other names, basis, source priority, popularity and a de-duplication key
+    3  adds three facts the importer needs to choose and merge Open Food Facts rows:
+       foreign_tags, completeness and alt_barcodes (see _upgrade_2_to_3)
 
 migrate() walks a database up one version at a time until it reaches LATEST_VERSION.
 Each step is all-or-nothing: if anything goes wrong the file is left as it was.
 
-Adding version 3 later
+Adding version 4 later
 ----------------------
-1. Write _upgrade_2_to_3(conn) next to the other steps.
-2. Add it to _UPGRADES and set LATEST_VERSION = 3.
+1. Write _upgrade_3_to_4(conn) next to the other steps.
+2. Add it to _UPGRADES and set LATEST_VERSION = 4.
 Never edit a step that has already been used on a real file; add a new one instead.
 """
 import os
@@ -36,11 +38,11 @@ from contextlib import contextmanager
 __all__ = [
     "LATEST_VERSION", "CATEGORIES", "REGIONS", "SOURCE_PRIORITY",
     "connect", "create_v1", "migrate",
-    "normalize_barcode", "name_key",
+    "normalize_barcode", "barcode_origin", "name_key",
     "kcal_from_kj", "sodium_mg_from_salt_g", "salt_g_from_sodium_mg",
 ]
 
-LATEST_VERSION = 2
+LATEST_VERSION = 3
 CATEGORIES = ("supermarket", "dining_out", "whole_food")
 REGIONS = ("PH", "US", "UK", "JP", "KR")          # region_tags always lists them in this order
 SOURCE_PRIORITY = {"curated": 1, "usda": 2, "off": 3}   # lower number wins when rows are de-duplicated
@@ -74,8 +76,9 @@ CREATE TABLE food_items (
     source_ref  TEXT
 )"""
 
-# Version 2: the current layout. It is built under the temporary name food_items_new and
-# renamed to food_items once the old rows have been copied in (see _upgrade_1_to_2).
+# Version 2: the layout version 3 builds on. It is built under the temporary name
+# food_items_new and renamed to food_items once the old rows have been copied in (see
+# _upgrade_1_to_2). Version 3 adds three columns at the end (see _V3_NEW_COLUMNS).
 _V2_TABLE = f"""
 CREATE TABLE food_items_new (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -116,6 +119,22 @@ _V2_INDEXES = (
     "CREATE INDEX idx_food_items_source_priority ON food_items (source_priority)",
     "CREATE UNIQUE INDEX idx_food_items_source_ref ON food_items (source, source_ref)"
     " WHERE source_ref IS NOT NULL",
+)
+
+# Version 3: three columns added to the end of the version 2 table. The defaults keep every
+# older row valid. Only Open Food Facts rows use the first two.
+#   foreign_tags   how many countries the product is tagged with that are not one of the five
+#                  wanted regions (a product sold in 30 countries is rarely the local pack)
+#   completeness   Open Food Facts' own "how complete is this record" figure as a whole
+#                  percent, 0 to 100; NULL when the source gave none
+#   alt_barcodes   the barcodes of duplicates that were merged into this row, as JSON:
+#                  [[barcode, popularity, region_tags], ...] sorted by barcode. Popularity and
+#                  regions are those of the merged row, so the exporter can decide which of
+#                  them to pass on to the app without importing everything again.
+_V3_NEW_COLUMNS = (
+    "foreign_tags INTEGER NOT NULL DEFAULT 0",
+    "completeness INTEGER",
+    "alt_barcodes TEXT NOT NULL DEFAULT '[]'",
 )
 
 
@@ -168,6 +187,8 @@ def _current_version(conn):
     version = _stamp(conn)
     if version == 0:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(food_items)")}
+        if "alt_barcodes" in columns:
+            return 3
         if "calories_kcal" in columns:
             return 2
         if "kcal" in columns:
@@ -233,8 +254,19 @@ def _upgrade_1_to_2(conn):
         conn.execute(statement)
 
 
+def _upgrade_2_to_3(conn):
+    """Add the three version 3 columns. Every existing row keeps its id and all its values
+    and gets the defaults: no foreign tags, no completeness figure, no merged barcodes.
+
+    New columns go at the end of the table, so a fresh database (which walks through the
+    same steps) and an upgraded one still end up with exactly the same layout.
+    """
+    for column in _V3_NEW_COLUMNS:
+        conn.execute("ALTER TABLE food_items ADD COLUMN " + column)
+
+
 # version reached -> the step that gets there from the version before
-_UPGRADES = {1: _upgrade_0_to_1, 2: _upgrade_1_to_2}
+_UPGRADES = {1: _upgrade_0_to_1, 2: _upgrade_1_to_2, 3: _upgrade_2_to_3}
 
 
 def create_v1(conn):
@@ -250,7 +282,7 @@ def create_v1(conn):
 def migrate(conn):
     """Bring the database up to LATEST_VERSION and return the version it now has.
 
-    Works on a brand-new file, a version 1 file and an up-to-date file. Each step is saved
+    Works on a brand-new file, a version 1 or 2 file and an up-to-date file. Each step is saved
     as a whole or not at all, no row is ever deleted, and running it again changes nothing.
     When an upgrade is needed, rows the caller had inserted but not yet committed are
     committed along with it.
@@ -295,6 +327,56 @@ def normalize_barcode(raw):
     if canonical.startswith(("2", "02")):
         return None                         # in-store / price-embedded codes: each shop reuses them
     return canonical
+
+
+# The first three digits of a barcode say which national office handed the number out, which
+# is nearly always where the brand owner is based. Only the ranges the food list cares about:
+#   (first prefix, last prefix, origin)
+_BARCODE_PREFIXES = (
+    (480, 480, "PH"),                                       # Philippines
+    (450, 459, "JP"), (490, 499, "JP"),                     # Japan
+    (880, 880, "KR"),                                       # South Korea
+    (500, 509, "UK"),                                       # United Kingdom
+    (0, 19, "US"), (30, 39, "US"), (60, 139, "US"),         # United States and Canada
+    # "AS": the neighbouring markets whose products fill Philippine import shelves
+    (885, 885, "AS"), (955, 955, "AS"), (888, 888, "AS"),   # Thailand, Malaysia, Singapore
+    (899, 899, "AS"), (893, 893, "AS"), (489, 489, "AS"),   # Indonesia, Vietnam, Hong Kong
+    (471, 471, "AS"), (690, 699, "AS"),                     # Taiwan, China
+)
+
+
+def _prefix_origin(prefix):
+    number = int(prefix)
+    for first, last, origin in _BARCODE_PREFIXES:
+        if first <= number <= last:
+            return origin
+    return None
+
+
+def barcode_origin(barcode):
+    """Where a barcode was registered: 'PH', 'JP', 'KR', 'UK', 'US', 'AS' or None.
+
+    'AS' stands for Thailand, Malaysia, Singapore, Indonesia, Vietnam, Hong Kong, Taiwan
+    and China together. None means anywhere else, or no usable barcode at all.
+
+        barcode_origin("4800016644504") == "PH"      barcode_origin("8801043014830") == "KR"
+        barcode_origin("0016000275287") == "US"      barcode_origin("3017620425035") is None
+
+    The answer is read from the canonical spelling (see normalize_barcode); any other
+    spelling of the same barcode gives the same answer. A 14-digit code starts with a
+    packaging digit, which is skipped. A short 8-digit code (stored with five leading
+    zeros) carries its prefix in digits 6 to 8; those are only trusted for the Philippines,
+    Japan and Korea, because the short American and British codes are numbered differently.
+    """
+    code = normalize_barcode(barcode)
+    if code is None:
+        return None
+    if len(code) == 14:
+        code = code[1:]
+    if code.startswith("00000"):
+        origin = _prefix_origin(code[5:8])
+        return origin if origin in ("PH", "JP", "KR") else None
+    return _prefix_origin(code[:3])
 
 
 # ' ` and the curly, modifier, acute-accent and full-width characters people type as an apostrophe
