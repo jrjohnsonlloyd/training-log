@@ -2,7 +2,7 @@
 
     python tests/fixtures/make_off_fixtures.py [OUTPUT_FOLDER]
 
-Six files are written next to this script:
+Eight files are written next to this script:
 
     sample_off.csv          the main import: 52 rows (32 old anchor rows + 20 selection rows)
     off_rules.csv           36 rows, one per validation / repair rule branch
@@ -10,6 +10,8 @@ Six files are written next to this script:
     off_alias_guard.csv     1 row whose barcode is also an alias stored on another row
     off_serving.csv         18 rows for labels typed per serving (with a "quantity" column)
     off_doubt.csv           23 rows from other markets with doubtful numbers, and the US pool's rules
+    off_asia.csv            15 rows for the seven neighbouring markets (region "AS") and pool membership
+    off_asia2.csv           30 rows for the rules of the Japan, Korea and Asia pools (step 5)
 
 Every row is written out in full below so a reader can follow the expected values in
 tests/test_import_foods.py without running anything. Short column keys:
@@ -535,3 +537,147 @@ db = [
 ]
 assert len(db) == 23, len(db)
 write("off_doubt.csv", db)
+
+# ======================================================================================
+# off_asia.csv : the seven neighbouring markets (Thailand, Malaysia, Singapore, Indonesia,
+#                Vietnam, Hong Kong, Taiwan), stored under the one region code "AS"
+# ======================================================================================
+TH, MY, SG, VN, HK = "en:thailand", "en:malaysia", "en:singapore", "en:vietnam", "en:hong-kong"
+AS_SAFE = dict(kcal=350, P=5, C=60, F=10)        # 4*5 + 4*60 + 9*10 = 350: no rule touches these rows
+
+
+def asia_row(code, **kw):
+    kw.setdefault("comp", 0.5)
+    kw.setdefault("img", photo(code))
+    for key, value in AS_SAFE.items():
+        kw.setdefault(key, value)
+    return row(code, **kw)
+
+
+asia = [
+    # AS1 Thailand only, Thai barcode: region "AS", in the Asia pool (40 scans: first there)
+    asia_row(ean("885", 9001), name="Tom Yum Shrimp Noodles", brand="Mama", ctry=TH, scans=40),
+    # AS2 Malaysia only, Swiss barcode: the tag alone makes it an Asia pool row (35 scans)
+    asia_row(ean("761", 9002), name="Chocolate Malt Drink Powder", brand="Milo", ctry=MY, scans=35),
+    # AS3 Japanese barcode, tagged Thailand only: region "AS", but a Japanese product stays in the Japan pool
+    asia_row(ean("490", 9003), name="Matcha Biscuit Sticks", brand="Glico", ctry=TH, scans=30),
+    # AS4 Korean barcode, tagged Korea and Singapore: region "KR,AS", in the Korea pool
+    asia_row(ean("880", 9004), name="Honey Butter Chips", brand="Haitai", ctry="en:south-korea," + SG, scans=20,
+             kcal=540, P=6, C=54, F=33),            # a crisp's own figures: under 400 kcal it would be kept out
+    # AS5 Philippine barcode, tagged Philippines and Singapore: region "PH" (home is never also "AS"), PH slice
+    asia_row(ean("480", 9005), name="Cheese Potato Crisps", brand="Piattos", ctry=PH + "," + SG, scans=15),
+    # AS6 Philippine barcode, tagged Vietnam only: no region at all, so it is not imported (as before "AS")
+    asia_row(ean("480", 9006), name="Garlic Corn Snack", brand="Boy Bawang", ctry=VN, scans=14),
+    # AS7 American barcode, tagged US and Hong Kong: region "US,AS", but an American pack stays in the US pool
+    asia_row(ean("001", 9007), name="Peanut Butter Cups", brand="Reeses", ctry="en:united-states," + HK, scans=50),
+    # AS8 tagged US only, few numbers and 2 scans; AS9 below is its Singapore twin
+    asia_row(ean("001", 9008), name="Wheat Thins Original", brand="Nabisco", ctry="en:united-states", scans=2),
+    # AS9 the same name and brand, Singapore only, more numbers and 90 scans. Without a rule it would win the
+    # merge; a row tagged only "AS" never replaces a five-market row and gives AS8 nothing but its barcode
+    asia_row(ean("888", 9009), name="Wheat Thins Original", brand="Nabisco", ctry=SG, scans=90,
+             kcal=358, C=62, S=10, sat=2, fib=3, na=0.5),
+    # AS10 a Thai-script country tag (th:...): region "AS", Asia pool (12 scans)
+    asia_row(ean("885", 9010), name="Green Curry Paste", brand="Mae Ploy", ctry="th:ไทย", scans=12),
+    # AS11 a Chinese-script country tag for Taiwan (zh:...): region "AS", Asia pool (8 scans)
+    asia_row(ean("471", 9011), name="Pineapple Cake", brand="Chia Te", ctry="zh:台灣", scans=8),
+    # AS12 Thailand and France, French barcode: one foreign tag and no market barcode, so in no pool
+    asia_row(ean("300", 9012), name="Coconut Cream Dessert", brand="Chaokoh", ctry=TH + ",en:france", scans=60),
+    # AS13 Hong Kong only, Chinese barcode (690): Asia pool (25 scans)
+    asia_row(ean("690", 9013), name="Premium Oyster Sauce", brand="Lee Kum Kee", ctry=HK, scans=25),
+    # AS14 British barcode, tagged UK and Singapore: region "UK,AS", a British pack stays in the UK pool
+    asia_row(ean("500", 9014), name="Digestive Thins", brand="McVities", ctry="en:united-kingdom," + SG, scans=45),
+    # AS15 Vietnam only, Vietnamese barcode (5 scans): last in the Asia pool
+    asia_row(ean("893", 9015), name="Instant Pho Beef Flavour", brand="Vifon", ctry=VN, scans=5),
+]
+assert len(asia) == 15, len(asia)
+write("off_asia.csv", asia)
+
+# ======================================================================================
+# off_asia2.csv : the rules for the Japan, Korea and Asia pools (step 5): labels typed per
+#                 pack or serving, short Japanese-looking codes, names, brands and labels
+#                 in the export. Imported with local_ph_curated.json (for B15).
+# ======================================================================================
+JP, KR = "en:japan", "en:south-korea"
+asia2 = [
+    # B1 Thai Lay's at 150 kcal with a 30 g serving: re-based to 500 kcal per 100 g, "30 g" first (Asia pool)
+    asia_row(ean("885", 9101), name="Lays Original Flavor", brand="Lay's", ctry=TH, scans=30,
+             kcal=150, P=2, C=18, F=8, ss="30 g", sq=30),
+    # B2 Korean seaweed snack at 25 kcal: dense_low, in no pool
+    asia_row(ean("880", 9102), name="Roasted Seaweed Snack", brand="Haesong", ctry=KR, scans=40,
+             kcal=25, P=1, C=1, F=1.5),
+    # B3 Thai instant noodles carrying the made-up figures, dry pack as serving: dense_low
+    asia_row(ean("885", 9103), name="Instant Noodles Tom Yum Flavour", brand="Mama", ctry=TH, scans=40,
+             kcal=72, P=1.5, C=9.5, F=3, ss="60 g", sq=60),
+    # B4 a Thai cola at 100 kcal per 100 ml: drink_high
+    asia_row(ean("885", 9104), name="Coca-Cola Original", brand="Coca-Cola", ctry=TH, scans=40,
+             kcal=100, P=0, C=25, F=0, ss="325 ml", sq=325),
+    # B5 a 3-in-1 malt drink powder at 123 kcal (one sachet's figures): mix_low
+    asia_row(ean("955", 9105), name="Ovaltine 3 in 1", brand="Ovaltine", ctry=SG, scans=40,
+             kcal=123, P=1.2, C=24, F=2),
+    # B6 Korean dumplings at 0 kcal: zero_food
+    asia_row(ean("880", 9106), name="Kimchi Mandu", brand="Sempio", ctry=KR, scans=40, kcal=0, P=0, C=0, F=0),
+    # B7 a Malaysian label typed per serving (round figures, 68 g share 176.8 kcal): per_serving_as
+    asia_row(ean("955", 9107), name="Chicken Curry Puff", brand="Ayam", ctry=MY, scans=40,
+             kcal=260, P=9, C=42, F=7, ss="1 piece (68 g)", sq=68),
+    # B8 an 8-digit code read as Japanese (49...) on a pack tagged only US: no origin, US pool
+    asia_row("0000049403954", name="Zebra Cakes", brand="Little Debbie", ctry="en:united-states", scans=40),
+    # B9 the same kind of code tagged Japan: Japan pool
+    asia_row("0000045208812", name="Yakult Light", brand="Yakult", ctry=JP, scans=9),
+    # B10 a brand written as a company's name in Japanese: "Kobe Bussan" in the file (Japan pool)
+    asia_row(ean("490", 9110), name="Rich Toffee Biscuit Bars", brand="株式会社 神戸物産", ctry=JP, scans=8),
+    # B11 "7-11": "7-Eleven" in the file, found by "Seven Eleven" (Asia pool)
+    asia_row(ean("885", 9111), name="Egg Mayo Sandwich", brand="7-11", ctry=TH, scans=20),
+    # B12 a Japanese serving label: "1 pack (80 g)", and the pack opens first (Japan pool)
+    asia_row(ean("490", 9112), name="Chibi Sours Gummy", brand="Nobel", ctry=JP, scans=7, ss="1袋(80g)", sq=80),
+    # B13 a shop's item code and the pack size in the name: "Vida Salty Lychee" (Asia pool)
+    asia_row(ean("888", 9113), name="12001187 Vida Salty Lychee 325ml", brand="Vida", ctry=SG, scans=10,
+             kcal=40, P=0, C=10, F=0),
+    # B14 an instant-noodle cup with its weight as serving: opens on "68 g" (Korea pool)
+    asia_row(ean("880", 9114), name="Shin Ramyun Cup", brand="Nongshim", ctry=KR, scans=30,
+             kcal=440, P=9, C=66, F=15, ss="68 g", sq=68),
+    # B15 no brand and the name of a curated row (Chicken adobo, 141 kcal: too far off to merge): left out of
+    # the Korea pool
+    asia_row(ean("880", 9115), name="Chicken Adobo", ctry=KR, scans=50),
+    # B16 a name mostly in Japanese script that nobody has scanned (completeness 0.9): after every other Japan
+    # row, also after B19 (not scanned either, completeness 0.5, a Latin name)
+    asia_row(ean("490", 9116), name="ZEMBヌードル 海老とブロッコリーのプーリア風", brand="ZENB", ctry=JP, scans=0, comp=0.9),
+    # B17 a Chinese barcode tagged only UK (30 scans) counts for half (15) in the Asia pool: after B18 (20)
+    asia_row(ean("690", 9117), name="Sriracha Chilli Sauce", brand="Flying Goose", ctry="en:united-kingdom",
+             scans=30),
+    # B18 tagged Thailand (20 scans)
+    asia_row(ean("885", 9118), name="Sweet Chilli Sauce", brand="Mae Ploy", ctry=TH, scans=21),
+    # B19 a Latin-named Japan row nobody has scanned
+    asia_row(ean("490", 9119), name="Curry Roux Medium Hot", brand="House", ctry=JP, scans=0),
+    # B20 a name mostly in Japanese script WITH scans keeps its place: first in the Japan pool (50 scans)
+    asia_row(ean("490", 9120), name="Tuna シーチキンマイルド", brand="Hagoromo", ctry=JP, scans=50),
+    # B21 a KitKat typed per piece (60 kcal, 11 g): re-based to 545 kcal per 100 g, "11 g" first (Japan pool)
+    asia_row(ean("490", 9121), name="KitKat Wasabi", brand="Nestle", ctry=JP, scans=6,
+             kcal=60, P=0.7, C=6.6, F=3.4, ss="11 g", sq=11),
+    # B22 a peanut butter typed per spoonful (84 kcal, 15 g): re-based to 560 kcal per 100 g (Asia pool)
+    asia_row(ean("955", 9122), name="Crunchy Peanut Butter", brand="Amazin Graze", ctry=MY, scans=6,
+             kcal=84, P=4, C=3, F=6.2, ss="15 g", sq=15),
+    # B23 an oat milk at 130 kcal per 100 ml (a 200 ml carton's figures): drink_high
+    asia_row(ean("899", 9123), name="Oat Milk Original", brand="Oatside", ctry="en:indonesia", scans=40,
+             kcal=130, P=1, C=16, F=6, ss="200 ml", sq=200),
+    # B24 Korean nori sheets at 7 kcal: dense_low
+    asia_row(ean("880", 9124), name="Sushi Nori", brand="Kim Nori", ctry=KR, scans=40,
+             kcal=7, P=1, C=0.5, F=0.1, ss="2 g", sq=2),
+    # B25 a sauce whose "serving" is the bottle: opens on 100 g, not on "200 g" (Korea pool)
+    asia_row(ean("880", 9125), name="Buldak Hot Chicken Sauce", brand="Samyang", ctry=KR, scans=12,
+             kcal=300, P=3, C=60, F=5, ss="200 g", sq=200),
+    # B26 a burger with its weight as serving, typed "160g": opens on "160 g" (Korea pool)
+    asia_row(ean("880", 9126), name="Cheeseburger", brand="Sajo", ctry=KR, scans=11,
+             kcal=289, P=12, C=30, F=13, ss="160g", sq=160),
+    # B27 an instant soup with a small serving: opens on "1 serving (18 g)" (Japan pool)
+    asia_row(ean("490", 9127), name="Instant Miso Soup", brand="Hikari", ctry=JP, scans=5,
+             kcal=171, P=11, C=22, F=4, ss="1 serving (18 g)", sq=18),
+    # B28, B29 "Soy Sauce" twice at the same calories: the Korean one (Korea pool) does not keep the American
+    # one out of the US pool
+    asia_row(ean("880", 9128), name="Soy Sauce", brand="Sempio", ctry=KR, scans=10, kcal=67, P=8, C=8, F=0),
+    asia_row(ean("001", 9129), name="Soy Sauce", brand="Kikkoman", ctry="en:united-states", scans=10,
+             kcal=67, P=8, C=8, F=0),
+    # B30 a shop's listing saved as a name: left out of the Asia pool
+    asia_row(ean("885", 9130), name="SNACK PACK COFFEE 25x $1 PROL", brand="Snickers", ctry=TH, scans=45),
+]
+assert len(asia2) == 30, len(asia2)
+write("off_asia2.csv", asia2)

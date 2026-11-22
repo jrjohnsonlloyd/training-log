@@ -46,7 +46,10 @@ __all__ = [
 
 LATEST_VERSION = 4
 CATEGORIES = ("supermarket", "dining_out", "whole_food")
-REGIONS = ("PH", "US", "UK", "JP", "KR")          # region_tags always lists them in this order
+# region_tags always lists them in this order. "AS" is one shared code for seven neighbouring
+# markets: Thailand, Malaysia, Singapore, Indonesia, Vietnam, Hong Kong and Taiwan. It comes
+# last so that every region_tags text written before it was added keeps its spelling.
+REGIONS = ("PH", "US", "UK", "JP", "KR", "AS")
 SOURCE_PRIORITY = {"curated": 1, "usda": 2, "off": 3}   # lower number wins when rows are de-duplicated
 
 _PER_UNITS = ("100g", "serving")
@@ -88,7 +91,7 @@ CREATE TABLE food_items_new (
     brand           TEXT,
     group_label     TEXT,                   -- free-text display group: "Jollibee", "Home dish", "Burgers"
     category        TEXT NOT NULL DEFAULT 'whole_food' CHECK (category IN ({_sql_list(CATEGORIES)})),
-    region_tags     TEXT NOT NULL DEFAULT '',   -- e.g. 'PH,US': fixed order PH,US,UK,JP,KR, no spaces
+    region_tags     TEXT NOT NULL DEFAULT '',   -- e.g. 'PH,US': fixed order PH,US,UK,JP,KR,AS, no spaces
     barcode         TEXT,                   -- output of normalize_barcode(), NULL when unknown
     thumbnail_url   TEXT,
     per_unit        TEXT NOT NULL DEFAULT '100g' CHECK (per_unit IN ({_sql_list(_PER_UNITS)})),

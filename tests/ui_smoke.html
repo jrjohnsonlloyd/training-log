@@ -1290,6 +1290,13 @@ const BRANDS = [['milo', 'milo'], ['bear brand', 'bear brand'], ['skyflakes', 's
   ['san miguel', 'san mig'], ['quaker oats', 'quaker'], ['nissin cup noodles', 'nissin'], ['coca cola', 'coca.?cola|coke'], ['sprite', 'sprite'], ['gatorade', 'gatorade'], ['kopiko', 'kopiko'], ['selecta', 'selecta'], ['chippy', 'chippy'],
   ['oishi', 'oishi'], ['rebisco', 'rebisco'], ['snickers', 'snickers'], ['toblerone', 'toblerone'], ['cadbury', 'cadbury'], ['doritos', 'doritos'], ['spam', 'spam'], ['argentina', 'argentina'], ['555', '555'], ['knorr', 'knorr'],
   ['indomie', 'indomie'], ['samyang', 'samyang'], ['skippy', 'skippy'], ['red bull', 'red bull'], ['cheerios', 'cheerios'], ['heineken', 'heineken']];
+/* Everyday words for which Philippine products lead the products: the first two packaged products listed are Philippine ones (tagged PH or a 480 barcode), not
+   products from the US, Japan, Korea or the rest of Asia. "ketchup" and "instant noodles" are the step 4 cases: with the US products in, a US store-brand "Ketchup"
+   (Aldi) came second among the products and pushed the Philippine banana ketchups out of the first six; this check fails on that list. */
+const HOME_FIRST = ['ketchup', 'banana ketchup', 'catsup', 'milo', 'kopiko', 'piattos', 'corned beef', 'pancit canton', 'sardines', 'instant noodles', 'spaghetti sauce', 'milk tea'];
+/* Japanese, Korean and other Asian brands typed in Latin letters, with the pattern that says "this row is that brand's": the first row is that brand's, and its name can be read in Latin letters. */
+const ASIA_BRANDS = [['buldak', 'buldak'], ['calbee', 'calbee'], ['glico', 'glico|pocky|pretz'], ['nongshim', 'nongshim|nong shim'], ['ottogi', 'ottogi'], ['binggrae', 'binggrae'],
+  ['meiji', 'meiji'], ['koka', 'koka'], ['tao kae noi', 'tao ?kae ?noi'], ['aroy d', 'aroy'], ['vitasoy', 'vitasoy'], ['nissin', 'nissin'], ['seven eleven', '7-eleven'], ['kobe bussan', 'kobe bussan'], ['mamee', 'mamee']];
 /* Singular typed, the reference row is named in the plural, and the other way round. */
 const PLURALS = [['tomato', 'tomatoes'], ['carrot', 'carrots'], ['onion', 'onions'], ['mushroom', 'mushrooms'], ['potatoes', 'potato'], ['mangoes', 'mango']];
 
@@ -1362,6 +1369,58 @@ async function suiteRanking(){
     expect(done >= 20, 'only ' + done + ' of the ' + BRANDS.length + ' brands are in the served bundle or the library; not carried: ' + absent.join(', '));
     expect(!bad.length, bad.length + ' of ' + done + ': ' + some(bad));
     return done + ' brand queries, all led by that brand' + (absent.length ? '; not in the served bundle: ' + absent.join(', ') : '');
+  }, { show: true });
+
+  /* Philippine products: the rows tagged PH or with a 480 barcode, known by name and brand as the list shows them. */
+  /* A row with no brand shows its category ("Packaged") where the brand would be, so such rows are known by name alone, when no product from another market has that name without a brand. */
+  const homeKeys = new Set(), homeBare = new Set(), awayBare = new Set();
+  db.items.forEach(r => {
+    if (srcOf(r) !== 3) return;
+    const home = String(r[ix.regions] || '').split(',').indexOf('PH') >= 0 || String(r[ix.barcode] || '').padStart(13, '0').startsWith('480'), b = clean(brandOf(r));
+    if (home && b) homeKeys.add(clean(nameOf(r)) + '|' + b);
+    else if (!b) (home ? homeBare : awayBare).add(clean(nameOf(r)));
+  });
+  const isHome = r => r.src === 'off' && (homeKeys.has(clean(r.name) + '|' + clean(r.cat)) || (homeBare.has(clean(r.name)) && !awayBare.has(clean(r.name))));
+  const HOME = 'for everyday Philippine words the first two packaged products listed are Philippine ones, not from another market';
+  /* A word is tested whenever the bundle itself holds a Philippine product whose name has every word of it (not: whenever one shows in the first rows, which would let a word pass by pushing every Philippine product out of sight). */
+  const homeNames = db.items.filter(r => srcOf(r) === 3 && (String(r[ix.regions] || '').split(',').indexOf('PH') >= 0 || String(r[ix.barcode] || '').padStart(13, '0').startsWith('480'))).map(r => ' ' + clean(nameOf(r)).toLowerCase() + ' ');
+  const hasHome = x => { const ws = x.split(' '); return homeNames.some(n => ws.every(w => n.indexOf(' ' + w) >= 0)); };
+  if (!homeKeys.size) notRun(HOME, 'the served bundle has no Philippine product rows');
+  else await step(HOME, async () => {
+    const bad = [], skipped = [], unseen = []; let done = 0;
+    for (const x of HOME_FIRST) {
+      if (!hasHome(x)) { skipped.push(x); continue; }   /* the bundle has no Philippine product for this word */
+      /* only the first 12 rows count: a product of another market there ahead of the Philippine ones fails */
+      const rows = await typed(x), firstOff = rows.slice(0, 12).filter(r => r.src === 'off').slice(0, 2);
+      if (!rows.length) { done++; bad.push(x + ' -> nothing'); continue; }
+      if (!firstOff.length) { unseen.push(x); continue; }   /* curated and reference rows fill the first 12: no product of any market is shown */
+      done++;
+      if (!firstOff.every(isHome)) bad.push(x + ' -> ' + rows.slice(0, 4).map(r => label(r) + (isHome(r) ? ' (PH)' : '')).join(' | '));
+    }
+    expect(done >= 8, 'only ' + done + ' of the ' + HOME_FIRST.length + ' words have a Philippine product in the first 12 rows; without one in the bundle: ' + skipped.join(', ') + '; with none in the first 12 rows: ' + unseen.join(', '));
+    expect(unseen.length <= 2, unseen.length + ' words show no product at all in the first 12 rows: ' + unseen.join(', '));
+    expect(!bad.length, bad.length + ' of ' + done + ': ' + some(bad, 4));
+    return done + ' words: the first two products listed are Philippine each time' + (skipped.length ? '; no Philippine product in the bundle for: ' + skipped.join(', ') : '') + (unseen.length ? '; reference rows fill the first 12 for: ' + unseen.join(', ') : '');
+  }, { show: true });
+
+  /* The products of the Japan, Korea and Asia pools: packaged rows tagged for one of those markets and for none of the Philippines, the US or the UK. A bundle with a thousand of them carries the pools, and then every brand below must be in it under its Latin name: a brand that is missing (its rows written in Japanese again, or left out) fails the check instead of being skipped. */
+  const asiaCount = db.items.filter(r => { if (srcOf(r) !== 3) return false; const g = String(r[ix.regions] || '').split(','); return (g.indexOf('JP') >= 0 || g.indexOf('KR') >= 0 || g.indexOf('AS') >= 0) && g.indexOf('PH') < 0 && g.indexOf('US') < 0 && g.indexOf('UK') < 0; }).length;
+  const ASIA = 'Japanese, Korean and other Asian brands typed in Latin letters lead with that brand, named in Latin letters';
+  if (asiaCount < 1000) notRun(ASIA, 'the served bundle has no Japan, Korea and Asia pools (' + asiaCount + ' such products)');
+  else await step(ASIA, async () => {
+    const hay = db.items.map(r => nameOf(r) + ' ' + brandOf(r));
+    const bad = [], absent = []; let done = 0;
+    for (const b of ASIA_BRANDS) {
+      const rx = new RegExp(b[1], 'i');
+      if (!hay.some(h => rx.test(h))) { absent.push(b[0]); continue; }
+      const rows = await typed(b[0]), f = rows[0]; done++;
+      if (!f || !rx.test(f.name + ' ' + f.cat) || !/[A-Za-z]{3}/.test(f.name)) bad.push(b[0] + ' -> ' + label(f));
+      /* "seven eleven" is found through the other name the importer gives 7-Eleven rows: the first six are all that shop's */
+      if (b[0] === 'seven eleven' && !(rows.length >= 6 && rows.slice(0, 6).every(r => /^7-eleven$/i.test(r.cat)))) bad.push(b[0] + ' -> the first six are not all 7-Eleven products: ' + rows.slice(0, 6).map(label).join(' | '));
+    }
+    expect(!absent.length, 'the bundle carries ' + asiaCount + ' Japanese, Korean and Asian products but none under: ' + absent.join(', '));
+    expect(!bad.length, bad.length + ' of ' + done + ': ' + some(bad));
+    return done + ' brand queries, all led by that brand';
   }, { show: true });
 
   await step('typing the exact name of a product lists that product first, unless a curated, library or USDA row has that name', async () => {
