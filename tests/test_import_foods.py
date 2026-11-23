@@ -680,7 +680,7 @@ class FixtureFileTests(unittest.TestCase):
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
         self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8", "replace"))
         for name in ("sample_off.csv", "off_rules.csv", "off_dedupe.csv", "off_alias_guard.csv", "off_serving.csv",
-                     "off_doubt.csv", "off_asia.csv", "off_asia2.csv"):
+                     "off_doubt.csv", "off_asia.csv", "off_asia2.csv", "off_step6.csv", "off_step7.csv"):
             with self.subTest(file=name):
                 with open(os.path.join(out, name), "rb") as made, open(os.path.join(FIXTURES, name), "rb") as kept:
                     # line endings may differ after a git checkout on Windows
@@ -5773,7 +5773,7 @@ class Step6FixTests(unittest.TestCase):
         self.assertEqual(self.m.oil_fix(self.row("Olive oil artisan ciabatta bread, olive oil", 246, 8, 45, 4, "US"), None), "")
 
     def test_hand_lists_stay_under_the_cap(self):
-        self.assertLessEqual(len(self.m.KNOWN_WRONG) + len(self.m.KNOWN_WRONG_PH), 160)
+        self.assertLessEqual(len(self.m.KNOWN_WRONG) + len(self.m.KNOWN_WRONG_PH), 200)      # 160 until step 7
         for code in ("5000328014876", "8888056603862", "8885012290494"):
             self.assertIn(code, self.m.KNOWN_WRONG)
         self.assertNotIn("0098100101277", self.m.KNOWN_WRONG)          # Doubleshot at 20 per 100 ml is right
@@ -5845,6 +5845,288 @@ class Step6SecondFixTests(unittest.TestCase):
         self.assertLessEqual(len(self.m.MUST_HAVE_UK), 20)
         for code in self.m.MUST_HAVE_UK:
             self.assertEqual(len(code), 13)
+
+
+# --------------------------------------------------------------------------------------
+# step 7: Philippine rows carrying a pack's or a serving's figures, off_step7.csv; P1..P12, G1..G4, W1..W4 and
+# H1..H3 as in make_off_fixtures.py
+# --------------------------------------------------------------------------------------
+
+OFF_STEP7 = os.path.join(FIXTURES, "off_step7.csv")
+
+
+def step7_import():
+    """off_step7.csv alone, imported twice and exported with the default quotas."""
+    def build():
+        d = new_dir("step7")
+        db = os.path.join(d, "foods.sqlite")
+        bundle = os.path.join(d, "food-db.json")
+        args = ["--db", db, "--off-path", OFF_STEP7, "--export-app", bundle, "--built", BUILT, "--quiet"]
+        first = import_ok(args)
+        rows1, doc1 = snapshot(db), read_json(bundle)
+        second = import_ok(args)
+        first.update(db=db, bundle=bundle, doc=doc1, rows1=rows1, rows2=snapshot(db), doc2=read_json(bundle))
+        return first
+    return cached("step7", build)
+
+
+class Step7Case(Step6Case):
+    @classmethod
+    def load(cls):
+        return step7_import()
+
+
+class Step7ImportTests(Step7Case):
+    def test_the_pack_weight_in_a_stock_list_name(self):
+        row = self.off_row("4807770270024")                                    # P1
+        self.near(row["calories_kcal"], 454.55)
+        self.near(row["protein_g"], 10.91)
+        self.assertEqual(row["basis"], "estimate")
+        self.assertEqual(self.portions_of(row), [["1 pack (55 g)", 55, "serving"]])
+        rec = self.bundle("lm chicken 55g")
+        self.assertEqual(rec["portions"][0], ["1 pack (55 g)", 55])
+        self.assertEqual(round(rec["kcal"] * 55 / 100), 250)                   # the pack shows the label's calories
+
+    def test_the_serving_comes_before_the_name_and_the_serving_text_before_a_wrong_quantity(self):
+        eden = self.off_row("7622210892126")                                   # P2: 30 g, not the 45 g pack
+        self.near(eden["calories_kcal"], 300)
+        self.assertEqual(self.portions_of(eden), [["1 serving (30 g)", 30, "serving"]])
+        fry = self.off_row("4801958390108")                                    # P3: 7.8 g, not 100 or 62
+        self.near(fry["calories_kcal"], 24 * 100 / 7.8)
+        self.assertEqual(self.portions_of(fry), [["1 serving (7.8 g)", 7.8, "serving"]])
+
+    def test_family_packs_and_rows_in_range_are_left_alone(self):
+        self.near(self.off_row(ean("480", 7104))["calories_kcal"], 120)        # P4
+        spread = self.off_row(ean("480", 7105))                                # P5
+        self.near(spread["calories_kcal"], 176)
+        self.assertNotEqual(spread["basis"], "estimate")
+
+    def test_made_up_powders_and_zero_calorie_mixes_are_kept_out(self):
+        self.assertEqual(self.off_row("4800016022210")["doubt"], "powder_made_up")    # P6
+        self.assertEqual(self.off_row("4801958911006")["doubt"], "zero_dry")          # P8
+        self.assertIsNone(self.off_row("4800361331500")["doubt"])                     # P7: a bottle
+        self.near(self.off_row("4800361331500")["calories_kcal"], 72)
+
+    def test_the_lechon_sauce_keeps_its_own_spoon_words(self):
+        row = self.off_row("4801668100271")                                    # P9
+        self.near(row["calories_kcal"], 93.75)
+        self.assertEqual(self.portions_of(row), [["2 tbsp (32 g)", 32, "serving"]])
+
+    def test_hand_entries(self):
+        nova = self.off_row("4800016666261")                                   # P10: back from KNOWN_WRONG_PH
+        self.assertIsNone(nova["doubt"])
+        self.near(nova["calories_kcal"], 466.67)
+        self.assertEqual(self.portions_of(nova), [["1 pack (30 g)", 30, "serving"]])
+        bear = self.off_row("4800361403443")                                   # P11: KNOWN_PER_PACK, made-up glass
+        self.near(bear["calories_kcal"], 442.42)
+        self.assertEqual(self.portions_of(bear), [["1 sachet (33 g)", 33, "serving"]])
+        self.assertEqual(self.off_row("7622210278432")["doubt"], "listed")     # P12
+
+    def test_rows_that_are_right_come_out_unchanged(self):
+        for name, kcal, first in (("Coke Zero", 0, [["1 can (330 ml)", 330]]), ("lm beef 55g", 436, []),
+                                  ("century tuna (p) 155g", 179, [["100 g", 100]]),
+                                  ("Great Taste Chocolate Mocha", 65, [["1 bottle (200 ml)", 200]])):
+            with self.subTest(name=name):
+                rec = self.bundle(name)
+                self.assertEqual(rec["kcal"], kcal)
+                self.assertEqual(rec["portions"][:1], first)
+                self.assertEqual(rec["basis"], 0)
+
+    def test_figures_worked_out_from_the_serving_are_not_re_based_again(self):
+        for code, kcal in (("0748485800035", 132.1), ("4800163443043", 87.5), ("4800249044140", 164)):   # W1, W2, W3
+            with self.subTest(code=code):
+                row = self.off_row(code)
+                self.near(row["calories_kcal"], kcal)
+                if code != "4800249044140":                                    # W3's worked-out protein is an estimate
+                    self.assertNotEqual(row["basis"], "estimate")
+                self.assertIsNone(row["doubt"])
+                self.assertNotIn("serving", [p[2] for p in self.portions_of(row) if len(p) > 2])
+        rec = self.bundle("argentina corned beef 260g")
+        self.assertEqual(rec["kcal"], 132)
+        self.assertEqual(rec["portions"][:1], [["100 g", 100]])
+
+    def test_a_row_typed_per_serving_is_still_re_based(self):
+        row = self.off_row(ean("480", 7117))                                   # W4
+        self.near(row["calories_kcal"], 110 * 100 / 56)
+        self.assertEqual(row["basis"], "estimate")
+        self.assertEqual(self.portions_of(row), [["1 serving (56 g)", 56, "serving"]])
+
+    def test_second_pass_hand_entries(self):
+        syrup = self.off_row("4806026200594")                                  # H1: worked out from 30 g, left alone
+        self.near(syrup["calories_kcal"], 83.3)
+        self.assertNotEqual(syrup["basis"], "estimate")
+        self.assertEqual(self.off_row("0074848570001")["doubt"], "listed")     # H2: KNOWN_WRONG_PH
+        fields = self.doc["fields"]
+        twin = [i for i, item in enumerate(self.doc["items"]) if item[fields.index("barcode")] == "0748485700014"]
+        self.assertEqual(len(twin), 1)                                         # H3: its barcode finds the twin
+        self.assertIn([twin[0], 74848570001], [entry[:2] for entry in self.doc.get("alias", [])])
+
+    def test_the_philippine_part(self):
+        ph = self.pools()["PH"]
+        for name in ("Great Taste White Caramel", "Ginisa Mix", "Eden", "555 TUNA ADOBO 155G"):
+            self.assertNotIn(name, ph)
+        self.assertEqual(len(ph), 19)
+
+    def test_a_second_import_changes_nothing(self):
+        self.assertEqual(self.imp["rows1"], self.imp["rows2"])
+        self.assertEqual(self.imp["doc"], self.imp["doc2"])
+
+
+class Step7RuleTests(unittest.TestCase):
+    """The step 7 rules on single rows (no file)."""
+
+    @classmethod
+    def setUpClass(cls):
+        import import_foods
+        cls.m = import_foods
+
+    def row(self, name, kcal, protein, carbs, fat, brand=None, portions=None, barcode="4800000000000"):
+        return Step6RuleTests.row(self, name, kcal, protein, carbs, fat, "PH", barcode, brand, portions)
+
+    def fix(self, row, serving_size="", serving_g=None, quantity="", categories="", filled=None):
+        return self.m.ph_pack_fix(row, categories, serving_size, serving_g, quantity, filled=filled)
+
+    def test_weights_in_text(self):
+        w = self.m.ph_weight
+        self.assertEqual(w("lm chicken 55g"), (55, False))
+        self.assertEqual(w("Kopiko 3x20g"), (20, False))
+        self.assertEqual(w("Biscuits 20g x 10"), (20, False))
+        self.assertEqual(w("ladys choice 27ml"), (27, True))
+        self.assertEqual(w("Zesto 1.5L"), (1500, True))
+        self.assertEqual(w("Crackers 10s"), (None, False))
+
+    def test_kinds(self):
+        kind = lambda name, brand="", cats="", ss="", q="": getattr(self.m.ph_kind(name, brand, cats, ss, q), "name", None)
+        self.assertEqual(kind("lm chicken 55g"), "noodles")             # "chicken" does not shut out a dry kind here
+        self.assertEqual(kind("Selecta 2 in 1 Ice Cream"), "skip")
+        self.assertEqual(kind("Coke", ss="330 ml"), "rtd_drink")
+        self.assertIsNone(kind("Coke"))                                 # a drink needs a liquid amount
+        self.assertEqual(kind("Chips", ss="250 ml"), None)              # a dry kind refuses a liquid serving
+        self.assertEqual(kind("Tuna-style Flakes In Oil"), None)        # plant-based: no canned fish
+        self.assertEqual(kind("Something", cats="Snacks,Salty snacks"), "chips")
+        self.assertEqual(kind("All-around sarsa", "Mang Tomas"), "lechon_sauce")
+
+    def test_the_guards(self):
+        spicy = self.row("nr seafood spicy 59g", 305, 6.78, 42.37, 11.86)     # 104 g of macros on 59 g
+        self.assertEqual(self.fix(spicy, "59 g", 59), "")
+        squirrel = self.row("Luncheon Meat", 74.6, 4, 3.4, 5)                  # 219 falls in the range (150-360) but
+        self.assertEqual(self.fix(squirrel, "34g", 34), "rebased")             # is still too low: kept out by hand
+        self.assertIn("6971334900820", self.m.KNOWN_WRONG_PH)
+        bacon = self.row("Bacon", 200, 12.7, 10.9, 12.7, brand="Holiday")      # 20 g of carbs: not bacon
+        self.assertEqual(self.fix(bacon, "1 portion (55 g)", 55), "")
+        bun = self.row("Burger Buns", 183, 5, 33.3, 3.33, portions=[["1 bun (60 g)", 60]])
+        self.assertEqual(self.fix(bun, "1 bun (60 g)", 60), "")                # worked out from the bun's label
+        nomacro = self.row("Hot Meals Beef Goto Mix", 125, None, None, None)
+        self.assertEqual(self.fix(nomacro, "35g", 35), "")                     # no macros: hand entry instead
+        pinned = self.row("lm chicken 55g", 250, 6, 34, 10, portions=[["1 pack (55 g)", 55, "serving"]])
+        self.assertEqual(self.fix(pinned), "")
+
+    def test_the_worked_out_guard(self):
+        # Figures Open Food Facts worked out from the 56 g serving: already per 100 g, never re-based again.
+        beef = self.row("argentina corned beef 260g", 132.1, 12.5, 3.57, 7.14)
+        self.assertEqual(self.fix(beef, "56 g", 56, "260g"), "")
+        self.assertEqual(beef["calories_kcal"], 132.1)
+        sardines = self.row("ligo sardines (g) 155g", 87.5, 8.93, 5.36, 3.57)
+        self.assertEqual(self.fix(sardines, "56 g", 56), "")
+        bacon = self.row("winner smoky bacon", 273, 10.9, 1.82, 25.45)         # 150 kcal, 6, 1, 14 g for 55 g
+        self.assertEqual(self.fix(bacon, "55g", 55), "")
+        # a macro the importer worked out itself is left out of the test (CDO franks: no protein figure)
+        franks = self.row("Super Jumbo Chicken Franks", 164, 10.6, 1.82, 12.7)
+        self.assertEqual(self.fix(dict(franks), "55g", 55), "rebased")         # with the made-up protein: no sign
+        self.assertEqual(self.fix(franks, "55g", 55, filled="protein_g"), "")
+        # a can typed per serving in whole label figures is still re-based
+        typed = self.row("corned beef & hot peppers", 110, 12, 1, 7)
+        self.assertEqual(self.fix(typed, "56g", 56), "rebased")
+        self.assertAlmostEqual(typed["calories_kcal"], 196.43, places=2)
+        self.assertTrue(self.m._ph_worked_out({"calories_kcal": 132.1, "protein_g": 12.5, "carbs_g": 3.57,
+                                               "fat_g": 7.14}, 56))
+        self.assertFalse(self.m._ph_worked_out({"calories_kcal": 110, "protein_g": 12, "carbs_g": 1, "fat_g": 7}, 56))
+
+    def test_scaled_fibre_is_dropped(self):
+        tea = self.row("Lemon Cucumber Green Tea", 32, 0.1, 7.9, 0.1, brand="Nestea")
+        tea["fibre_g"] = 4.5                                                   # 53 g after re-basing on 8.5 g
+        self.assertEqual(self.fix(tea, "8.5g", 8.5, "250ml"), "rebased")
+        self.assertIsNone(tea["fibre_g"])
+        noodles = self.row("lm chicken 55g", 250, 6, 34, 10)
+        noodles["fibre_g"] = 1                                                 # 1.8 g: kept
+        self.assertEqual(self.fix(noodles, "1 Pack (55 g)", 55), "rebased")
+        self.assertAlmostEqual(noodles["fibre_g"], 100 / 55, places=3)
+        row = {"fibre_g": 9, "carbs_g": 3}
+        self.m.ph_drop_bad_fibre(row)
+        self.assertIsNone(row["fibre_g"])                                      # over carbs + 5 g
+        row = {"fibre_g": 8, "carbs_g": 3}
+        self.m.ph_drop_bad_fibre(row)
+        self.assertEqual(row["fibre_g"], 8)
+
+    def test_labels(self):
+        sardines = self.row("mega sardines (r) 155g", 60, 6, 2, 3)            # whole label figures for 56 g
+        self.assertEqual(self.fix(sardines, "56 g", 56), "rebased")
+        self.assertEqual(sardines["portions"], [["1 serving (56 g)", 56, "serving"]])     # a serving, not the can
+        mayo = self.row("ladys choice (g) 27ml", 66, 0, 3, 6, brand="Lady's Choice")
+        self.assertEqual(self.fix(mayo, "15g", 15), "rebased")
+        self.assertEqual(mayo["portions"][0][:2], ["1 tbsp (15 g)", 15])
+        bar = self.row("fudgee barr (y) custard 41g", 150, 2.4, 25, 4.5)
+        self.assertEqual(self.fix(bar, quantity="41 g"), "rebased")
+        self.assertEqual(bar["portions"][0][:2], ["1 bar (41 g)", 41])
+
+    def test_powders(self):
+        self.assertEqual(self.fix(self.row("Nestea Honey Blend Black Tea", 18, 0, 4.5, 0, brand="Nestea")), "powder_made_up")
+        self.assertEqual(self.fix(self.row("Fortified Choco Milk", 120, 3.7, 15.7, 2.8)), "powder_made_up")
+        quaker = self.row("Quaker Oat Cereal Drink Original", 124, 1.5, 22, 3, brand="Quaker")
+        self.assertEqual(self.fix(quaker, "29g", 29), "rebased")
+        self.assertEqual(quaker["portions"][0][:2], ["1 sachet (29 g)", 29])
+        for name, ss in (("Selecta 2 in 1 Ice Cream", ""), ("Chamomile Tea", ""), ("Nescafe Ready to Drink", "240 ml")):
+            with self.subTest(name=name):
+                self.assertEqual(self.fix(self.row(name, 60, 1, 10, 1), ss), "")
+        self.assertEqual(self.fix(self.row("Diet Instant Noodles Zero", 2, 0, 0.5, 0)), "")      # says zero
+
+    def test_rows_that_are_right_are_not_touched(self):
+        # From the step 7 reader's list of 44 rows that are right but look odd to a simple rule.
+        for name, brand, kcal, p, c, f, ss, sq in (
+                ("Coke Zero", "Coca-Cola", 0, 0, 0, 0, "1 can (330 ml)", 330),
+                ("Vinegar", "Datu Puti", 0, 0, 0, 0, "15mL", 15),
+                ("Shirataki Rice", "Six Fortune", 6, 0, 1, 0, "100 g", 100),
+                ("Probiotic Drink", "Yakult", 75, 1.3, 17, 0, "1 portion (80 ml)", 80),
+                ("bear brand (w) milk 33g", "Bear Brand", 464, 18, 52, 20, "", None),
+                ("milo 24g", "Nestle", 392, 9, 70, 8.5, "", None),
+                ("cheez whiz (r) 24g", "Kraft", 333, 12, 13, 26, "", None),
+                ("Spanish Sardines", "Mega", 164, 17, 1, 10, "56 g", 56),
+                ("Super Thick Vanilla Ice Cream", "Selecta", 120, 2, 15, 6, "1 tub (450 ml)", 450),
+                ("Del Monte Mango Can", "Del Monte", 57, 0.3, 14, 0, "", None),
+                ("Purefoods Corned Beef (Classic)", "Purefoods", 200, 18, 4, 12.5, "", None)):
+            with self.subTest(name=name):
+                row = self.row(name, kcal, p, c, f, brand=brand)
+                self.assertEqual(self.fix(row, ss, sq), "")
+                self.assertEqual(row["calories_kcal"], kcal)
+
+    def test_hand_lists(self):
+        self.assertLessEqual(len(self.m.KNOWN_WRONG) + len(self.m.KNOWN_WRONG_PH), 200)
+        for code in ("4800016666261", "4800361417198", "4806501598956"):      # back in step 7
+            self.assertNotIn(code, self.m.KNOWN_WRONG_PH)
+        self.assertEqual(self.m.KNOWN_TWIN["4800611092366"], "4800611000293")
+        self.assertFalse(set(self.m.KNOWN_PER_PACK) & set(self.m.KNOWN_WRONG_PH))
+        for wrong in self.m.KNOWN_TWIN:                                        # a twin link only for a kept-out row
+            self.assertIn(wrong, self.m.KNOWN_WRONG_PH)
+        for code in ("0014285003045", "4801668100301", "0074848570001", "4806514101358", "4800249006773"):
+            self.assertIn(code, self.m.KNOWN_WRONG_PH)                         # second fix pass of step 7
+        self.assertEqual(self.m.KNOWN_TWIN["0014285003045"], "4801668609378")
+        self.assertNotIn("4806026200594", self.m.KNOWN_PER_PACK)               # sugar-free syrup: 83 is per 100 g
+        syrup = self.row("Pancke Syrup", 83.333333, 0, 20, 0, brand="Clara Olé", barcode="4806026200594",
+                         portions=[["30.0g", 30]])
+        self.assertFalse(self.m.known_per_pack_fix(syrup))
+        self.assertEqual(self.fix(syrup, serving_size="30.0g", serving_g=30), "")
+        self.assertAlmostEqual(syrup["calories_kcal"], 83.333333)
+        # figures doubled by hand from a 50 g serving: the listed barcode is left alone, another one is re-based
+        for code, expected, kcal in (("4808887012781", "", 114), ("4800000000000", "rebased", 228)):
+            beef = self.row("Bongga Corned Beef", 114, 8, 4, 6, brand="Purefoods", barcode=code,
+                            portions=[["50 g", 50]])
+            self.assertEqual(self.fix(beef, serving_size="50 g", serving_g=50, quantity="150 g"), expected)
+            self.assertAlmostEqual(beef["calories_kcal"], kcal)
+        kaya = self.row("Nonya Kaya", 48, 0.8, 8.1, 1.4, brand="Nanyang", barcode="8888015670621",
+                        portions=[["1 tablespoon (100 g)", 100]])
+        self.assertTrue(self.m.known_per_pack_fix(kaya))
+        self.assertAlmostEqual(kaya["calories_kcal"], 320)
+        self.assertEqual(kaya["portions"], [["1 tbsp (15 g)", 15, "serving"]])
 
 
 def make_photo(code, version=3):
